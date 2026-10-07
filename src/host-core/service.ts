@@ -29,7 +29,7 @@ import {
   sessionsDirFor,
   writeSessionIndex,
 } from './sessions.ts'
-import { createChatModelFn, loadHostRuntime } from './model.ts'
+import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
 import type { HostModelFn } from './types.ts'
 
@@ -138,18 +138,22 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const root = registry.pathOf(workspaceId)
         const sessionId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
         mkdirSync(sessionsDirFor(root), { recursive: true })
-        // 模型装配先于句柄（configModel 锚点）；装配失败不阻塞建会话——sendTurn 时 fail-visible
-        let runtime: ReturnType<typeof loadHostRuntime> | null = null
+        // 模型装配先于句柄（configModel 锚点）；装配失败不阻塞建会话，
+        // 但原因必须回到渲染层（modelError——S2 修补：禁吞 console）
+        let runtime: HostRuntime | null = null
+        let modelError: string | null = null
         try {
-          runtime = loadHostRuntime(root)
+          runtime = await loadHostRuntime(root)
         } catch (err) {
-          console.error('[host] 模型未装配（会话可建，turn 发送将被拒绝）：', err instanceof Error ? err.message : err)
+          modelError = err instanceof Error ? err.message : String(err)
+          console.error('[host] 模型未装配（会话已创建，turn 发送将被拒绝）：', modelError)
         }
         const handle = SessionHandle.createFresh({
           sessionId,
           workspaceId,
           workspaceRoot: root,
           configModel: runtime?.llm.model ?? null,
+          modelError,
           deps: depsFor(workspaceId, root),
         })
         if (opts.modelFnOverride) handle.attachModelFn(opts.modelFnOverride(handle))
@@ -170,7 +174,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
         writeSessionIndex(root, idx)
         const info = sessionInfo(root, workspaceId, sessionId)
-        return info satisfies SessionInfo
+        return { ...info, modelError } satisfies SessionInfo
       }
       case IpcChannel.SessionList: {
         const workspaceId = requireString(p.workspaceId, 'workspaceId')
@@ -189,6 +193,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             eventCount: alive.log.events.length,
             title: alive.title,
             model: alive.sessionModel,
+            modelError: alive.modelError,
             events: [...alive.knownEvents()],
           } satisfies SessionOpenResult
         }

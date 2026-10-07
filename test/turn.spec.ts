@@ -301,6 +301,28 @@ test('usage 聚合（usageOver 纯函数）：四分量求和 + 覆盖率（缺�
   assert.equal(u.coverage, 0.5) // 2 turn 中 1 turn 有 usage——缺失显性化
 })
 
+test('模型装配预热（S2 修补回归）：跨运行后建会话——loadHostRuntime 须自行 warm（未预热 = CAR-E-CONFIG 曾致装配失败被吞）', async () => {
+  // 复刻用户实态：上次运行注册了工作区（svc1 + warm），本次运行（svc2，缓存为空）直接建会话
+  const sharedUserData = tmpDir('ud-warm')
+  const root = tmpDir('ws-warm')
+  writeFileSync(join(root, 'car.config.ts'), "export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'test-model' } }\n", 'utf8')
+  const svc1 = createHostService({ userDataDir: sharedUserData, modelFnOverride: (h) => async () => emitAssistant(h, { stopReason: 'stop', text: 'ok' }) })
+  await svc1.dispatch('workspace:register', { path: root })
+  const svc2 = createHostService({ userDataDir: sharedUserData, modelFnOverride: (h) => async () => emitAssistant(h, { stopReason: 'stop', text: 'ok' }) })
+  const ws2 = (await svc2.dispatch('workspace:list')).find((w) => (w as WorkspaceInfo).path === root) as WorkspaceInfo
+  const sess = (await svc2.dispatch('session:create', { workspaceId: ws2.id })) as { modelError?: string | null }
+  assert.equal(sess.modelError ?? null, null, `模型装配失败（预热缺口回归）：${sess.modelError}`)
+})
+
+test('模型装配失败可见性（S2 修补回归）：无 llm 配置的工作区建会话 → modelError 带引导文案（禁吞 console）', async () => {
+  const userData = tmpDir('ud-nollm')
+  const root = tmpDir('ws-nollm') // 无 car.config
+  const svc = createHostService({ userDataDir: userData, modelFnOverride: (h) => async () => emitAssistant(h, { stopReason: 'stop', text: 'ok' }) })
+  const ws = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
+  const sess = (await svc.dispatch('session:create', { workspaceId: ws.id })) as { modelError?: string | null }
+  assert.match(String(sess.modelError), /CAR-E-LLM-CONFIG/)
+})
+
 test('probe（S1 回归）：seam 版本形态 + 宿主消费符号在位', () => {
   const svc = createHostService({ userDataDir: tmpDir('probe') })
   return svc.dispatch('host:probe').then((p) => {

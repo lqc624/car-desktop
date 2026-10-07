@@ -42,6 +42,8 @@ interface HandleInit {
   workspaceRoot: string
   /** config llm.model 锚点（model/set 会话覆盖前的初值） */
   configModel: string | null
+  /** 模型装配失败原因（S2 修补：建会话当场 fail-visible，禁吞 console） */
+  modelError: string | null
   deps: SessionHandleDeps
 }
 
@@ -52,6 +54,7 @@ export class SessionHandle {
   readonly resumable = true
   readonly log: SessionLog
   sessionModel: string | null
+  readonly modelError: string | null
   title = '未命名会话'
   busy = false
   readonly abort = { aborted: false }
@@ -71,6 +74,7 @@ export class SessionHandle {
     this.workspaceId = init.workspaceId
     this.workspaceRoot = init.workspaceRoot
     this.sessionModel = init.configModel
+    this.modelError = init.modelError
     this.deps = init.deps
     this.store = new SessionFileStore(init.deps.sessionsDir + '/' + init.sessionId + '.jsonl')
     this.log = new SessionLog(init.sessionId)
@@ -113,7 +117,9 @@ export class SessionHandle {
     if (this.busy) throw new Error('CAR-E-DESKTOP: 上一 turn 仍在进行（停止或等待收口后再发）')
     if (!this.modelFn) {
       throw new Error(
-        'CAR-E-LLM-CONFIG: 模型回调未装配——需要 car.config llm（baseUrl+model）与凭据（OPENAI_API_KEY / ANTHROPIC_API_KEY）',
+        'CAR-E-LLM-CONFIG: 模型回调未装配——需要 car.config llm（baseUrl+model）与凭据' +
+          '（OPENAI_API_KEY / ANTHROPIC_API_KEY；env 兜底需 CAR_ALLOW_ENV_CREDENTIALS=1——' +
+          '内核适配器 resolve 未透传 llm.allowEnvFallback，接线缺口已登记）',
       )
     }
     this.busy = true

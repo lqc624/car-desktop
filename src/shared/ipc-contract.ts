@@ -89,6 +89,11 @@ export interface SessionInfo {
   eventCount: number
   /** 展示标题 = 最近一次 session/rename 事件；无 = 「未命名会话」 */
   title: string
+  /**
+   * 仅 session:create / session:open 响应携带：模型装配失败原因（S2 修补——
+   * 失败禁吞进 console，建会话当场 fail-visible）；装配成功 = null/缺省
+   */
+  modelError?: string | null
 }
 
 /**
@@ -152,6 +157,8 @@ export interface SessionOpenResult {
   title: string
   /** 当前会话模型（config llm.model 锚点 / model/set 后为会话覆盖值） */
   model: string | null
+  /** 模型装配失败原因（alive 句柄；只读回放恒无模型面 = null） */
+  modelError?: string | null
   /** 全量回放（R-4：一次批量；此后增量经 IpcPushTopic.SessionEvent） */
   events: SessionEventDTO[]
 }

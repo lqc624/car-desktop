@@ -19,6 +19,7 @@ import {
   CredentialService,
   loadCarConfig,
   mergeLlmConfig,
+  warmCarConfig,
   type LlmAdapter,
 } from '@lqc123qwe/car-runtime'
 import type { HostModelFn, HostToolDef } from './types.ts'
@@ -32,8 +33,10 @@ export interface HostRuntime {
 }
 
 /** 装载工作区 LLM 运行时；模型配置缺失/无效 fail-visible（引导配置，禁静默降级） */
-export function loadHostRuntime(workspaceRoot: string): HostRuntime {
-  // 注册时已 warm+load 校验过；此处重载取 llm 键位（打开会话时点最新值）
+export async function loadHostRuntime(workspaceRoot: string): Promise<HostRuntime> {
+  // cli.ts 生产顺序（S2 修补：先 warm 后 load——car.config.ts 未预热 = CAR-E-CONFIG，
+  // 跨运行重建的进程缓存为空，工作区来自上次注册时此缺口必现）
+  await warmCarConfig({ cwd: workspaceRoot })
   const loaded = loadCarConfig({ cwd: workspaceRoot })
   if (loaded.error) throw new Error(loaded.error)
   const llm = mergeLlmConfig(process.env, loaded.config, {})

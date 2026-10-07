@@ -235,6 +235,7 @@ export function App() {
       setUsage(await window.car.sessionUsage(selected.id, sessionId))
       setPending(null)
       setBusy(false)
+      if (r.modelError) setError(`模型未装配（turn 发送将被拒绝）：${r.modelError}`)
     } catch (e) {
       fail(e)
     }
@@ -244,9 +245,13 @@ export function App() {
     if (!selected) return
     setError(null)
     try {
-      await window.car.createSession(selected.id)
+      const info = await window.car.createSession(selected.id)
       await refreshSessions(selected.id)
-      setStatus('已新建会话（session-start 已落链）')
+      if (info.modelError) {
+        setError(`会话已创建，但模型未装配（turn 发送将被拒绝）：${info.modelError}`)
+      } else {
+        setStatus('已新建会话（session-start 已落链）')
+      }
     } catch (e) {
       fail(e)
     }
