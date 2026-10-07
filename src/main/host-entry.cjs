@@ -4,11 +4,13 @@
  * 形态裁决：utilityProcess 入口用 CJS + 动态 import() 装载 ESM 宿主核心
  * （host-core.mjs）——该组合在全部 Electron 版本上通用，不押注 utilityProcess
  * 的 ESM 直入支持矩阵；宿主核心保持 ESM 原生（与内核 dist/seam.js 同构）。
- * 本文件为纯转发 shim（~25 行，无业务逻辑），不进 tsc strict 检查面
+ * 本文件为纯转发 shim（无业务逻辑），不进 tsc strict 检查面
  * （类型契约两端由 shared/ipc-contract.ts 与 host-core dispatch switch 承载），
- * 行为正确性由 CAR_SMOKE 全链冒烟覆盖。
+ * 行为正确性由 CAR_SMOKE 全链冒烟 + node:test E2E 覆盖。
  *
- * 消息协议（与 main.ts 对拍）：{ reqId, channel, payload } → { reqId, result } | { reqId, error }
+ * 消息协议（与 main.ts 对拍）：
+ *  - 请求：{ reqId, channel, payload } → { reqId, result } | { reqId, error }
+ *  - 推送：{ push: true, topic, payload }（S2：会话事件流 / 授权 pending+resolved）
  */
 'use strict'
 
@@ -16,9 +18,12 @@ let servicePromise = null
 
 function getService() {
   if (!servicePromise) {
-    servicePromise = import('./host-core.mjs').then((mod) =>
-      mod.createHostService({ userDataDir: process.env.CAR_USER_DATA || '' }),
-    )
+    servicePromise = import('./host-core.mjs').then((mod) => {
+      const svc = mod.createHostService({ userDataDir: process.env.CAR_USER_DATA || '' })
+      // 推送出口：宿主 emit → parentPort → main → webContents.send → preload 订阅
+      svc.onPush((m) => process.parentPort.postMessage({ push: true, topic: m.topic, payload: m.payload }))
+      return svc
+    })
   }
   return servicePromise
 }

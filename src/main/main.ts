@@ -8,12 +8,13 @@
  *  4. sandbox: true（preload 受限集：contextBridge + ipcRenderer）
  * CSP 由 renderer index.html meta 承载（file:// 形态）。
  *
- * 宿主进程 = utilityProcess（R-D3）：main.cjs 只做窗口/生命周期/IPC 转发，
- * seam 消费全部在 host-entry.cjs + host-core.mjs（宿主核心 ESM bundle）。
+ * 宿主进程 = utilityProcess（R-D3）：main.cjs 只做窗口/生命周期/IPC 转发。
+ * S2：请求/响应（ipcMain.handle ↔ reqId 映射）+ 推送转发（宿主 push → 全部窗口
+ * webContents.send，主题白名单 = IpcPushTopic）。
  */
 import { app, BrowserWindow, dialog, ipcMain, utilityProcess } from 'electron'
 import path from 'node:path'
-import { IpcChannel, type WorkspaceInfo } from '../shared/ipc-contract.ts'
+import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 
 const HOST_TIMEOUT_MS = 20_000
 
@@ -29,7 +30,15 @@ function ensureHost(): ReturnType<typeof utilityProcess.fork> {
     env: { ...process.env, CAR_USER_DATA: app.getPath('userData') },
   })
   hostProc.on('message', (raw: unknown) => {
-    const msg = raw as { reqId?: number; result?: unknown; error?: string }
+    const msg = raw as { reqId?: number; result?: unknown; error?: string; push?: boolean; topic?: string; payload?: unknown }
+    // S2 推送面：宿主 emit → 全部窗口广播（主题白名单校验——非契约主题丢弃）
+    if (msg?.push === true) {
+      if (typeof msg.topic !== 'string' || !Object.values(IpcPushTopic).includes(msg.topic as IpcPushTopicName)) return
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(msg.topic, msg.payload)
+      }
+      return
+    }
     if (typeof msg?.reqId !== 'number' || !pending.has(msg.reqId)) return
     const p = pending.get(msg.reqId)!
     pending.delete(msg.reqId)
@@ -87,6 +96,29 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SessionOpen, (_event, payload: { workspaceId: string; sessionId: string }) =>
     callHost(IpcChannel.SessionOpen, payload),
   )
+  ipcMain.handle(IpcChannel.TurnSend, (_event, payload: { workspaceId: string; sessionId: string; text: string }) =>
+    callHost(IpcChannel.TurnSend, payload),
+  )
+  ipcMain.handle(IpcChannel.TurnAbort, (_event, payload: { workspaceId: string; sessionId: string }) =>
+    callHost(IpcChannel.TurnAbort, payload),
+  )
+  ipcMain.handle(
+    IpcChannel.AuthzRespond,
+    (_event, payload: { workspaceId: string; sessionId: string; requestId: string; decision: 'once' | 'session' | 'deny' }) =>
+      callHost(IpcChannel.AuthzRespond, payload),
+  )
+  ipcMain.handle(IpcChannel.SessionUsage, (_event, payload: { workspaceId: string; sessionId: string }) =>
+    callHost(IpcChannel.SessionUsage, payload),
+  )
+  ipcMain.handle(IpcChannel.SessionRename, (_event, payload: { workspaceId: string; sessionId: string; title: string }) =>
+    callHost(IpcChannel.SessionRename, payload),
+  )
+  ipcMain.handle(IpcChannel.SessionDelete, (_event, payload: { workspaceId: string; sessionId: string }) =>
+    callHost(IpcChannel.SessionDelete, payload),
+  )
+  ipcMain.handle(IpcChannel.SessionSetModel, (_event, payload: { workspaceId: string; sessionId: string; model: string }) =>
+    callHost(IpcChannel.SessionSetModel, payload),
+  )
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {
@@ -115,7 +147,7 @@ app.whenReady().then(async () => {
     // （renderer preload 桥 → ipcMain → utilityProcess → host-core → seam 顶层入口）
     try {
       const bridgeOk = await win.webContents.executeJavaScript(
-        "!!window.car && typeof window.car.probe === 'function'",
+        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function'",
       )
       const probe = (await win.webContents.executeJavaScript('window.car.probe()')) as {
         seamVersion?: string
