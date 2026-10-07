@@ -1,0 +1,52 @@
+# CI 门禁矩阵（桌面端 v0.1-S1：j-d1 typecheck / j-d2 test+gates / j-d3 audit+secrets）
+#
+# 口径：
+#  - node 22.19 钉版（内核/平台同款——满足内核 engines >=22.19 且与基线测试形态一致）；
+#  - 测试 Job 禁止重试（内核 M2 §2.4 纪律平移）；
+#  - typecheck 范围 = node 侧（main/preload/shared/host-core/test）+ renderer 侧双配置；
+#    host-entry.cjs 为纯转发 shim 不进 tsc 面（行为由 CAR_SMOKE 与测试承载——S1 收口报告 D-S1-3 登记）；
+#  - Electron 打包（electron-builder）与 GUI 冒烟不在 CI——S4 批次 + 用户终端方案 B；
+#  - S1 不 push（Q-3 默认）：本 workflow 首跑随首推联动（挂起登记，不阻塞 S1-GO）。
+name: ci
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  jd1-typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19' }
+      - run: npm install
+      - name: typecheck（strict：node 侧 + renderer 侧）
+        run: |
+          npx -y -p typescript tsc --noEmit -p tsconfig.json
+          npx -y -p typescript tsc --noEmit -p tsconfig.renderer.json
+
+  jd2-test-gates:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19' }
+      - run: npm install
+      - name: node --test（宿主核心行为 + 双门禁用例；glob 形式 + TAP 钉死）
+        run: npm test
+
+  jd3-audit-secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19' }
+      - run: npm install
+      - name: 依赖审计（非阻塞登记——升级为阻塞需评审）
+        run: npm audit --omit=dev --audit-level=high || echo "::warning::npm audit findings — 见日志"
+      - name: 密钥扫描（fail-closed；commit 后须复跑）
+        run: node --experimental-transform-types scripts/secrets-scan.ts

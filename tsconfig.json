@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/main/**/*", "src/shared/**/*", "src/host-core/**/*", "scripts/**/*"]
+  // test/ 为宽松 fixture 风格由 node --experimental-transform-types 运行时承载（内核 house 口径），
+  // 不进 strict typecheck 面——显式登记，非遗漏
+
+}

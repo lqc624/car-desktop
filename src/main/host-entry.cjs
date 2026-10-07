@@ -1,0 +1,34 @@
+/**
+ * utilityProcess 入口（CJS shim，S1 规划 D-S1-3 回退链第 1 落点）
+ *
+ * 形态裁决：utilityProcess 入口用 CJS + 动态 import() 装载 ESM 宿主核心
+ * （host-core.mjs）——该组合在全部 Electron 版本上通用，不押注 utilityProcess
+ * 的 ESM 直入支持矩阵；宿主核心保持 ESM 原生（与内核 dist/seam.js 同构）。
+ * 本文件为纯转发 shim（~25 行，无业务逻辑），不进 tsc strict 检查面
+ * （类型契约两端由 shared/ipc-contract.ts 与 host-core dispatch switch 承载），
+ * 行为正确性由 CAR_SMOKE 全链冒烟覆盖。
+ *
+ * 消息协议（与 main.ts 对拍）：{ reqId, channel, payload } → { reqId, result } | { reqId, error }
+ */
+'use strict'
+
+let servicePromise = null
+
+function getService() {
+  if (!servicePromise) {
+    servicePromise = import('./host-core.mjs').then((mod) =>
+      mod.createHostService({ userDataDir: process.env.CAR_USER_DATA || '' }),
+    )
+  }
+  return servicePromise
+}
+
+process.parentPort.on('message', (event) => {
+  const data = (event && event.data) || {}
+  const { reqId, channel, payload } = data
+  if (typeof reqId !== 'number') return
+  getService()
+    .then((svc) => svc.dispatch(channel, payload))
+    .then((result) => process.parentPort.postMessage({ reqId, result }))
+    .catch((err) => process.parentPort.postMessage({ reqId, error: String((err && err.message) || err) }))
+})
