@@ -35,6 +35,18 @@ const bridge: CarBridge = {
   deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionDelete, { workspaceId, sessionId }),
   setSessionModel: (workspaceId, sessionId, model) =>
     ipcRenderer.invoke(IpcChannel.SessionSetModel, { workspaceId, sessionId, model }),
+  // —— S3：文件安全 / 安全中心设置 / 会话策略 / 备份 / 审计 / 计量 ——
+  fileSecurityGet: () => ipcRenderer.invoke(IpcChannel.FileSecurityGet),
+  fileSecuritySet: (rules) => ipcRenderer.invoke(IpcChannel.FileSecuritySet, { rules }),
+  fileSecurityReset: () => ipcRenderer.invoke(IpcChannel.FileSecurityReset),
+  securitySettingsGet: () => ipcRenderer.invoke(IpcChannel.SecuritySettingsGet),
+  securitySettingsSet: (patch) => ipcRenderer.invoke(IpcChannel.SecuritySettingsSet, { patch }),
+  setSessionPolicy: (workspaceId, sessionId, policy) =>
+    ipcRenderer.invoke(IpcChannel.SessionSetPolicy, { workspaceId, sessionId, policy }),
+  openBackupDir: () => ipcRenderer.invoke(IpcChannel.BackupOpenDir),
+  auditReport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.AuditReport, { workspaceId, sessionId }),
+  auditExport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.AuditExport, { workspaceId, sessionId }),
+  meteringSummary: (workspaceId) => ipcRenderer.invoke(IpcChannel.MeteringSummary, { workspaceId }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),

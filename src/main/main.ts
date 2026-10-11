@@ -167,7 +167,7 @@ app.whenReady().then(async () => {
     // （renderer preload 桥 → ipcMain → utilityProcess → host-core → seam 顶层入口）
     try {
       const bridgeOk = await win.webContents.executeJavaScript(
-        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function'",
+        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function' && typeof window.car.auditReport === 'function' && typeof window.car.meteringSummary === 'function' && typeof window.car.fileSecurityGet === 'function'",
       )
       const probe = (await win.webContents.executeJavaScript('window.car.probe()')) as {
         seamVersion?: string

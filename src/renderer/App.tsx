@@ -6,9 +6,13 @@ import type {
   SessionEventDTO,
   SessionEventPush,
   SessionInfo,
+  SessionPolicyDTO,
   SessionUsageResult,
   WorkspaceInfo,
 } from '../shared/ipc-contract'
+import { AuditView } from './views/AuditView'
+import { DashView } from './views/DashView'
+import { SecurityView } from './views/SecurityView'
 
 /**
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
@@ -94,6 +98,7 @@ function buildChatItems(events: SessionEventDTO[]): ChatItem[] {
       if (type === 'session-start') items.push({ kind: 'line', tone: 'dim', text: '会话已创建（session-start 已落链）' })
       else if (type === 'model/set') items.push({ kind: 'line', tone: 'dim', text: `模型切换 → ${String(p['model'] ?? '?')}（model/set 已落链）` })
       else if (type === 'session/rename') items.push({ kind: 'line', tone: 'dim', text: `会话重命名 → ${String(p['title'] ?? '?')}` })
+      else if (type === 'session/policy') items.push({ kind: 'line', tone: 'dim', text: `会话策略 → ${String(p['policy'] ?? '?')}（session/policy 已落链）` })
     }
     // kind usage：turnEnd 摘要已覆盖，不重复渲染
   }
@@ -121,6 +126,9 @@ export function App() {
   const [showCtx, setShowCtx] = useState(false)
   const [showModelInput, setShowModelInput] = useState(false)
   const [modelInput, setModelInput] = useState('')
+  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security'>('chat')
+  const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
+  const [showPolicy, setShowPolicy] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const openRef = useRef<{ wsId: string; sessionId: string } | null>(null)
 
@@ -232,6 +240,16 @@ export function App() {
       setOpenId(sessionId)
       setEvents(r.events)
       setSessionModel(r.model)
+      // 会话策略 = 链上最近一次 session/policy，无则回退安全中心默认值
+      const polEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'session/policy')
+      if (polEvent) {
+        setPolicy((polEvent.payload as Record<string, unknown>)['policy'] as SessionPolicyDTO)
+      } else {
+        window.car
+          .securitySettingsGet()
+          .then((s) => setPolicy(s.sessionDefaultPolicy))
+          .catch(() => setPolicy('default'))
+      }
       setUsage(await window.car.sessionUsage(selected.id, sessionId))
       setPending(null)
       setBusy(false)
@@ -327,6 +345,19 @@ export function App() {
       await window.car.setSessionModel(selected.id, openId, m.trim())
       setSessionModel(m.trim())
       setShowModelInput(false)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  const switchPolicy = async (p: SessionPolicyDTO) => {
+    if (!selected || !openId) return
+    setError(null)
+    setShowPolicy(false)
+    try {
+      await window.car.setSessionPolicy(selected.id, openId, p)
+      setPolicy(p)
+      setStatus(`会话策略 → ${p === 'default' ? '默认安全' : p === 'session' ? '会话内放行' : '只读模式'}（session/policy 已落链）`)
     } catch (e) {
       fail(e)
     }
@@ -429,6 +460,36 @@ export function App() {
         </div>
 
         <div className="foot">事件级流式 · 与审计 JSONL 同源同序 · S2 会话主旅程</div>
+
+        <div className="sec">治理</div>
+        <div className="nav">
+          <button className={`item ${view === 'audit' ? 'sel' : ''}`} onClick={() => setView('audit')}>
+            <span className="ico">≡</span>
+            <span>
+              <b>审计流水</b>
+              <small>链校验 · 断链定位 · 取证</small>
+            </span>
+          </button>
+          <button className={`item ${view === 'dash' ? 'sel' : ''}`} onClick={() => setView('dash')}>
+            <span className="ico">▦</span>
+            <span>
+              <b>仪表盘</b>
+              <small>计量 · 按模型 · turn 明细</small>
+            </span>
+          </button>
+          <button className={`item ${view === 'security' ? 'sel' : ''}`} onClick={() => setView('security')}>
+            <span className="ico">⛨</span>
+            <span>
+              <b>安全中心</b>
+              <small>文件规则 · 备份 · 策略</small>
+            </span>
+          </button>
+        </div>
+        {view !== 'chat' && (
+          <button className="btn" style={{ margin: '8px 10px' }} onClick={() => setView('chat')}>
+            ← 返回会话
+          </button>
+        )}
       </aside>
 
       <main className="main">
@@ -439,9 +500,38 @@ export function App() {
         )}
         {status && <div className="status">{status}</div>}
 
-        {openId && selected ? (
+        {view === 'audit' ? (
+          <AuditView selected={selected} sessions={sessions} />
+        ) : view === 'dash' ? (
+          <DashView selected={selected} />
+        ) : view === 'security' ? (
+          <SecurityView />
+        ) : openId && selected ? (
           <section className="chat">
             <div className="chat-toolbar">
+              <div style={{ position: 'relative' }}>
+                <button className="pill" onClick={() => setShowPolicy((v) => !v)} title="会话授权策略（切换落链 session/policy）">
+                  🛡 {policy === 'default' ? '默认安全' : policy === 'session' ? '会话内放行' : '只读模式'} ▾
+                </button>
+                {showPolicy && (
+                  <div className="ctx-pop policy-menu">
+                    {(
+                      [
+                        ['default', '默认安全', '规则外操作弹审批门 · 120s 超时默认拒绝'],
+                        ['session', '会话内放行', '工具调用自动批准（拒绝红线仍先决）· 逐次 policy 落链'],
+                        ['readonly', '只读模式', '写/删一律拒绝留痕 · 查询类照常（凭据目录询问档不削弱）'],
+                      ] as const
+                    ).map(([p, label, desc]) => (
+                      <button key={p} className={`btn ${policy === p ? 'primary' : ''}`} onClick={() => void switchPolicy(p)}>
+                        {label}
+                        <small className="dim" style={{ display: 'block', fontWeight: 400 }}>
+                          {desc}
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button className="pill" onClick={() => setShowModelInput((v) => !v)} title="切换模型（model/set 落链）">
                 模型：{sessionModel ?? '未配置'} ▾
               </button>
@@ -559,8 +649,9 @@ export function App() {
           <section className="card">
             <h2>会话主旅程</h2>
             <p className="dim">
-              选择/新建会话开始。S2 能力：chat 事件级流式 · M3 授权门三档（120s 超时默认拒绝）·
-              停止 · ctx-pop 用量 · 会话重命名/删除留痕 · 模型切换（model/set 落链）。
+              选择/新建会话开始。S3 能力：chat 事件级流式 · M3 授权门三档（120s 超时默认拒绝）·
+              文件安全规则（安全中心）· 自动备份 · 会话策略三档 · 审计流水（链校验/取证导出）·
+              计量仪表盘 · 跨运行续写。
             </p>
           </section>
         )}

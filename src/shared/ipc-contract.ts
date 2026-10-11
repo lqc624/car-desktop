@@ -392,6 +392,20 @@ export interface CarBridge {
   renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionInfo>
   deleteSession(workspaceId: string, sessionId: string): Promise<void>
   setSessionModel(workspaceId: string, sessionId: string, model: string): Promise<void>
+  // —— S3：文件安全设置面（安全中心页） ——
+  fileSecurityGet(): Promise<FileSecurityState>
+  fileSecuritySet(rules: FileRuleDTO[]): Promise<FileSecurityState>
+  fileSecurityReset(): Promise<FileSecurityState>
+  // —— S3：安全中心设置（默认策略 + 备份开关/上限） ——
+  securitySettingsGet(): Promise<SecuritySettings>
+  securitySettingsSet(patch: SecuritySettingsPatch): Promise<SecuritySettings>
+  setSessionPolicy(workspaceId: string, sessionId: string, policy: SessionPolicyDTO): Promise<{ ok: boolean; policy: SessionPolicyDTO }>
+  openBackupDir(): Promise<{ ok: boolean; error?: string }>
+  // —— S3-S4：审计报告 / 取证导出（审计页） ——
+  auditReport(workspaceId: string, sessionId: string): Promise<AuditReport>
+  auditExport(workspaceId: string, sessionId: string): Promise<AuditExportResult>
+  // —— S3-S5：计量汇总（仪表盘计量区） ——
+  meteringSummary(workspaceId: string): Promise<MeteringSummary>
   // —— 推送订阅（返回退订函数；preload 内持 ipcRenderer，渲染层零逃逸） ——
   onSessionEvent(cb: (p: SessionEventPush) => void): () => void
   onAuthzPending(cb: (p: AuthzPendingPush) => void): () => void
