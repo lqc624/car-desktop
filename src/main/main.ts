@@ -134,6 +134,9 @@ function registerIpc(): void {
     const err = await shell.openPath(dir)
     return err ? { ok: false, error: err } : { ok: true }
   })
+  // —— S3-S4：审计报告 / 取证包导出（宿主载入面 + 内核链校验单点） ——
+  ipcMain.handle(IpcChannel.AuditReport, (_event, payload: unknown) => callHost(IpcChannel.AuditReport, payload))
+  ipcMain.handle(IpcChannel.AuditExport, (_event, payload: unknown) => callHost(IpcChannel.AuditExport, payload))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

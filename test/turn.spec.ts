@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import { createHostService, type HostService, type PushMessage } from '../src/host-core/service.ts'
 import { sessionsDirFor } from '../src/host-core/sessions.ts'
 import { usageOver, type SessionHandle } from '../src/host-core/session-handle.ts'
-import type { AuthzPendingPush, AuthzResolvedPush, HostProbeResult, SessionEventDTO, SessionEventPush, WorkspaceInfo } from '../src/shared/ipc-contract.ts'
+import type { AuditReport, AuthzPendingPush, AuthzResolvedPush, HostProbeResult, SessionEventDTO, SessionEventPush, WorkspaceInfo } from '../src/shared/ipc-contract.ts'
 import type { HostModelFn, HostModelStep } from '../src/host-core/types.ts'
 
 function tmpDir(label: string): string {
@@ -268,22 +268,36 @@ test('多会话隔离：A 会话 grant 不泄漏到 B（B 独立弹窗）', asyn
   await waitForTurnEnd(env, tB.turnId)
 })
 
-test('跨运行只读语义（D-S2-6）：新进程打开旧会话可回放、续写 fail-visible（内核恢复面候选登记）', async () => {
+test('跨运行续写（S3-S4，D-S2-6 退役）：新进程打开旧会话可回放，续写解锁且链完整', async () => {
   // 「先前运行」模拟：新 service 实例（新注册表/新句柄表）+ 同一工作区
   const env = await makeEnv((h) => async () => emitAssistant(h, { stopReason: 'stop', text: '旧会话内容' }))
   const sid = env.sess.sessionId
+  const t1 = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: sid, text: '旧' })) as { turnId: string }
+  await waitForTurnEnd(env, t1.turnId)
   const svc2 = createHostService({
     userDataDir: tmpDir('ud2'),
-    modelFnOverride: (h) => async () => emitAssistant(h, { stopReason: 'stop', text: 'x' }),
+    modelFnOverride: (h) => async () => emitAssistant(h, { stopReason: 'stop', text: '续写内容' }),
   })
+  const pushes2: PushMessage[] = []
+  svc2.onPush((m) => pushes2.push(m))
   const ws2 = (await svc2.dispatch('workspace:register', { path: env.root })) as WorkspaceInfo
   const opened = (await svc2.dispatch('session:open', { workspaceId: ws2.id, sessionId: sid })) as { events: SessionEventDTO[]; exists: boolean }
   assert.equal(opened.exists, true)
   assert.ok(opened.events.some((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'session-start'))
-  await assert.rejects(
-    () => svc2.dispatch('turn:send', { workspaceId: ws2.id, sessionId: sid, text: '续写' }),
-    (err: Error) => /不可续写|只读回放/.test(err.message),
-  )
+  // 旧语义（S2 D-S2-6）：续写 fail-visible 只读回放 → S3-S4 解锁：惰性重建句柄续写成功
+  const sent = (await svc2.dispatch('turn:send', { workspaceId: ws2.id, sessionId: sid, text: '续写' })) as { turnId: string }
+  const deadline = Date.now() + 5000
+  for (;;) {
+    const evts = pushes2.filter((m) => m.topic === 'push:session-event').map((m) => (m.payload as SessionEventPush).event)
+    if (evts.some((e) => e.kind === 'turnEnd' && e.turnId === sent.turnId)) break
+    if (Date.now() > deadline) throw new Error('续写 turn 未收口')
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  // 链完整 + turn 不撞号（旧 T1 + 新 T2）
+  const report = (await svc2.dispatch('audit:report', { workspaceId: ws2.id, sessionId: sid })) as AuditReport
+  assert.equal(report.chain.intact, true, '续写后链完整')
+  const turnIds = new Set(report.events.map((e) => e.turnId).filter((t) => /^T\d+$/.test(t)))
+  assert.ok(turnIds.has('T1') && turnIds.has(sent.turnId) && turnIds.size >= 2, '新旧 turn 不撞号')
 })
 
 test('usage 聚合（usageOver 纯函数）：四分量求和 + 覆盖率（缺失显性化，禁估算）', () => {

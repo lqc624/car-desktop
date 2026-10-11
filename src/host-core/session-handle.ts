@@ -83,7 +83,7 @@ export class SessionHandle {
   private currentTurnIdValue = ''
   private readonly deps: SessionHandleDeps
 
-  private constructor(init: HandleInit) {
+  private constructor(init: HandleInit, opts: { log?: SessionLog; turnSeq?: number } = {}) {
     this.sessionId = init.sessionId
     this.workspaceId = init.workspaceId
     this.workspaceRoot = init.workspaceRoot
@@ -91,7 +91,8 @@ export class SessionHandle {
     this.modelError = init.modelError
     this.deps = init.deps
     this.store = new SessionFileStore(init.deps.sessionsDir + '/' + init.sessionId + '.jsonl')
-    this.log = new SessionLog(init.sessionId)
+    this.log = opts.log ?? new SessionLog(init.sessionId)
+    this.turnSeq = opts.turnSeq ?? 0
     this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
     this.tools = builtinTools(
       init.workspaceRoot,
@@ -112,6 +113,21 @@ export class SessionHandle {
     const h = new SessionHandle(init)
     h.log.append('runtime', 'system', 'session', { type: 'session-start', workspaceId: init.workspaceId })
     return h
+  }
+
+  /**
+   * 跨运行续写重建（S3-S4，D-S2-6 退役）：log = 载入面产出的 SessionLog（链已验完整——
+   * 调用方 service 断链 fail-visible 前置），store 同路径 O_APPEND 续写零截断。
+   * turnSeq 对齐历史链（扫描既有 T<n> 取最大——新 turn 不与历史 turnId 撞号，usage 聚合按
+   * turnId 扫描，撞号即串账）；session-start 不补记（链上已有）。
+   */
+  static resume(init: HandleInit, log: SessionLog): SessionHandle {
+    let maxTurn = 0
+    for (const e of log.events) {
+      const m = /^T(\d+)$/.exec(e.turnId)
+      if (m) maxTurn = Math.max(maxTurn, Number(m[1]))
+    }
+    return new SessionHandle(init, { log, turnSeq: maxTurn })
   }
 
   /** 生产装配（service 调用）：chatStep 模型回调或测试覆盖 */

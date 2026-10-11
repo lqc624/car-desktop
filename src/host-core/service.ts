@@ -7,7 +7,9 @@
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
 import { randomBytes } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { loadSessionLog } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
   IpcPushTopic,
@@ -22,6 +24,7 @@ import { probeSeam } from './probe.ts'
 import { WorkspaceRegistry } from './workspaces.ts'
 import { SessionHandle, usageOver, type AuthzResponse } from './session-handle.ts'
 import {
+  assertSafeId,
   listSessions,
   parseSessionEvents,
   readSessionIndex,
@@ -29,6 +32,7 @@ import {
   sessionsDirFor,
   writeSessionIndex,
 } from './sessions.ts'
+import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
@@ -133,6 +137,39 @@ export function createHostService(opts: HostServiceOptions): HostService {
     }
   }
 
+  /** 模型回调装配（session:create 与跨运行续写共用——modelFnOverride 优先，生产走 createChatModelFn） */
+  function attachRuntimeModel(handle: SessionHandle, runtime: HostRuntime | null, root: string): void {
+    if (opts.modelFnOverride) {
+      handle.attachModelFn(opts.modelFnOverride(handle))
+      return
+    }
+    if (runtime) {
+      handle.attachModelFn(
+        createChatModelFn({
+          runtime,
+          log: handle.log,
+          signal: handle.abort,
+          currentTurnId: () => handle.currentTurnId(),
+          currentModel: () => handle.sessionModel ?? '',
+          toolDefs: builtinTools(root, fileSecurity),
+        }),
+      )
+    }
+  }
+
+  /** 装载模型（configModel 锚点）；装配失败不阻塞会话面，原因必须回到渲染层（S2 修补：禁吞 console） */
+  async function loadRuntimeFor(root: string): Promise<{ runtime: HostRuntime | null; modelError: string | null }> {
+    let runtime: HostRuntime | null = null
+    let modelError: string | null = null
+    try {
+      runtime = await loadHostRuntime(root)
+    } catch (err) {
+      modelError = err instanceof Error ? err.message : String(err)
+      console.error('[host] 模型未装配（turn 发送将被拒绝）：', modelError)
+    }
+    return { runtime, modelError }
+  }
+
   async function dispatch(channel: string, payload: unknown): Promise<unknown> {
     const p = (payload ?? {}) as Record<string, unknown>
     switch (channel) {
@@ -151,16 +188,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const root = registry.pathOf(workspaceId)
         const sessionId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
         mkdirSync(sessionsDirFor(root), { recursive: true })
-        // 模型装配先于句柄（configModel 锚点）；装配失败不阻塞建会话，
-        // 但原因必须回到渲染层（modelError——S2 修补：禁吞 console）
-        let runtime: HostRuntime | null = null
-        let modelError: string | null = null
-        try {
-          runtime = await loadHostRuntime(root)
-        } catch (err) {
-          modelError = err instanceof Error ? err.message : String(err)
-          console.error('[host] 模型未装配（会话已创建，turn 发送将被拒绝）：', modelError)
-        }
+        const { runtime, modelError } = await loadRuntimeFor(root)
         const handle = SessionHandle.createFresh({
           sessionId,
           workspaceId,
@@ -169,19 +197,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           modelError,
           deps: depsFor(workspaceId, root),
         })
-        if (opts.modelFnOverride) handle.attachModelFn(opts.modelFnOverride(handle))
-        else if (runtime) {
-          handle.attachModelFn(
-            createChatModelFn({
-              runtime,
-              log: handle.log,
-              signal: handle.abort,
-              currentTurnId: () => handle.currentTurnId(),
-              currentModel: () => handle.sessionModel ?? '',
-              toolDefs: builtinTools(root, fileSecurity),
-            }),
-          )
-        }
+        attachRuntimeModel(handle, runtime, root)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
@@ -231,8 +247,42 @@ export function createHostService(opts: HostServiceOptions): HostService {
         } satisfies SessionOpenResult
       }
       case IpcChannel.TurnSend: {
-        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
-        return handle.sendTurn(requireString(p.text, 'text'))
+        const workspaceId = requireString(p.workspaceId, 'workspaceId')
+        const sessionId = requireString(p.sessionId, 'sessionId')
+        const text = requireString(p.text, 'text')
+        let handle = handles.get(key(workspaceId, sessionId))
+        if (!handle) {
+          // 跨运行续写（S3-S4，D-S2-6 退役）：载入面验链完整 → 重建可续写句柄（惰性，首次续写时）。
+          // 断链 fail-visible 拒绝续写（先修审计面）；已删除会话拒绝（索引面权威）。
+          const root = registry.pathOf(workspaceId)
+          assertSafeId('会话', sessionId)
+          const idx = readSessionIndex(root)
+          if (idx.sessions[sessionId]?.deleted) {
+            throw new Error(`CAR-E-DESKTOP: 会话已删除（${sessionId}）——拒绝续写`)
+          }
+          const file = join(sessionsDirFor(root), sessionId + '.jsonl')
+          if (!existsSync(file)) throw new Error(`CAR-E-DESKTOP: 会话不存在（${sessionId}）`)
+          const loaded = loadSessionLog(file)
+          if (loaded.brokenAt !== null) {
+            throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
+          }
+          const { runtime, modelError } = await loadRuntimeFor(root)
+          handle = SessionHandle.resume(
+            {
+              sessionId,
+              workspaceId,
+              workspaceRoot: root,
+              configModel: runtime?.llm.model ?? null,
+              modelError,
+              deps: depsFor(workspaceId, root),
+            },
+            loaded.log,
+          )
+          attachRuntimeModel(handle, runtime, root)
+          handle.title = idx.sessions[sessionId]?.title ?? '未命名会话'
+          handles.set(key(workspaceId, sessionId), handle)
+        }
+        return handle.sendTurn(text)
       }
       case IpcChannel.TurnAbort: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
@@ -322,6 +372,21 @@ export function createHostService(opts: HostServiceOptions): HostService {
         }
         return { ok: true, policy: handle.setPolicy(policy as SessionPolicy) }
       }
+      case IpcChannel.BackupOpenDir:
+        // 打开备份目录属 main 侧 shell 能力（host-core 零 Electron）——本通道在 main 内消化
+        throw new Error('CAR-E-DESKTOP: backup:open-dir 由 main 侧处理（契约通道误入宿主 dispatch）')
+      // —— S3-S4：审计报告 + 取证包导出（链校验单一权威在内核载入面） ——
+      case IpcChannel.AuditReport:
+        return sessionAuditReport(
+          registry.pathOf(requireString(p.workspaceId, 'workspaceId')),
+          requireString(p.sessionId, 'sessionId'),
+        )
+      case IpcChannel.AuditExport:
+        return exportSessionForensics(
+          registry.pathOf(requireString(p.workspaceId, 'workspaceId')),
+          requireString(p.sessionId, 'sessionId'),
+          opts.userDataDir,
+        )
       case IpcChannel.WorkspacePick:
         // 系统目录选择器属 main 侧能力（host-core 零 Electron）——本通道在 main 内消化，不入宿主
         throw new Error('CAR-E-DESKTOP: workspace:pick 由 main 侧处理（契约通道误入宿主 dispatch）')

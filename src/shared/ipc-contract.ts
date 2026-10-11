@@ -57,6 +57,11 @@ export const IpcChannel = {
   SessionSetPolicy: 'session:set-policy',
   /** 打开备份目录（main 侧 shell 能力——同 workspace:pick 先例，不入宿主 dispatch） */
   BackupOpenDir: 'backup:open-dir',
+  // —— S3-S4：审计报告 + 取证包导出（链校验单一权威在内核载入面——D-S3-6） ——
+  /** 审计报告：事件全集 + 链校验状态（断链定位 brokenAt） */
+  AuditReport: 'audit:report',
+  /** 取证包导出：断链即中止 + 落盘 userData/exports + 读回重验 */
+  AuditExport: 'audit:export',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -258,6 +263,37 @@ export interface SessionSetPolicyRequest {
   policy: SessionPolicyDTO
 }
 
+// ── 审计报告 / 取证包（S3-S4） ────────────────────────────────────────────
+
+export interface AuditChainStatus {
+  intact: boolean
+  /** 断链定位（内核 verifyChain 单点真值）；intact = null */
+  brokenAt: number | null
+}
+
+export interface AuditReport {
+  sessionId: string
+  eventCount: number
+  /** 事件全集（载入面读盘——链事实本体，与渲染层推送同构） */
+  events: SessionEventDTO[]
+  chain: AuditChainStatus
+  /** 撕裂尾（崩溃半行被丢弃的显性报告） */
+  tornTail: boolean
+  encoding: 'plain' | 'zstd'
+}
+
+export interface AuditExportResult {
+  ok: boolean
+  /** 导出目录（userData/exports/<sessionId>-<ts>） */
+  dir: string
+  files: string[]
+  eventCount: number
+  /** 读回重验：逐文件 SHA-256 + manifest 对拍 */
+  verify: { ok: boolean; brokenFile: string | null }
+  /** 读回重验：载入面链校验（恒 true——失败即 throw 隔离导出目录） */
+  chainIntact: boolean
+}
+
 /** 各通道请求载荷（宿主 dispatch 校验面） */
 export interface IpcRequestMap {
   [IpcChannel.HostProbe]: undefined
@@ -281,6 +317,8 @@ export interface IpcRequestMap {
   [IpcChannel.SecuritySettingsSet]: { patch: SecuritySettingsPatch }
   [IpcChannel.SessionSetPolicy]: SessionSetPolicyRequest
   [IpcChannel.BackupOpenDir]: undefined
+  [IpcChannel.AuditReport]: { workspaceId: string; sessionId: string }
+  [IpcChannel.AuditExport]: { workspaceId: string; sessionId: string }
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────
