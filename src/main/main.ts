@@ -139,6 +139,11 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.AuditExport, (_event, payload: unknown) => callHost(IpcChannel.AuditExport, payload))
   // —— S3-S5：计量聚合（价目未同步金额 = null，渲染层「价目未同步」） ——
   ipcMain.handle(IpcChannel.MeteringSummary, (_event, payload: unknown) => callHost(IpcChannel.MeteringSummary, payload))
+  // —— S4-S1：插件/MCP 只读装载面 ——
+  ipcMain.handle(IpcChannel.PluginsList, () => callHost(IpcChannel.PluginsList))
+  ipcMain.handle(IpcChannel.PluginsAdd, (_event, payload: unknown) => callHost(IpcChannel.PluginsAdd, payload))
+  ipcMain.handle(IpcChannel.PluginsRemove, (_event, payload: unknown) => callHost(IpcChannel.PluginsRemove, payload))
+  ipcMain.handle(IpcChannel.McpList, (_event, payload: unknown) => callHost(IpcChannel.McpList, payload))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

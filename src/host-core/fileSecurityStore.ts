@@ -46,8 +46,19 @@ export function createFileSecurityStore(userDataDir: string): FileSecurityStore 
   let current = load()
   return {
     get: () => current,
-    set(rules) {
-      current = persist({ ...validateFileSecuritySettings({ version: 1, rules, updatedAt: Date.now() }) })
+    set(input) {
+      // 两形态兼容：数组 = 仅文件规则（networkRules 保留现值）；对象 = 全量（version 1|2——v1 迁移 networkRules 为空）
+      let payload: Record<string, unknown>
+      if (Array.isArray(input)) payload = { version: 2, rules: input, networkRules: current.networkRules }
+      else {
+        const p = (input ?? {}) as Record<string, unknown>
+        payload = {
+          version: p['version'] ?? 2,
+          rules: p['rules'],
+          networkRules: Array.isArray(p['networkRules']) ? p['networkRules'] : p['version'] === 1 ? [] : current.networkRules,
+        }
+      }
+      current = persist(validateFileSecuritySettings({ ...validateFileSecuritySettings(payload), updatedAt: Date.now() }))
       return current
     },
     reset() {

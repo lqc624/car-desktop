@@ -21,6 +21,7 @@ import { runTurn, SessionFileStore, SessionLog, AuthzService, type AuthzRequest 
 import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsageResult } from '../shared/ipc-contract.ts'
 import { parseEventLine } from './model.ts'
 import { builtinTools, fileActionOf } from './tools.ts'
+import { mergeToolSources } from './toolSources.ts'
 import type { FileSecurityEngine } from './fileSecurity.ts'
 import type { BackupStore } from './backupStore.ts'
 import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts'
@@ -45,6 +46,10 @@ export interface SessionHandleDeps {
   securitySettings?: () => SecuritySettings
   /** 自动备份存储（S3-S3：先保后变；开关与配额经 securitySettings 即时生效） */
   backup?: BackupStore
+  /** S4：插件/MCP 工具源桥（builtin 之外并入 toolsMap——跨源同名在 mergeToolSources 显式报错） */
+  extraTools?: HostToolDef[]
+  /** S4：MCP 工具名 → 远程 server url（网络轴判定数据源；stdio 工具不在册） */
+  mcpToolUrl?: Map<string, string>
 }
 
 interface HandleInit {
@@ -75,6 +80,7 @@ export class SessionHandle {
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
   private readonly fileSecurity: FileSecurityEngine | null
+  private readonly mcpToolUrl: Map<string, string> | null
   private readonly grants = new Set<string>()
   private readonly tools: HostToolDef[]
   private modelFn: HostModelFn | null = null
@@ -94,11 +100,15 @@ export class SessionHandle {
     this.log = opts.log ?? new SessionLog(init.sessionId)
     this.turnSeq = opts.turnSeq ?? 0
     this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
-    this.tools = builtinTools(
-      init.workspaceRoot,
-      init.deps.fileSecurity,
-      init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
+    this.tools = mergeToolSources(
+      builtinTools(
+        init.workspaceRoot,
+        init.deps.fileSecurity,
+        init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
+      ),
+      init.deps.extraTools ?? [],
     )
+    this.mcpToolUrl = init.deps.mcpToolUrl ?? null
     this.fileSecurity = init.deps.fileSecurity ?? null
     this.authz = new AuthzService({ log: this.log, timeoutMs: init.deps.authzTimeoutMs })
     // 序 = 先落盘（fsync，fail-fast 保留）后推送（emit 永不 throw——推送失败不破坏落链）
@@ -218,16 +228,50 @@ export class SessionHandle {
    */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
     const action = fileActionOf(call.tool)
+    // capability 分派：fs 三件按动作（K-FS-3）；MCP 工具 = 'mcp'；未知工具按最高约束 fs-write（T-22）
     const capability: AuthzRequest['capability'] =
-      call.tool === 'fs_read' ? 'fs-read' : call.tool === 'fs_delete' ? 'fs-delete' : 'fs-write'
-    const resource = action && typeof call.args['path'] === 'string' ? String(call.args['path']) : describeResource(call.tool, call.args)
-    // ⓪会话策略「只读」：写/删（及未知工具——最高约束）一律拒；读取不在此拦截
+      call.tool === 'fs_read'
+        ? 'fs-read'
+        : call.tool === 'fs_delete'
+          ? 'fs-delete'
+          : call.tool.startsWith('mcp_')
+            ? 'mcp'
+            : 'fs-write'
+    const resource = action
+      ? typeof call.args['path'] === 'string'
+        ? String(call.args['path'])
+        : describeResource(call.tool, call.args)
+      : call.tool.startsWith('mcp_')
+        ? `${call.tool}（远程 MCP）`
+        : describeResource(call.tool, call.args)
+    // ⓪会话策略「只读」：写/删/未知类（MCP 工具副作用未知 = 按最高约束）一律拒；fs_read 不在此拦截
     if (this.policy === 'readonly' && action !== 'read') {
       this.authz.decideByRule(
         { authorizationId: `${this.sessionId}:policy-ro:${call.tool}:${call.id}`, actor: 'user', capability, resource },
         { decision: 'DENIED', reason: `session-policy:readonly deny ${action ?? call.tool}` },
       )
       return false
+    }
+    // ⓪′网络轴（S4：远程 MCP 工具——server url 判定，规则面先于一切；未命中 = ask 落入后续编排）
+    if (action === null && call.tool.startsWith('mcp_') && this.fileSecurity) {
+      const url = this.mcpToolUrl?.get(call.tool)
+      if (url) {
+        const nd = this.fileSecurity.decideNetwork(url)
+        if (nd) {
+          const netReq = {
+            authorizationId: `${this.sessionId}:net-rule:${call.tool}:${call.id}`,
+            actor: 'user' as const,
+            capability,
+            resource: url,
+          }
+          this.authz.decideByRule(netReq, {
+            decision: nd.tier === 'allow' ? 'APPROVED' : 'DENIED',
+            reason: `net-rule:${nd.rule.id} ${nd.tier} ${nd.rule.pattern}`,
+          })
+          return nd.tier === 'allow'
+        }
+        // 未命中 → ask（现行策略：MCP 工具全过人审门）——落入 grant 面 / 人审门
+      }
     }
     // ①规则面
     if (action && this.fileSecurity) {

@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
-    "test": "node --experimental-transform-types --test --test-reporter=tap \"test/*.spec.ts\"",
+    "test": "node --experimental-transform-types --test --test-reporter=tap --test-force-exit \"test/*.spec.ts\"",
     "build:main": "node scripts/build-main.mjs",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",

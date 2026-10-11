@@ -30,10 +30,22 @@ export interface FileRule {
   preset?: boolean
 }
 
+/**
+ * 网络规则（S4 网络轴——安全中心设计 §3）：pattern 两形态——
+ * ①域名（`example.com` 精确/子域，`*.example.com` 仅子域）；②URL 前缀（`https://api.example.com/v1`）。
+ * 消费面 = 远程 MCP 工具调用（server url 判定）；首条命中，未命中 = ask（现行策略：MCP 工具全过人审）。
+ */
+export interface NetworkRule {
+  id: string
+  pattern: string
+  tier: FileTier
+}
+
 export interface FileSecuritySettings {
-  version: 1
+  version: 2
   updatedAt: number
   rules: FileRule[]
+  networkRules: NetworkRule[]
 }
 
 export const FILE_TIERS: readonly FileTier[] = ['allow', 'ask', 'deny']
@@ -69,13 +81,13 @@ export function factoryFileSecuritySettings(userDataDir: string): FileSecuritySe
     // 最宽泛收尾：工作区内读无妨、写删要问
     { id: 'preset-workspace', path: '%WORKSPACE%\\', read: 'allow', write: 'ask', delete: 'ask', preset: true },
   ]
-  return { version: 1, updatedAt: Date.now(), rules }
+  return { version: 2, updatedAt: Date.now(), rules, networkRules: [] }
 }
 
-/** 设置面校验（fileSecurity:set 入口；违规 fail-visible，非法项拒绝而非静默修正） */
+/** 设置面校验（fileSecurity:set 入口；违规 fail-visible，非法项拒绝而非静默修正）。v1 载入向后兼容（networkRules 迁移为空） */
 export function validateFileSecuritySettings(input: unknown): FileSecuritySettings {
   const p = (input ?? {}) as Record<string, unknown>
-  if (p['version'] !== 1) throw new Error('CAR-E-DESKTOP: fileSecurity.set version 必须为 1')
+  if (p['version'] !== 1 && p['version'] !== 2) throw new Error('CAR-E-DESKTOP: fileSecurity.set version 必须为 1|2')
   const rawRules = p['rules']
   if (!Array.isArray(rawRules)) throw new Error('CAR-E-DESKTOP: fileSecurity.set 缺少 rules（数组）')
   if (rawRules.length > FILE_RULE_MAX) throw new Error(`CAR-E-DESKTOP: 规则数超上限（${FILE_RULE_MAX}）`)
@@ -97,7 +109,22 @@ export function validateFileSecuritySettings(input: unknown): FileSecuritySettin
     if (o['preset'] === true) rule.preset = true
     return rule
   })
-  return { version: 1, updatedAt: typeof p['updatedAt'] === 'number' ? p['updatedAt'] : Date.now(), rules }
+  const rawNet = p['networkRules']
+  const networkRules: NetworkRule[] = (rawRules === undefined && rawNet === undefined && p['version'] === 1 ? [] : Array.isArray(rawNet) ? rawNet : [])
+    .map((r, i) => {
+      const o = (r ?? {}) as Record<string, unknown>
+      const id = typeof o['id'] === 'string' && o['id'].trim() ? o['id'].trim() : `net-${i + 1}`
+      const pattern = o['pattern']
+      if (typeof pattern !== 'string' || pattern.trim().length === 0 || pattern.length > 512) {
+        throw new Error(`CAR-E-DESKTOP: 网络规则 #${i + 1} pattern 非法（域名 / *.域名 / http(s) 前缀）`)
+      }
+      const tier = o['tier']
+      if (typeof tier !== 'string' || !FILE_TIERS.includes(tier as FileTier)) {
+        throw new Error(`CAR-E-DESKTOP: 网络规则 #${i + 1}（${id}）tier 非法——仅 allow/ask/deny`)
+      }
+      return { id, pattern, tier: tier as FileTier }
+    })
+  return { version: 2, updatedAt: typeof p['updatedAt'] === 'number' ? p['updatedAt'] : Date.now(), rules, networkRules }
 }
 
 // ── 规范化管线（§6.1：变量展开 → resolve → realpath 最近存在祖先 → 大小写折叠/分隔符统一 → 段解析） ──
@@ -196,21 +223,26 @@ export interface FileSecurityEngine {
   decide(action: FileAction, rawPath: unknown, workspaceRoot: string): RuleDecision
   /** 执行面硬校验兜底（R-FS-3）：deny 规则命中 / 未命中-工作区外两种硬拒 → 错误消息；否则 null */
   hardReject(action: FileAction, rawPath: unknown, workspaceRoot: string): string | null
+  /** 网络轴判定（S4：远程 MCP 工具调用——server url 判定）；null = 未命中（fallback ask） */
+  decideNetwork(url: string): { tier: FileTier; rule: NetworkRule } | null
   settings(): FileSecuritySettings
 }
 
 export function createFileSecurityEngine(store: FileSecurityStoreLike): FileSecurityEngine {
   let cacheKey = ''
   let cachedRules: readonly FileRule[] = []
-  const rulesNow = (): readonly FileRule[] => {
+  let cachedNetwork: readonly NetworkRule[] = []
+  const settingsNow = (): FileSecuritySettings => {
     const s = store.get()
-    const key = JSON.stringify(s.rules)
+    const key = JSON.stringify(s.rules) + '|' + JSON.stringify(s.networkRules)
     if (key !== cacheKey) {
       cacheKey = key
       cachedRules = s.rules
+      cachedNetwork = s.networkRules
     }
-    return cachedRules
+    return s
   }
+  const rulesNow = (): readonly FileRule[] => (settingsNow(), cachedRules)
   const decide = (action: FileAction, rawPath: unknown, workspaceRoot: string): RuleDecision => {
     const warnings: string[] = []
     if (typeof rawPath !== 'string' || rawPath.trim().length === 0) {
@@ -240,6 +272,33 @@ export function createFileSecurityEngine(store: FileSecurityStoreLike): FileSecu
       }
       if (d.tier === 'fallback-outside') {
         return `CAR-E-DESKTOP: fs_${action} 目标越界（${String(rawPath)}）——未命中规则且位于工作区外`
+      }
+      return null
+    },
+    decideNetwork(url) {
+      settingsNow()
+      // 目标规范化：host + 完整 url 小写、去尾分隔符（与规则同构后匹配）
+      let host = ''
+      let full = ''
+      try {
+        const u = new URL(url)
+        host = u.hostname.toLowerCase()
+        full = (u.origin + u.pathname).replace(/\/+$/, '').toLowerCase()
+      } catch {
+        return null // 非 URL（如 stdio server）——网络轴不适用
+      }
+      for (const rule of cachedNetwork) {
+        const p = rule.pattern.trim().toLowerCase()
+        let hit = false
+        if (/^https?:\/\//.test(p)) {
+          hit = full.startsWith(p.replace(/\/+$/, ''))
+        } else if (p.startsWith('*.')) {
+          const suffix = p.slice(1) // '.example.com'
+          hit = host.endsWith(suffix)
+        } else {
+          hit = host === p || host.endsWith('.' + p)
+        }
+        if (hit) return { tier: rule.tier, rule }
       }
       return null
     },

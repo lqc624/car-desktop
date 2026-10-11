@@ -65,6 +65,14 @@ export const IpcChannel = {
   // —— S3-S5：计量聚合（usage 事实本体在会话 JSONL——禁估算；R-D5 价目两模式） ——
   /** 工作区计量汇总（四卡/7 日柱/按模型/turn 明细；价目未同步金额 = null 禁 0） */
   MeteringSummary: 'metrics:summary',
+  // —— S4-S1：插件/MCP 只读装载面（F-D4；授权门经工具调用留痕） ——
+  /** 插件登记清单 + 最近装载状态 */
+  PluginsList: 'plugins:list',
+  /** 登记插件（file + manifest；装载在下次会话创建时发生） */
+  PluginsAdd: 'plugins:add',
+  PluginsRemove: 'plugins:remove',
+  /** MCP 双传输状态 + 工具清单（car.config mcp.servers 驱动） */
+  McpList: 'mcp:list',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -372,6 +380,10 @@ export interface IpcRequestMap {
   [IpcChannel.AuditReport]: { workspaceId: string; sessionId: string }
   [IpcChannel.AuditExport]: { workspaceId: string; sessionId: string }
   [IpcChannel.MeteringSummary]: { workspaceId: string }
+  [IpcChannel.PluginsList]: undefined
+  [IpcChannel.PluginsAdd]: { file: string; manifest: { name: string; version: string } }
+  [IpcChannel.PluginsRemove]: { id: string }
+  [IpcChannel.McpList]: { workspaceId: string }
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────

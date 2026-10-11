@@ -30,6 +30,8 @@ export interface HostRuntime {
   core: RuntimeCore
   llm: ReturnType<typeof mergeLlmConfig>
   toolDefs: Array<{ name: string; description?: string; parameters?: unknown; declaredSideEffect: 'readonly' | 'write' }>
+  /** S4：MCP server 装载规格（car.config mcp.servers——schema zod 校验过；无登记 = 空对象） */
+  mcpServers: Record<string, { command?: string; url?: string; args?: string[]; env?: Record<string, string>; headers?: Record<string, string> }>
 }
 
 /** 装载工作区 LLM 运行时；模型配置缺失/无效 fail-visible（引导配置，禁静默降级） */
@@ -54,7 +56,7 @@ export async function loadHostRuntime(workspaceRoot: string): Promise<HostRuntim
     ? createAnthropicAdapter({ baseUrl: llm.baseUrl, credentials: credService, provider: 'anthropic' })
     : createOpenAICompatAdapter({ baseUrl: llm.baseUrl, credentials: credService, provider: 'openai-compat' })
   core.registerLlmAdapter(adapter, { default: true })
-  return { core, llm, toolDefs: [] }
+  return { core, llm, toolDefs: [], mcpServers: loaded.config.mcp?.servers ?? {} }
 }
 
 /** 生产 model 回调：chatStep 包装（内核 N1/脱敏/投影内嵌；模型名取会话态——D-S2-3 model/set 生效点） */

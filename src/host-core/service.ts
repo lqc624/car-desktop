@@ -34,13 +34,15 @@ import {
 } from './sessions.ts'
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
+import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
+import { warmCarConfig, loadCarConfig } from '@lqc123qwe/car-runtime'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
 import { createFileSecurityStore } from './fileSecurityStore.ts'
 import { createSecuritySettingsStore, type SessionPolicy } from './securitySettingsStore.ts'
 import { createBackupStore } from './backupStore.ts'
-import type { HostModelFn } from './types.ts'
+import type { HostModelFn, HostToolDef } from './types.ts'
 
 export interface HostServiceOptions {
   /** 桌面 = app.getPath('userData')；测试 = 注入临时目录（D-S1-4） */
@@ -66,6 +68,8 @@ export interface HostService {
   dispatch(channel: string, payload: unknown): Promise<unknown>
   /** 推送出口注册（host-entry 转 utilityProcess parentPort → main 转渲染层） */
   onPush(handler: (m: PushMessage) => void): void
+  /** MCP stdio 子进程等生命周期收口（测试 finally / 宿主退出前调用） */
+  dispose(): void
 }
 
 export function createHostService(opts: HostServiceOptions): HostService {
@@ -80,6 +84,38 @@ export function createHostService(opts: HostServiceOptions): HostService {
   // 价目 Provider（S3-S5 / R-D5 两模式）：本地模式 = null Provider（金额「价目未同步」禁 0）；
   // 平台价目同步可用后由装配方注入实现（接口面预留）
   const priceProvider: PriceProvider = opts.priceProvider ?? nullPriceProvider()
+  // —— S4-S1：插件/MCP 工具源装载面 ——
+  const pluginRegistry = pluginRegistryStore(opts.userDataDir)
+  let lastPluginLoad: PluginState[] | null = null
+  const mcpFaces = new Map<string, { fp: string; face: McpFace }>()
+  /** 工作区 MCP 面懒建（config 指纹缓存——mcp.servers 变更才重建；register 逐 server 隔离） */
+  async function ensureMcpFace(workspaceId: string, root: string): Promise<McpFace> {
+    await warmCarConfig({ cwd: root })
+    const loaded = loadCarConfig({ cwd: root })
+    if (loaded.error) throw new Error(loaded.error)
+    const servers = loaded.config.mcp?.servers ?? {}
+    const fp = JSON.stringify(servers)
+    const cached = mcpFaces.get(workspaceId)
+    if (cached && cached.fp === fp) return cached.face
+    cached?.face.close()
+    const face = createMcpFace(servers)
+    await face.registerAll()
+    mcpFaces.set(workspaceId, { fp, face })
+    return face
+  }
+  /** 工具源装载（S3-S2 builtin + S4 插件/MCP）——session:create / resume 共用 */
+  async function loadExtraTools(workspaceId: string, root: string): Promise<{ extraTools: HostToolDef[]; mcpToolUrl: Map<string, string>; pluginStates: PluginState[] }> {
+    const face = await ensureMcpFace(workspaceId, root)
+    const pluginLoad = await loadPlugins(pluginRegistry.get())
+    lastPluginLoad = pluginLoad.states
+    const extraTools = [...pluginLoad.tools, ...face.tools()]
+    const mcpToolUrl = new Map<string, string>()
+    for (const t of extraTools) {
+      const u = face.urlOf(t.name)
+      if (u) mcpToolUrl.set(t.name, u)
+    }
+    return { extraTools, mcpToolUrl, pluginStates: pluginLoad.states }
+  }
   const handles = new Map<string, SessionHandle>()
   const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
   const pushHandlers = new Set<(m: PushMessage) => void>()
@@ -147,7 +183,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
   }
 
   /** 模型回调装配（session:create 与跨运行续写共用——modelFnOverride 优先，生产走 createChatModelFn） */
-  function attachRuntimeModel(handle: SessionHandle, runtime: HostRuntime | null, root: string): void {
+  function attachRuntimeModel(handle: SessionHandle, runtime: HostRuntime | null, root: string, extraTools: HostToolDef[]): void {
     if (opts.modelFnOverride) {
       handle.attachModelFn(opts.modelFnOverride(handle))
       return
@@ -160,7 +196,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           signal: handle.abort,
           currentTurnId: () => handle.currentTurnId(),
           currentModel: () => handle.sessionModel ?? '',
-          toolDefs: builtinTools(root, fileSecurity),
+          toolDefs: mergeToolSources(builtinTools(root, fileSecurity), extraTools),
         }),
       )
     }
@@ -198,15 +234,17 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const sessionId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
         mkdirSync(sessionsDirFor(root), { recursive: true })
         const { runtime, modelError } = await loadRuntimeFor(root)
+        // S4-S1：工具源装载（builtin + 插件 + MCP）——跨源同名显式报错（mergeToolSources）
+        const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
         const handle = SessionHandle.createFresh({
           sessionId,
           workspaceId,
           workspaceRoot: root,
           configModel: runtime?.llm.model ?? null,
           modelError,
-          deps: depsFor(workspaceId, root),
+          deps: { ...depsFor(workspaceId, root), extraTools, mcpToolUrl },
         })
-        attachRuntimeModel(handle, runtime, root)
+        attachRuntimeModel(handle, runtime, root, extraTools)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
@@ -276,6 +314,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
           }
           const { runtime, modelError } = await loadRuntimeFor(root)
+          const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
           handle = SessionHandle.resume(
             {
               sessionId,
@@ -283,11 +322,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
               workspaceRoot: root,
               configModel: runtime?.llm.model ?? null,
               modelError,
-              deps: depsFor(workspaceId, root),
+              deps: { ...depsFor(workspaceId, root), extraTools, mcpToolUrl },
             },
             loaded.log,
           )
-          attachRuntimeModel(handle, runtime, root)
+          attachRuntimeModel(handle, runtime, root, extraTools)
           handle.title = idx.sessions[sessionId]?.title ?? '未命名会话'
           handles.set(key(workspaceId, sessionId), handle)
         }
@@ -361,11 +400,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
       }
       case IpcChannel.FileSecurityGet:
         return fileSecurityStore.get()
-      case IpcChannel.FileSecuritySet: {
-        const rules = (p as { rules?: unknown }).rules
-        if (!Array.isArray(rules)) throw new Error('CAR-E-DESKTOP: fileSecurity.set 缺少 rules（数组）')
-        return fileSecurityStore.set(rules)
-      }
+      case IpcChannel.FileSecuritySet:
+        // 全量透传（v2 双轴：rules + networkRules；数组/对象两形态由 store 兼容）
+        return fileSecurityStore.set(p)
       case IpcChannel.FileSecurityReset:
         return fileSecurityStore.reset()
       // —— S3-S3：安全中心设置 + 会话策略 ——
@@ -399,6 +436,24 @@ export function createHostService(opts: HostServiceOptions): HostService {
       // —— S3-S5：计量聚合（usage 事实遍历全部会话 JSONL——含已删除，删除仅索引态） ——
       case IpcChannel.MeteringSummary:
         return workspaceMeteringSummary(registry.pathOf(requireString(p.workspaceId, 'workspaceId')), priceProvider)
+      // —— S4-S1：插件/MCP 只读装载面（F-D4；装载在会话创建时发生，此处呈现登记与最近状态） ——
+      case IpcChannel.PluginsList:
+        return { registrations: pluginRegistry.get(), states: lastPluginLoad ?? [] }
+      case IpcChannel.PluginsAdd: {
+        const file = requireString(p.file, 'file')
+        if (typeof p.manifest !== 'object' || p.manifest === null) {
+          throw new Error('CAR-E-DESKTOP: plugins.add 缺少 manifest（{ name, version }）')
+        }
+        pluginRegistry.add({ file, manifest: p.manifest })
+        return { registrations: pluginRegistry.get(), states: lastPluginLoad ?? [] }
+      }
+      case IpcChannel.PluginsRemove:
+        return { registrations: pluginRegistry.remove(requireString(p.id, 'id')), states: lastPluginLoad ?? [] }
+      case IpcChannel.McpList: {
+        const wid = requireString(p.workspaceId, 'workspaceId')
+        const face = await ensureMcpFace(wid, registry.pathOf(wid))
+        return { states: face.states(), tools: face.tools().map((t) => ({ name: t.name, declaredSideEffect: t.declaredSideEffect })) }
+      }
       case IpcChannel.WorkspacePick:
         // 系统目录选择器属 main 侧能力（host-core 零 Electron）——本通道在 main 内消化，不入宿主
         throw new Error('CAR-E-DESKTOP: workspace:pick 由 main 侧处理（契约通道误入宿主 dispatch）')
@@ -411,6 +466,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
     dispatch,
     onPush(handler: (m: PushMessage) => void): void {
       pushHandlers.add(handler)
+    },
+    dispose(): void {
+      // 测试/收口面：MCP stdio 子进程收口（不收口 = 存活流钉住事件环）
+      for (const [, entry] of mcpFaces) entry.face.close()
+      mcpFaces.clear()
     },
   }
 }

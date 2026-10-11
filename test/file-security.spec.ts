@@ -39,7 +39,8 @@ function makeEngine(rules: FileRule[], userDataDir = tmpDir('ud')) {
 test('出厂预设：8 条按「具体→宽泛」排序（R-FS-7）+ 档位为拍板口径（Q-FS-1/2/3）', () => {
   const userData = tmpDir('factory')
   const s = factoryFileSecuritySettings(userData)
-  assert.equal(s.version, 1)
+  assert.equal(s.version, 2)
+  assert.deepEqual(s.networkRules, [], 'v2 网络轴：出厂无网络规则（域名规则用户显式添加）')
   assert.equal(s.rules.length, 8)
   assert.deepEqual(
     s.rules.map((r) => r.id),
