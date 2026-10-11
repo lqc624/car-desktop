@@ -33,6 +33,7 @@ import {
   writeSessionIndex,
 } from './sessions.ts'
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
+import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
@@ -46,6 +47,11 @@ export interface HostServiceOptions {
   userDataDir: string
   /** 默认 120_000（内核 AuthzService 同值）；测试注入短超时 */
   authzTimeoutMs?: number
+  /**
+   * 价目 Provider（S3-S5 / R-D5）：缺省 null Provider——金额「价目未同步」（禁 0 禁估算）；
+   * 平台 t_model_price 同步可用后注入实现
+   */
+  priceProvider?: PriceProvider
   /**
    * 测试注入：覆盖 chatStep 生产路径的模型回调工厂（内核 runTurn 仍真跑——行为证明）。
    * 工厂接收句柄：假模型须复刻 chatStep 的落链行为（assistant 文本非空即 append——
@@ -71,6 +77,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
   // 安全中心设置 + 自动备份（S3-S3）：默认策略 / 备份开关与配额（backup 配置闭包即时读设置）
   const securitySettings = createSecuritySettingsStore(opts.userDataDir)
   const backup = createBackupStore(opts.userDataDir, () => securitySettings.get().autoBackup)
+  // 价目 Provider（S3-S5 / R-D5 两模式）：本地模式 = null Provider（金额「价目未同步」禁 0）；
+  // 平台价目同步可用后由装配方注入实现（接口面预留）
+  const priceProvider: PriceProvider = opts.priceProvider ?? nullPriceProvider()
   const handles = new Map<string, SessionHandle>()
   const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
   const pushHandlers = new Set<(m: PushMessage) => void>()
@@ -387,6 +396,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
           requireString(p.sessionId, 'sessionId'),
           opts.userDataDir,
         )
+      // —— S3-S5：计量聚合（usage 事实遍历全部会话 JSONL——含已删除，删除仅索引态） ——
+      case IpcChannel.MeteringSummary:
+        return workspaceMeteringSummary(registry.pathOf(requireString(p.workspaceId, 'workspaceId')), priceProvider)
       case IpcChannel.WorkspacePick:
         // 系统目录选择器属 main 侧能力（host-core 零 Electron）——本通道在 main 内消化，不入宿主
         throw new Error('CAR-E-DESKTOP: workspace:pick 由 main 侧处理（契约通道误入宿主 dispatch）')

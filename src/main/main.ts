@@ -137,6 +137,8 @@ function registerIpc(): void {
   // —— S3-S4：审计报告 / 取证包导出（宿主载入面 + 内核链校验单点） ——
   ipcMain.handle(IpcChannel.AuditReport, (_event, payload: unknown) => callHost(IpcChannel.AuditReport, payload))
   ipcMain.handle(IpcChannel.AuditExport, (_event, payload: unknown) => callHost(IpcChannel.AuditExport, payload))
+  // —— S3-S5：计量聚合（价目未同步金额 = null，渲染层「价目未同步」） ——
+  ipcMain.handle(IpcChannel.MeteringSummary, (_event, payload: unknown) => callHost(IpcChannel.MeteringSummary, payload))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

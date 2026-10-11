@@ -62,6 +62,9 @@ export const IpcChannel = {
   AuditReport: 'audit:report',
   /** 取证包导出：断链即中止 + 落盘 userData/exports + 读回重验 */
   AuditExport: 'audit:export',
+  // —— S3-S5：计量聚合（usage 事实本体在会话 JSONL——禁估算；R-D5 价目两模式） ——
+  /** 工作区计量汇总（四卡/7 日柱/按模型/turn 明细；价目未同步金额 = null 禁 0） */
+  MeteringSummary: 'metrics:summary',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -294,6 +297,55 @@ export interface AuditExportResult {
   chainIntact: boolean
 }
 
+// ── 计量聚合（S3-S5；计量设计 §4.6 口径——金额未同步 = null 禁 0 禁估算） ──────────
+
+export interface MeteringDayBar {
+  day: string
+  input: number
+  output: number
+  cacheRead: number
+  cost: number | null
+}
+export interface MeteringModelRow {
+  model: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+  requests: number
+  cost: number | null
+}
+export interface MeteringTurnRow {
+  sessionId: string
+  ts: number
+  turnId: string
+  model: string | null
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+  requests: number
+  cost: number | null
+  /** 关联能力列：turn 内工具集合（关联呈现，不跨能力求和——计量设计 §4.4） */
+  tools: string[]
+}
+export interface MeteringSummary {
+  generatedAt: number
+  /** false = 渲染层「价目未同步」横幅（禁金额伪造） */
+  priceSynced: boolean
+  cards: {
+    today: { input: number; output: number; cacheRead: number; cost: number | null }
+    cacheHitRate: number | null
+    usageCoverage: number | null
+    turnsWithoutUsage: number
+  }
+  dailyBars: MeteringDayBar[]
+  byModel: MeteringModelRow[]
+  turns: MeteringTurnRow[]
+  /** 解析失败跳过的会话告警（fail-visible 显性化） */
+  warnings: string[]
+}
+
 /** 各通道请求载荷（宿主 dispatch 校验面） */
 export interface IpcRequestMap {
   [IpcChannel.HostProbe]: undefined
@@ -319,6 +371,7 @@ export interface IpcRequestMap {
   [IpcChannel.BackupOpenDir]: undefined
   [IpcChannel.AuditReport]: { workspaceId: string; sessionId: string }
   [IpcChannel.AuditExport]: { workspaceId: string; sessionId: string }
+  [IpcChannel.MeteringSummary]: { workspaceId: string }
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────
