@@ -48,6 +48,15 @@ export const IpcChannel = {
   FileSecuritySet: 'fileSecurity:set',
   /** 重置为出厂预设 */
   FileSecurityReset: 'fileSecurity:reset',
+  // —— S3-S3：安全中心设置 + 会话策略 + 备份目录 ——
+  /** 安全中心设置读（默认策略 + 备份开关/上限） */
+  SecuritySettingsGet: 'securitySettings:get',
+  /** 安全中心设置部分更新（patch 合并；校验 fail-visible） */
+  SecuritySettingsSet: 'securitySettings:set',
+  /** 会话策略切换（default/session/readonly；session/policy 事件落链——D-S2-3 口径） */
+  SessionSetPolicy: 'session:set-policy',
+  /** 打开备份目录（main 侧 shell 能力——同 workspace:pick 先例，不入宿主 dispatch） */
+  BackupOpenDir: 'backup:open-dir',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -220,6 +229,35 @@ export interface FileSecuritySetRequest {
   rules: FileRuleDTO[]
 }
 
+// ── 安全中心设置面（S3-S3；设计：桌面端安全中心设计.md §4/§5） ──────────
+
+export type SessionPolicyDTO = 'default' | 'session' | 'readonly'
+
+export interface SecuritySettings {
+  version: 1
+  updatedAt: number
+  /** 新建会话默认策略（「会话内放行」不作出厂默认——deny-by-default 血统） */
+  sessionDefaultPolicy: 'default' | 'readonly'
+  autoBackup: {
+    enabled: boolean
+    maxTotalBytes: number
+  }
+}
+
+export interface SecuritySettingsPatch {
+  sessionDefaultPolicy?: 'default' | 'readonly'
+  autoBackup?: {
+    enabled?: boolean
+    maxTotalBytes?: number
+  }
+}
+
+export interface SessionSetPolicyRequest {
+  workspaceId: string
+  sessionId: string
+  policy: SessionPolicyDTO
+}
+
 /** 各通道请求载荷（宿主 dispatch 校验面） */
 export interface IpcRequestMap {
   [IpcChannel.HostProbe]: undefined
@@ -239,6 +277,10 @@ export interface IpcRequestMap {
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
+  [IpcChannel.SecuritySettingsGet]: undefined
+  [IpcChannel.SecuritySettingsSet]: { patch: SecuritySettingsPatch }
+  [IpcChannel.SessionSetPolicy]: SessionSetPolicyRequest
+  [IpcChannel.BackupOpenDir]: undefined
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────

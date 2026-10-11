@@ -12,7 +12,8 @@
  * S2：请求/响应（ipcMain.handle ↔ reqId 映射）+ 推送转发（宿主 push → 全部窗口
  * webContents.send，主题白名单 = IpcPushTopic）。
  */
-import { app, BrowserWindow, dialog, ipcMain, utilityProcess } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'electron'
+import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 
@@ -119,6 +120,20 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SessionSetModel, (_event, payload: { workspaceId: string; sessionId: string; model: string }) =>
     callHost(IpcChannel.SessionSetModel, payload),
   )
+  // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——
+  ipcMain.handle(IpcChannel.FileSecurityGet, () => callHost(IpcChannel.FileSecurityGet))
+  ipcMain.handle(IpcChannel.FileSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.FileSecuritySet, payload))
+  ipcMain.handle(IpcChannel.FileSecurityReset, () => callHost(IpcChannel.FileSecurityReset))
+  ipcMain.handle(IpcChannel.SecuritySettingsGet, () => callHost(IpcChannel.SecuritySettingsGet))
+  ipcMain.handle(IpcChannel.SecuritySettingsSet, (_event, payload: unknown) => callHost(IpcChannel.SecuritySettingsSet, payload))
+  ipcMain.handle(IpcChannel.SessionSetPolicy, (_event, payload: unknown) => callHost(IpcChannel.SessionSetPolicy, payload))
+  // 打开备份目录：main 侧 shell 能力（同 workspace:pick 先例——host-core 零 Electron）
+  ipcMain.handle(IpcChannel.BackupOpenDir, async () => {
+    const dir = path.join(app.getPath('userData'), 'backups')
+    mkdirSync(dir, { recursive: true })
+    const err = await shell.openPath(dir)
+    return err ? { ok: false, error: err } : { ok: true }
+  })
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

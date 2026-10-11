@@ -22,6 +22,8 @@ import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsage
 import { parseEventLine } from './model.ts'
 import { builtinTools, fileActionOf } from './tools.ts'
 import type { FileSecurityEngine } from './fileSecurity.ts'
+import type { BackupStore } from './backupStore.ts'
+import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
@@ -39,6 +41,10 @@ export interface SessionHandleDeps {
   waitAuthzDecision: (sessionId: string, requestId: string) => Promise<AuthzResponse>
   /** 文件安全引擎（S3-S2；service 装配单例——规则面 > grant 面 > 人审门 编排入口） */
   fileSecurity?: FileSecurityEngine
+  /** 安全设置读取（S3-S3：新建会话默认策略 + 备份开关/上限即时读） */
+  securitySettings?: () => SecuritySettings
+  /** 自动备份存储（S3-S3：先保后变；开关与配额经 securitySettings 即时生效） */
+  backup?: BackupStore
 }
 
 interface HandleInit {
@@ -63,6 +69,8 @@ export class SessionHandle {
   title = '未命名会话'
   busy = false
   readonly abort = { aborted: false }
+  /** 会话策略（S3-S3）：新建 = securitySettings 默认值；会话内 setPolicy 切换（落链） */
+  policy: SessionPolicy
 
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
@@ -84,7 +92,12 @@ export class SessionHandle {
     this.deps = init.deps
     this.store = new SessionFileStore(init.deps.sessionsDir + '/' + init.sessionId + '.jsonl')
     this.log = new SessionLog(init.sessionId)
-    this.tools = builtinTools(init.workspaceRoot, init.deps.fileSecurity)
+    this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
+    this.tools = builtinTools(
+      init.workspaceRoot,
+      init.deps.fileSecurity,
+      init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
+    )
     this.fileSecurity = init.deps.fileSecurity ?? null
     this.authz = new AuthzService({ log: this.log, timeoutMs: init.deps.authzTimeoutMs })
     // 序 = 先落盘（fsync，fail-fast 保留）后推送（emit 永不 throw——推送失败不破坏落链）
@@ -113,6 +126,19 @@ export class SessionHandle {
   /** 链上留痕（model/set、session/rename、session/delete——resumable 才可落；索引面为标题/删除态权威） */
   appendNarrative(type: string, extra: Record<string, unknown> = {}): void {
     this.log.append('runtime', 'system', 'session', { type, ...extra })
+  }
+
+  /**
+   * 会话策略切换（S3-S3）：default（默认安全）/ session（会话内放行）/ readonly（只读）。
+   * 落链口径 = D-S2-3（既有 system kind + payload.type：`session/policy`）——EventKind 冻结面零新增；
+   * 策略即时生效于后续 authorize 判定（在途 turn 收口后可见）。
+   */
+  setPolicy(policy: SessionPolicy): SessionPolicy {
+    if (this.policy !== policy) {
+      this.policy = policy
+      this.appendNarrative('session/policy', { policy })
+    }
+    return this.policy
   }
 
   /** 已知事件全集（本会话生于本进程，内存即全量；usage/回放共用） */
@@ -164,12 +190,14 @@ export class SessionHandle {
   }
 
   /**
-   * 授权门（runTurn preset.authorize 集成点——S3-S2 重排，桌面端文件安全设计 §6.2）：
+   * 授权门（runTurn preset.authorize 集成点——S3-S2 重排 + S3-S3 会话策略编排）：
+   * ⓪会话策略「只读」先于规则面（policy 是比规则更严的约束——写/删一律拒，决策 100% 落链；
+   *   读取照常走规则面，.ssh 等凭据目录的询问档在只读模式下依然可达）；
    * ①规则面（fileSecurity 引擎首条命中）：allow/deny = decideByRule policy 直判落链（reason 带
    *   ruleId，审计可回答「为什么没问人」）；fallback-outside = 现行沙盒语义硬拒（同样落链）；
+   * ①′会话策略「会话内放行」后置于规则面（拒绝红线仍先决）——逐次 decideBySessionPolicy 落链；
    * ②会话 grant 面（按工具——平台 sessionGrants 同口径）：命中走 decideBySessionPolicy 幂等落链；
    * ③人审门（现行 S2 流程原样）：decideByUser 120s 超时默认拒绝，三档 once/session/deny。
-   * 优先级 = 规则面 > grant 面 > 人审门——用户显式拒绝红线不因会话内顺手批准失守。
    * capability 按工具分派（K-FS-3：fs-read/fs-write/fs-delete；未知工具按最高约束 fs-write——T-22）。
    */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
@@ -177,6 +205,14 @@ export class SessionHandle {
     const capability: AuthzRequest['capability'] =
       call.tool === 'fs_read' ? 'fs-read' : call.tool === 'fs_delete' ? 'fs-delete' : 'fs-write'
     const resource = action && typeof call.args['path'] === 'string' ? String(call.args['path']) : describeResource(call.tool, call.args)
+    // ⓪会话策略「只读」：写/删（及未知工具——最高约束）一律拒；读取不在此拦截
+    if (this.policy === 'readonly' && action !== 'read') {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:policy-ro:${call.tool}:${call.id}`, actor: 'user', capability, resource },
+        { decision: 'DENIED', reason: `session-policy:readonly deny ${action ?? call.tool}` },
+      )
+      return false
+    }
     // ①规则面
     if (action && this.fileSecurity) {
       const d = this.fileSecurity.decide(action, call.args['path'], this.workspaceRoot)
@@ -204,7 +240,17 @@ export class SessionHandle {
         })
         return false
       }
-      // 'ask' | 'fallback-inside' → 落入 grant 面 / 人审门
+      // 'ask' | 'fallback-inside' → 落入策略「会话内放行」/ grant 面 / 人审门
+    }
+    // ①′会话策略「会话内放行」：规则面之后（拒绝红线先决）、grant 面之前——逐次 policy 直判落链
+    if (this.policy === 'session') {
+      this.authz.decideBySessionPolicy({
+        authorizationId: `${this.sessionId}:policy-session:${call.tool}:${call.id}`,
+        actor: 'user',
+        capability,
+        resource,
+      })
+      return true
     }
     // ②会话 grant 面（按工具）：命中走 decideBySessionPolicy 幂等落链
     if (this.grants.has(call.tool)) {

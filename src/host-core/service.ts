@@ -33,6 +33,8 @@ import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts
 import { builtinTools } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
 import { createFileSecurityStore } from './fileSecurityStore.ts'
+import { createSecuritySettingsStore, type SessionPolicy } from './securitySettingsStore.ts'
+import { createBackupStore } from './backupStore.ts'
 import type { HostModelFn } from './types.ts'
 
 export interface HostServiceOptions {
@@ -62,6 +64,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
   // 文件安全（S3-S2）：应用级单例——store（userData/file-security.json 持久化）+ 引擎（规则面判定）
   const fileSecurityStore = createFileSecurityStore(opts.userDataDir)
   const fileSecurity: FileSecurityEngine = createFileSecurityEngine(fileSecurityStore)
+  // 安全中心设置 + 自动备份（S3-S3）：默认策略 / 备份开关与配额（backup 配置闭包即时读设置）
+  const securitySettings = createSecuritySettingsStore(opts.userDataDir)
+  const backup = createBackupStore(opts.userDataDir, () => securitySettings.get().autoBackup)
   const handles = new Map<string, SessionHandle>()
   const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
   const pushHandlers = new Set<(m: PushMessage) => void>()
@@ -109,6 +114,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
           authzWaiters.set(requestId, resolve)
         }),
       fileSecurity,
+      securitySettings: () => securitySettings.get(),
+      backup,
     }
   }
 
@@ -302,6 +309,19 @@ export function createHostService(opts: HostServiceOptions): HostService {
       }
       case IpcChannel.FileSecurityReset:
         return fileSecurityStore.reset()
+      // —— S3-S3：安全中心设置 + 会话策略 ——
+      case IpcChannel.SecuritySettingsGet:
+        return securitySettings.get()
+      case IpcChannel.SecuritySettingsSet:
+        return securitySettings.set(p['patch'])
+      case IpcChannel.SessionSetPolicy: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        const policy = requireString(p.policy, 'policy')
+        if (policy !== 'default' && policy !== 'session' && policy !== 'readonly') {
+          throw new Error(`CAR-E-DESKTOP: 非法会话策略（${policy}）——仅 default/session/readonly`)
+        }
+        return { ok: true, policy: handle.setPolicy(policy as SessionPolicy) }
+      }
       case IpcChannel.WorkspacePick:
         // 系统目录选择器属 main 侧能力（host-core 零 Electron）——本通道在 main 内消化，不入宿主
         throw new Error('CAR-E-DESKTOP: workspace:pick 由 main 侧处理（契约通道误入宿主 dispatch）')

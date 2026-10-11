@@ -16,9 +16,23 @@ import path from 'node:path'
 import { redact } from '@lqc123qwe/car-runtime'
 import type { HostToolDef } from './types.ts'
 import type { FileAction, FileSecurityEngine } from './fileSecurity.ts'
+import type { BackupContext, BackupStore } from './backupStore.ts'
 
 /** 读取截断上限（字节）——超限截断并显性标注，禁静默全量进上下文/链 */
 export const FS_READ_MAX_BYTES = 256 * 1024
+
+/** 备份接线面（S3-S3）：store + 会话上下文——SessionHandle 装配时注入 */
+export interface BackupWiring {
+  store: BackupStore
+  ctx: BackupContext
+}
+
+/** 先保后变（S3-S3）：变更（覆盖写/删除）前备份；返回 null = 无可保留原件/开关关闭 */
+function backupBefore(backup: BackupWiring | undefined, target: string, workspaceRoot: string): { path: string; bytes: number } | null {
+  if (!backup) return null
+  const rec = backup.store.backupBefore(target, workspaceRoot, backup.ctx)
+  return rec ? { path: rec.path, bytes: rec.bytes } : null
+}
 
 function requirePath(args: Record<string, unknown>, tool: string): string {
   const raw = args['path']
@@ -72,7 +86,7 @@ export function fsReadTool(workspaceRoot: string, fileSecurity?: FileSecurityEng
   }
 }
 
-export function fsWriteTool(workspaceRoot: string, fileSecurity?: FileSecurityEngine): HostToolDef {
+export function fsWriteTool(workspaceRoot: string, fileSecurity?: FileSecurityEngine, backup?: BackupWiring): HostToolDef {
   return {
     name: 'fs_write',
     declaredSideEffect: 'write',
@@ -102,14 +116,16 @@ export function fsWriteTool(workspaceRoot: string, fileSecurity?: FileSecurityEn
         }
       }
       const target = path.isAbsolute(rawPath) ? rawPath : path.resolve(workspaceRoot, rawPath)
+      // 先保后变（S3-S3）：覆盖已存在目标前备份——备份失败 throw 即变更不落盘
+      const backupRec = backupBefore(backup, target, workspaceRoot)
       mkdirSync(path.dirname(target), { recursive: true })
       writeFileSync(target, content, 'utf8')
-      return { ok: true, path: rawPath, bytes: Buffer.byteLength(content, 'utf8') }
+      return { ok: true, path: rawPath, bytes: Buffer.byteLength(content, 'utf8'), ...(backupRec ? { backup: backupRec } : {}) }
     },
   }
 }
 
-export function fsDeleteTool(workspaceRoot: string, fileSecurity?: FileSecurityEngine): HostToolDef {
+export function fsDeleteTool(workspaceRoot: string, fileSecurity?: FileSecurityEngine, backup?: BackupWiring): HostToolDef {
   return {
     name: 'fs_delete',
     declaredSideEffect: 'write',
@@ -140,8 +156,10 @@ export function fsDeleteTool(workspaceRoot: string, fileSecurity?: FileSecurityE
       if (st.isDirectory() && !recursive) {
         throw new Error(`CAR-E-DESKTOP: fs_delete 目标是目录（${rawPath}）——目录删除必须显式 recursive:true`)
       }
+      // 先保后变（S3-S3）：删除前备份（文件单件 / 目录整树）——失败 throw 即不删
+      const backupRec = backupBefore(backup, target, workspaceRoot)
       rmSync(target, st.isDirectory() ? { recursive: true } : {})
-      return { ok: true, path: rawPath, ...(st.isDirectory() ? { recursive: true } : {}) }
+      return { ok: true, path: rawPath, ...(st.isDirectory() ? { recursive: true } : {}), ...(backupRec ? { backup: backupRec } : {}) }
     },
   }
 }
@@ -153,7 +171,7 @@ export function fileActionOf(tool: string): FileAction | null {
   return ACTION_BY_TOOL[tool] ?? null
 }
 
-/** S3 工具集：三件套（文件安全面）；插件/MCP 工具源 S4 接入位 */
-export function builtinTools(workspaceRoot: string, fileSecurity?: FileSecurityEngine): HostToolDef[] {
-  return [fsReadTool(workspaceRoot, fileSecurity), fsWriteTool(workspaceRoot, fileSecurity), fsDeleteTool(workspaceRoot, fileSecurity)]
+/** S3 工具集：三件套（文件安全面 + 自动备份接线）；插件/MCP 工具源 S4 接入位 */
+export function builtinTools(workspaceRoot: string, fileSecurity?: FileSecurityEngine, backup?: BackupWiring): HostToolDef[] {
+  return [fsReadTool(workspaceRoot, fileSecurity), fsWriteTool(workspaceRoot, fileSecurity, backup), fsDeleteTool(workspaceRoot, fileSecurity, backup)]
 }
