@@ -31,6 +31,8 @@ import {
 } from './sessions.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
+import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
+import { createFileSecurityStore } from './fileSecurityStore.ts'
 import type { HostModelFn } from './types.ts'
 
 export interface HostServiceOptions {
@@ -57,6 +59,9 @@ export interface HostService {
 export function createHostService(opts: HostServiceOptions): HostService {
   const registry = new WorkspaceRegistry(opts.userDataDir)
   const authzTimeoutMs = opts.authzTimeoutMs ?? 120_000
+  // 文件安全（S3-S2）：应用级单例——store（userData/file-security.json 持久化）+ 引擎（规则面判定）
+  const fileSecurityStore = createFileSecurityStore(opts.userDataDir)
+  const fileSecurity: FileSecurityEngine = createFileSecurityEngine(fileSecurityStore)
   const handles = new Map<string, SessionHandle>()
   const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
   const pushHandlers = new Set<(m: PushMessage) => void>()
@@ -103,6 +108,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         new Promise<AuthzResponse>((resolve) => {
           authzWaiters.set(requestId, resolve)
         }),
+      fileSecurity,
     }
   }
 
@@ -165,7 +171,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
               signal: handle.abort,
               currentTurnId: () => handle.currentTurnId(),
               currentModel: () => handle.sessionModel ?? '',
-              toolDefs: builtinTools(root),
+              toolDefs: builtinTools(root, fileSecurity),
             }),
           )
         }
@@ -287,6 +293,15 @@ export function createHostService(opts: HostServiceOptions): HostService {
         handle.appendNarrative('model/set', { model }) // D-S2-3：既有 system kind + payload.type，内核 EventKind 冻结面不新增
         return { ok: true, model }
       }
+      case IpcChannel.FileSecurityGet:
+        return fileSecurityStore.get()
+      case IpcChannel.FileSecuritySet: {
+        const rules = (p as { rules?: unknown }).rules
+        if (!Array.isArray(rules)) throw new Error('CAR-E-DESKTOP: fileSecurity.set 缺少 rules（数组）')
+        return fileSecurityStore.set(rules)
+      }
+      case IpcChannel.FileSecurityReset:
+        return fileSecurityStore.reset()
       case IpcChannel.WorkspacePick:
         // 系统目录选择器属 main 侧能力（host-core 零 Electron）——本通道在 main 内消化，不入宿主
         throw new Error('CAR-E-DESKTOP: workspace:pick 由 main 侧处理（契约通道误入宿主 dispatch）')

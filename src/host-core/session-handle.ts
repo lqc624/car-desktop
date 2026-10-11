@@ -10,15 +10,18 @@
  *  - 授权门（D-S2-5）：120s 超时默认拒绝真值在内核 decideByUser；三档映射 =
  *    once（approve=true）/ session（写 grant 缓存[按工具，平台 sessionGrants 同口径]
  *    后续同类操作走 decideBySessionPolicy 幂等落链）/ deny（approve=false）；
+ *  - 授权门重排（S3-S2，桌面端文件安全设计 §6.2）：规则面（fileSecurity 引擎）> 会话 grant 面 > 人审门——
+ *    allow/deny/fallback-outside 由 decideByRule policy 直判落链（reason 带 ruleId），ask 落入现行三档流程；
  *  - 推送（D-S2-1）：sink 序 = store.append(fsync) 先、emit 后——推送失败不破坏落链
  *    （emit 永不 throw；内核 sink throw = fail-fast 语义仅留给盘面失败）；
  *  - 授权审计事件形态 = 内核 #commit：kind:'turnEnd' + turnId:'authz:*'（渲染层按
  *    turnId 前缀区分，不当真 turn 收口渲染）。
  */
-import { runTurn, SessionFileStore, SessionLog, AuthzService } from '@lqc123qwe/car-runtime'
+import { runTurn, SessionFileStore, SessionLog, AuthzService, type AuthzRequest } from '@lqc123qwe/car-runtime'
 import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsageResult } from '../shared/ipc-contract.ts'
 import { parseEventLine } from './model.ts'
-import { builtinTools } from './tools.ts'
+import { builtinTools, fileActionOf } from './tools.ts'
+import type { FileSecurityEngine } from './fileSecurity.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
@@ -34,6 +37,8 @@ export interface SessionHandleDeps {
   emitAuthzResolved: (p: AuthzResolvedPush) => void
   /** 授权决策来源（生产 = 渲染层 authz:respond 等待；测试 = 脚本直答） */
   waitAuthzDecision: (sessionId: string, requestId: string) => Promise<AuthzResponse>
+  /** 文件安全引擎（S3-S2；service 装配单例——规则面 > grant 面 > 人审门 编排入口） */
+  fileSecurity?: FileSecurityEngine
 }
 
 interface HandleInit {
@@ -61,6 +66,7 @@ export class SessionHandle {
 
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
+  private readonly fileSecurity: FileSecurityEngine | null
   private readonly grants = new Set<string>()
   private readonly tools: HostToolDef[]
   private modelFn: HostModelFn | null = null
@@ -78,7 +84,8 @@ export class SessionHandle {
     this.deps = init.deps
     this.store = new SessionFileStore(init.deps.sessionsDir + '/' + init.sessionId + '.jsonl')
     this.log = new SessionLog(init.sessionId)
-    this.tools = builtinTools(init.workspaceRoot)
+    this.tools = builtinTools(init.workspaceRoot, init.deps.fileSecurity)
+    this.fileSecurity = init.deps.fileSecurity ?? null
     this.authz = new AuthzService({ log: this.log, timeoutMs: init.deps.authzTimeoutMs })
     // 序 = 先落盘（fsync，fail-fast 保留）后推送（emit 永不 throw——推送失败不破坏落链）
     this.log.attachSink((line) => {
@@ -129,13 +136,15 @@ export class SessionHandle {
     this.log.append('user', 'user', turnId, text)
     const tools = new Map<string, HostToolDef>(this.tools.map((t) => [t.name, t]))
     // 内核 runTurn 自带全部收口语义（error/aborted/成对补记/turnEnd usage 聚合）——
-    // 桌面 catch 仅宿主日志，禁补造任何链上事件
+    // 桌面 catch 仅宿主日志，禁补造任何链上事件。
+    // authorizeAll（K-FS-1，1.13.0）：readonly 类（fs_read）同样进授权门——读取规则面可达
+    const turnPreset = { mode: 'confirm', authorizeAll: true, authorize: this.authorize } as const
     void runTurn({
       log: this.log,
       turnId,
       model: this.modelFn,
       tools,
-      preset: { mode: 'confirm', authorize: this.authorize },
+      preset: turnPreset,
       signal: this.abort,
     }).then(
       (r) => {
@@ -154,11 +163,50 @@ export class SessionHandle {
     this.abort.aborted = true
   }
 
-  /** 授权门（runTurn preset.authorize 集成点——三档语义见文件头） */
+  /**
+   * 授权门（runTurn preset.authorize 集成点——S3-S2 重排，桌面端文件安全设计 §6.2）：
+   * ①规则面（fileSecurity 引擎首条命中）：allow/deny = decideByRule policy 直判落链（reason 带
+   *   ruleId，审计可回答「为什么没问人」）；fallback-outside = 现行沙盒语义硬拒（同样落链）；
+   * ②会话 grant 面（按工具——平台 sessionGrants 同口径）：命中走 decideBySessionPolicy 幂等落链；
+   * ③人审门（现行 S2 流程原样）：decideByUser 120s 超时默认拒绝，三档 once/session/deny。
+   * 优先级 = 规则面 > grant 面 > 人审门——用户显式拒绝红线不因会话内顺手批准失守。
+   * capability 按工具分派（K-FS-3：fs-read/fs-write/fs-delete；未知工具按最高约束 fs-write——T-22）。
+   */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
-    const capability = 'fs-write' // S2 工具面仅 fs_write；MCP/插件能力映射随 S4
-    const resource = describeResource(call.tool, call.args)
-    // 会话 grant（按工具——平台 sessionGrants 同口径）：命中走 decideBySessionPolicy 幂等落链
+    const action = fileActionOf(call.tool)
+    const capability: AuthzRequest['capability'] =
+      call.tool === 'fs_read' ? 'fs-read' : call.tool === 'fs_delete' ? 'fs-delete' : 'fs-write'
+    const resource = action && typeof call.args['path'] === 'string' ? String(call.args['path']) : describeResource(call.tool, call.args)
+    // ①规则面
+    if (action && this.fileSecurity) {
+      const d = this.fileSecurity.decide(action, call.args['path'], this.workspaceRoot)
+      const ruleReq = {
+        authorizationId: `${this.sessionId}:rule:${call.tool}:${call.id}`,
+        actor: 'user' as const,
+        capability,
+        resource: d.target,
+      }
+      if (d.tier === 'allow') {
+        this.authz.decideByRule(ruleReq, { decision: 'APPROVED', reason: `file-rule:${d.rule!.id} allow ${action}` })
+        return true
+      }
+      if (d.tier === 'deny') {
+        const reason = d.rule
+          ? `file-rule:${d.rule.id} deny ${action}`
+          : `file-arg:missing-path deny ${action}`
+        this.authz.decideByRule(ruleReq, { decision: 'DENIED', reason })
+        return false
+      }
+      if (d.tier === 'fallback-outside') {
+        this.authz.decideByRule(ruleReq, {
+          decision: 'DENIED',
+          reason: `file-fallback:outside-workspace deny ${action} (现行沙盒语义——未命中规则不放宽)`,
+        })
+        return false
+      }
+      // 'ask' | 'fallback-inside' → 落入 grant 面 / 人审门
+    }
+    // ②会话 grant 面（按工具）：命中走 decideBySessionPolicy 幂等落链
     if (this.grants.has(call.tool)) {
       this.authz.decideBySessionPolicy({
         authorizationId: `${this.sessionId}:policy:${call.tool}:${call.id}`,
@@ -168,6 +216,7 @@ export class SessionHandle {
       })
       return true
     }
+    // ③人审门（现行 S2 流程原样）
     const authorizationId = `${this.sessionId}:${this.currentTurnIdValue}:${call.tool}:${call.id}`
     let responded: AuthzResponse | null = null
     const decision = await this.authz.decideByUser(
@@ -289,6 +338,6 @@ export function usageOver(events: readonly SessionEventDTO[]): SessionUsageResul
 }
 
 function describeResource(tool: string, args: Record<string, unknown>): string {
-  if (tool === 'fs_write' && typeof args['path'] === 'string') return String(args['path'])
+  if (fileActionOf(tool) && typeof args['path'] === 'string') return String(args['path'])
   return JSON.stringify(args).slice(0, 120)
 }

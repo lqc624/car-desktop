@@ -41,6 +41,13 @@ export const IpcChannel = {
   SessionDelete: 'session:delete',
   /** 会话级模型切换（model/set 事件落链——D-S2-3） */
   SessionSetModel: 'session:set-model',
+  // —— S3：文件安全设置面（SEC_SETTINGS；host 持久化 + 校验，渲染层接线 S3-S6） ——
+  /** 读当前规则表（出厂预设 8 条 / 用户规则） */
+  FileSecurityGet: 'fileSecurity:get',
+  /** 全量规则表替换（宿主校验 fail-visible） */
+  FileSecuritySet: 'fileSecurity:set',
+  /** 重置为出厂预设 */
+  FileSecurityReset: 'fileSecurity:reset',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -189,6 +196,30 @@ export interface SessionUsageResult {
 /** 授权门响应载荷（AuthzRespond 通道） */
 export type AuthzDecisionInput = 'once' | 'session' | 'deny'
 
+// ── 文件安全设置面（S3-S2；设计：桌面端文件安全设计.md §5/§8.2） ──────────
+
+export type FileTierDTO = 'allow' | 'ask' | 'deny'
+
+export interface FileRuleDTO {
+  id: string
+  /** 白名单变量（%USERPROFILE%/%WORKSPACE%/%APPDATA%）或物化绝对路径；尾分隔符 = 目录规则 */
+  path: string
+  read: FileTierDTO
+  write: FileTierDTO
+  delete: FileTierDTO
+  preset?: boolean
+}
+
+export interface FileSecurityState {
+  version: 1
+  updatedAt: number
+  rules: FileRuleDTO[]
+}
+
+export interface FileSecuritySetRequest {
+  rules: FileRuleDTO[]
+}
+
 /** 各通道请求载荷（宿主 dispatch 校验面） */
 export interface IpcRequestMap {
   [IpcChannel.HostProbe]: undefined
@@ -205,6 +236,9 @@ export interface IpcRequestMap {
   [IpcChannel.SessionRename]: { workspaceId: string; sessionId: string; title: string }
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string }
+  [IpcChannel.FileSecurityGet]: undefined
+  [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
+  [IpcChannel.FileSecurityReset]: undefined
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────

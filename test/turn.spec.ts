@@ -203,18 +203,22 @@ test('停止（abort）：pending 期间 abort+deny → turnEnd aborted、工具
   assert.ok(!existsSync(join(env.root, 'out', 'a.txt')), 'abort 后工具不应执行')
 })
 
-test('fs_write 沙盒：路径穿越拒绝（工具错误成对交回模型，turn 正常收口）', async () => {
+test('fs_write 沙盒（S3-S2 语义升级）：未命中规则+工作区外 → 授权层自动拒绝落链（不再弹窗、不进人审）', async () => {
   const env = await makeEnv(toolThenStop('../escape.txt', 'x'))
   const sent = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '越界写' })) as { turnId: string }
-  const pending = await waitForPending(env)
-  await env.svc.dispatch('authz:respond', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, requestId: pending.requestId, decision: 'once' })
   const end = await waitForTurnEnd(env, sent.turnId)
   assert.equal((end.meta as Record<string, unknown> | null)?.['reason'], 'completed')
-  const toolError = eventsOf(env)
-    .filter((e) => e.kind === 'toolResult')
-    .map((e) => String((e.payload as Record<string, unknown>)['error'] ?? ''))
-    .find((msg) => msg.includes('越界'))
-  assert.ok(toolError, '越界错误未成对交回')
+  // fallback-outside = 规则面直判硬拒（decideByRule DENIED 落链）——不弹窗、无人审推送
+  assert.equal(pendingsOf(env).length, 0, '未命中+工作区外不弹窗（fail-visible）')
+  assert.equal(resolvedOf(env).length, 0, '人审通道零推送')
+  const toolResult = eventsOf(env).find((e) => e.kind === 'toolResult')
+  assert.ok(toolResult && (toolResult.payload as Record<string, unknown>)['error'] === 'authorization-denied')
+  assert.equal((toolResult!.payload as Record<string, unknown>)['granted'], false)
+  const policyDenied = eventsOf(env).find(
+    (e) => e.turnId.startsWith('authz:') && (e.payload as Record<string, unknown>)['decision'] === 'DENIED' &&
+      String((e.meta as Record<string, unknown> | null)?.['reason'] ?? '').includes('file-fallback:outside-workspace'),
+  )
+  assert.ok(policyDenied, 'fallback 硬拒决策落链（决策 100% 审计）')
   assert.ok(!existsSync(join(env.root, '..', 'escape.txt')), '穿越文件不应存在')
 })
 
