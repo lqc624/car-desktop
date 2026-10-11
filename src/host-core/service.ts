@@ -35,7 +35,9 @@ import {
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
 import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
-import { warmCarConfig, loadCarConfig } from '@lqc123qwe/car-runtime'
+import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter } from '@lqc123qwe/car-runtime'
+import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
+import { runDoctor } from './doctor.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
@@ -150,7 +152,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return h
   }
 
-  function depsFor(workspaceId: string, workspaceRoot: string): Parameters<typeof SessionHandle.createFresh>[0]['deps'] {
+  function depsFor(workspaceId: string, workspaceRoot: string, contextWindow: number | null): Parameters<typeof SessionHandle.createFresh>[0]['deps'] {
     return {
       workspaceId,
       authzTimeoutMs,
@@ -165,6 +167,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
       fileSecurity,
       securitySettings: () => securitySettings.get(),
       backup,
+      contextWindow,
     }
   }
 
@@ -203,21 +206,77 @@ export function createHostService(opts: HostServiceOptions): HostService {
   }
 
   /** 装载模型（configModel 锚点）；装配失败不阻塞会话面，原因必须回到渲染层（S2 修补：禁吞 console） */
-  async function loadRuntimeFor(root: string): Promise<{ runtime: HostRuntime | null; modelError: string | null }> {
+  // —— S4-S2：自定义端点（main safeStorage 解密后经 credentials:key-push 内存推送——不落盘不打印） ——
+  let endpoint: { baseUrl: string; model: string; key: string; contextWindow: number | null } | null = null
+
+  /** 装载模型（doctor/会话共用）：端点覆盖 > car.config（R-D6）；contextWindow = 元数据表/端点声明（D-C5 无值 null） */
+  async function loadRuntimeFor(root: string): Promise<{ runtime: HostRuntime | null; modelError: string | null; contextWindow: number | null }> {
     let runtime: HostRuntime | null = null
     let modelError: string | null = null
     try {
-      runtime = await loadHostRuntime(root)
+      runtime = await loadHostRuntime(root, endpoint)
     } catch (err) {
       modelError = err instanceof Error ? err.message : String(err)
       console.error('[host] 模型未装配（turn 发送将被拒绝）：', modelError)
     }
-    return { runtime, modelError }
+    const activeModel = endpoint?.model ?? runtime?.llm.model ?? null
+    const meta = resolveModelMeta(activeModel)
+    const contextWindow = meta?.contextWindow ?? endpoint?.contextWindow ?? null
+    return { runtime, modelError, contextWindow }
   }
 
   async function dispatch(channel: string, payload: unknown): Promise<unknown> {
     const p = (payload ?? {}) as Record<string, unknown>
     switch (channel) {
+      // —— S4-S2：端点 Key 内存推送（main safeStorage 解密后独占调用——渲染层/宿主均不持明文盘面） ——
+      case 'credentials:key-push': {
+        if (p['clear'] === true) {
+          endpoint = null
+          return { ok: true, active: false }
+        }
+        const baseUrl = requireString(p.baseUrl, 'baseUrl')
+        const model = requireString(p.model, 'model')
+        const key = requireString(p.key, 'key')
+        endpoint = {
+          baseUrl,
+          model,
+          key,
+          contextWindow: typeof p.contextWindow === 'number' && p.contextWindow > 0 ? p.contextWindow : null,
+        }
+        return { ok: true, active: true }
+      }
+      // —— S4-S2：doctor 全项（值不打印——输出面只有布尔/键名/耗时/错误类别） ——
+      case 'doctor:run': {
+        const workspaceId = p['workspaceId'] ? requireString(p.workspaceId, 'workspaceId') : null
+        let llm: { adapterId?: string; allowEnvFallback?: boolean; baseUrl?: string } = { allowEnvFallback: false, baseUrl: undefined }
+        let configError: string | null = null
+        if (workspaceId) {
+          try {
+            const root = registry.pathOf(workspaceId)
+            await warmCarConfig({ cwd: root })
+            const loaded = loadCarConfig({ cwd: root })
+            if (loaded.error) configError = loaded.error
+            else llm = mergeLlmConfig(process.env, loaded.config, {})
+          } catch (err) {
+            configError = err instanceof Error ? err.message : String(err)
+          }
+        }
+        const rows = [
+          ...(configError
+            ? [{ label: '工作区配置', ok: false, detail: configError }]
+            : []),
+          ...(await runDoctor({
+            llm,
+            endpointKeyPresent: endpoint !== null,
+            effectiveBaseUrl: endpoint?.baseUrl ?? llm.baseUrl ?? '',
+            probeKey: endpoint?.key ?? process.env[llm.adapterId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] ?? null,
+          }).then((r) => r.rows)),
+        ]
+        return { rows }
+      }
+      // —— S4-S2：模型元数据（内置静态表 + 端点声明——ctx 百分比真值来源；Key 永不出面） ——
+      case 'models:meta':
+        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow } : null }
       case IpcChannel.HostProbe: {
         const probe = probeSeam()
         return probe satisfies HostProbeResult
@@ -233,7 +292,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const root = registry.pathOf(workspaceId)
         const sessionId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
         mkdirSync(sessionsDirFor(root), { recursive: true })
-        const { runtime, modelError } = await loadRuntimeFor(root)
+        const { runtime, modelError, contextWindow } = await loadRuntimeFor(root)
         // S4-S1：工具源装载（builtin + 插件 + MCP）——跨源同名显式报错（mergeToolSources）
         const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
         const handle = SessionHandle.createFresh({
@@ -242,7 +301,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           workspaceRoot: root,
           configModel: runtime?.llm.model ?? null,
           modelError,
-          deps: { ...depsFor(workspaceId, root), extraTools, mcpToolUrl },
+          deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl },
         })
         attachRuntimeModel(handle, runtime, root, extraTools)
         handles.set(key(workspaceId, sessionId), handle)
@@ -250,7 +309,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
         writeSessionIndex(root, idx)
         const info = sessionInfo(root, workspaceId, sessionId)
-        return { ...info, modelError } satisfies SessionInfo
+        return { ...info, modelError, contextWindow } satisfies SessionInfo
       }
       case IpcChannel.SessionList: {
         const workspaceId = requireString(p.workspaceId, 'workspaceId')
@@ -270,6 +329,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             title: alive.title,
             model: alive.sessionModel,
             modelError: alive.modelError,
+            contextWindow: alive.contextWindow,
             events: [...alive.knownEvents()],
           } satisfies SessionOpenResult
         }
@@ -313,7 +373,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           if (loaded.brokenAt !== null) {
             throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
           }
-          const { runtime, modelError } = await loadRuntimeFor(root)
+          const { runtime, modelError, contextWindow } = await loadRuntimeFor(root)
           const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
           handle = SessionHandle.resume(
             {
@@ -322,7 +382,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
               workspaceRoot: root,
               configModel: runtime?.llm.model ?? null,
               modelError,
-              deps: { ...depsFor(workspaceId, root), extraTools, mcpToolUrl },
+              deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl },
             },
             loaded.log,
           )

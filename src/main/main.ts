@@ -15,6 +15,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'electron'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { clearEndpoint, loadEndpointMeta, revealEndpointKey, saveEndpoint } from './credentials.ts'
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 
 const HOST_TIMEOUT_MS = 20_000
@@ -144,6 +145,17 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.PluginsAdd, (_event, payload: unknown) => callHost(IpcChannel.PluginsAdd, payload))
   ipcMain.handle(IpcChannel.PluginsRemove, (_event, payload: unknown) => callHost(IpcChannel.PluginsRemove, payload))
   ipcMain.handle(IpcChannel.McpList, (_event, payload: unknown) => callHost(IpcChannel.McpList, payload))
+  // —— S4-S2：自定义端点凭据（main 侧 safeStorage 独占——Key 解密后推宿主装配，渲染层不触达） ——
+  ipcMain.handle(IpcChannel.CredentialsSave, (_event, payload: { baseUrl: string; model: string; key: string; contextWindow?: number }) => {
+    const meta = saveEndpoint(app.getPath('userData'), { ...payload, contextWindow: payload.contextWindow ?? null })
+    // Key 内存流转：解密后推宿主装配（credentials:key-push——宿主缓存，不落盘不打印）
+    return callHost(IpcChannel.CredentialsKeyPush, { ...meta, key: payload.key }).then(() => meta)
+  })
+  ipcMain.handle(IpcChannel.CredentialsMeta, () => loadEndpointMeta(app.getPath('userData')))
+  ipcMain.handle(IpcChannel.CredentialsClear, () => {
+    clearEndpoint(app.getPath('userData'))
+    return callHost(IpcChannel.CredentialsKeyPush, { clear: true })
+  })
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {
@@ -165,6 +177,18 @@ async function createWindow(show: boolean): Promise<BrowserWindow> {
 
 app.whenReady().then(async () => {
   registerIpc()
+  // 启动即推端点 Key（safeStorage 解密 → 宿主内存——跨重启的自定义端点续用）
+  const storedKey = revealEndpointKey(app.getPath('userData'))
+  if (storedKey) {
+    const meta = loadEndpointMeta(app.getPath('userData'))
+    if (meta) {
+      try {
+        await callHost(IpcChannel.CredentialsKeyPush, { ...meta, key: storedKey })
+      } catch (err) {
+        console.error('[main] 端点 Key 推送失败（宿主未就绪）：', err instanceof Error ? err.message : err)
+      }
+    }
+  }
   const smoke = process.env.CAR_SMOKE === '1'
   const win = await createWindow(!smoke)
   if (smoke) {

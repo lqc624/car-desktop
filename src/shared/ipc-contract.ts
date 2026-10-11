@@ -73,6 +73,21 @@ export const IpcChannel = {
   PluginsRemove: 'plugins:remove',
   /** MCP 双传输状态 + 工具清单（car.config mcp.servers 驱动） */
   McpList: 'mcp:list',
+  // —— S4-S2：doctor 全项 + 自定义端点（safeStorage 凭据 main 独占） + 模型元数据 ——
+  /** doctor 全项（凭据在位/连通性/seam——值不打印，输出面只有布尔/键名/耗时/错误类别） */
+  DoctorRun: 'doctor:run',
+  /** 模型元数据（内置静态表 + 端点声明——ctx 百分比真值来源；Key 永不出面） */
+  ModelsMeta: 'models:meta',
+  /**
+   * 端点 Key 内存推送（main safeStorage 解密后独占调用——渲染层不触达；
+   * host 内存缓存，不落盘不打印——N-D1）
+   */
+  CredentialsKeyPush: 'credentials:key-push',
+  /** 保存自定义端点（main 侧 safeStorage 加密落盘；测试连通由渲染层先走 doctor 面探测） */
+  CredentialsSave: 'credentials:save',
+  /** 端点元数据（baseUrl/model/contextWindow——不含 Key） */
+  CredentialsMeta: 'credentials:meta',
+  CredentialsClear: 'credentials:clear',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -121,6 +136,8 @@ export interface SessionInfo {
   eventCount: number
   /** 展示标题 = 最近一次 session/rename 事件；无 = 「未命名会话」 */
   title: string
+  /** 上下文窗口（tokens）——模型元数据表/端点声明；无值 = null（渲染层不显示百分比，D-C5） */
+  contextWindow?: number | null
   /**
    * 仅 session:create / session:open 响应携带：模型装配失败原因（S2 修补——
    * 失败禁吞进 console，建会话当场 fail-visible）；装配成功 = null/缺省
@@ -191,6 +208,8 @@ export interface SessionOpenResult {
   model: string | null
   /** 模型装配失败原因（alive 句柄；只读回放恒无模型面 = null） */
   modelError?: string | null
+  /** 上下文窗口（元数据表/端点声明；null = 渲染层不显示百分比——D-C5） */
+  contextWindow?: number | null
   /** 全量回放（R-4：一次批量；此后增量经 IpcPushTopic.SessionEvent） */
   events: SessionEventDTO[]
 }
@@ -384,6 +403,12 @@ export interface IpcRequestMap {
   [IpcChannel.PluginsAdd]: { file: string; manifest: { name: string; version: string } }
   [IpcChannel.PluginsRemove]: { id: string }
   [IpcChannel.McpList]: { workspaceId: string }
+  [IpcChannel.DoctorRun]: { workspaceId?: string }
+  [IpcChannel.ModelsMeta]: undefined
+  [IpcChannel.CredentialsKeyPush]: { baseUrl: string; model: string; key: string; contextWindow?: number } | { clear: true }
+  [IpcChannel.CredentialsSave]: { baseUrl: string; model: string; key: string; contextWindow?: number }
+  [IpcChannel.CredentialsMeta]: undefined
+  [IpcChannel.CredentialsClear]: undefined
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────

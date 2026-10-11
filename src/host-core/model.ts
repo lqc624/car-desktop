@@ -34,15 +34,34 @@ export interface HostRuntime {
   mcpServers: Record<string, { command?: string; url?: string; args?: string[]; env?: Record<string, string>; headers?: Record<string, string> }>
 }
 
-/** 装载工作区 LLM 运行时；模型配置缺失/无效 fail-visible（引导配置，禁静默降级） */
-export async function loadHostRuntime(workspaceRoot: string): Promise<HostRuntime> {
+/** S4-S2 自定义端点覆盖（装配级——Key 经 main safeStorage 解密后由 IPC 内存推送，不落盘不打印） */
+export interface EndpointOverride {
+  baseUrl: string
+  model: string
+  key: string
+  contextWindow: number | null
+}
+
+/**
+ * 装载工作区 LLM 运行时；模型配置缺失/无效 fail-visible（引导配置，禁静默降级）。
+ * endpoint 覆盖顺序 = 自定义端点 > car.config llm（R-D6：端点为 OpenAI 兼容形态——
+ * adapter 强制 openai-compat；Key 经 process.env 注入内核 CredentialService 解析面，
+ * 宿主 utilityProcess 内 env 变更进程内封闭、不落盘不打印）。
+ */
+export async function loadHostRuntime(
+  workspaceRoot: string,
+  endpoint?: EndpointOverride | null,
+): Promise<HostRuntime & { contextWindow: number | null }> {
   // cli.ts 生产顺序（S2 修补：先 warm 后 load——car.config.ts 未预热 = CAR-E-CONFIG，
   // 跨运行重建的进程缓存为空，工作区来自上次注册时此缺口必现）
   await warmCarConfig({ cwd: workspaceRoot })
   const loaded = loadCarConfig({ cwd: workspaceRoot })
   if (loaded.error) throw new Error(loaded.error)
   const llm = mergeLlmConfig(process.env, loaded.config, {})
-  if (!llm.baseUrl || !llm.model) {
+  const baseUrl = endpoint?.baseUrl ?? llm.baseUrl
+  const model = endpoint?.model ?? llm.model
+  if (endpoint?.key) process.env['OPENAI_API_KEY'] = endpoint.key
+  if (!baseUrl || !model) {
     throw new Error(
       'CAR-E-LLM-CONFIG: 会话主旅程需要 llm.baseUrl + llm.model——' +
         '配置 car.config.ts（export default { llm: { baseUrl: "https://…", model: "…" } }）' +
@@ -52,11 +71,14 @@ export async function loadHostRuntime(workspaceRoot: string): Promise<HostRuntim
   const credService = new CredentialService()
   const core = new RuntimeCore(credService)
   core.bindContext(new Context())
-  const adapter: LlmAdapter & { id: string } = llm.adapterId === 'anthropic'
-    ? createAnthropicAdapter({ baseUrl: llm.baseUrl, credentials: credService, provider: 'anthropic' })
-    : createOpenAICompatAdapter({ baseUrl: llm.baseUrl, credentials: credService, provider: 'openai-compat' })
+  const adapter: LlmAdapter & { id: string } = endpoint
+    ? createOpenAICompatAdapter({ baseUrl, credentials: credService, provider: 'openai-compat' })
+    : llm.adapterId === 'anthropic'
+      ? createAnthropicAdapter({ baseUrl, credentials: credService, provider: 'anthropic' })
+      : createOpenAICompatAdapter({ baseUrl, credentials: credService, provider: 'openai-compat' })
   core.registerLlmAdapter(adapter, { default: true })
-  return { core, llm, toolDefs: [], mcpServers: loaded.config.mcp?.servers ?? {} }
+  const contextWindow = endpoint?.contextWindow ?? null
+  return { core, llm: { ...llm, baseUrl, model }, toolDefs: [], mcpServers: loaded.config.mcp?.servers ?? {}, contextWindow }
 }
 
 /** 生产 model 回调：chatStep 包装（内核 N1/脱敏/投影内嵌；模型名取会话态——D-S2-3 model/set 生效点） */
@@ -87,7 +109,7 @@ export function createChatModelFn(opts: {
 }
 
 /** 凭据在位探测（doctor 展示位；值不打印——只回布尔与来源键名） */
-export function credentialPresence(llm: { adapterId?: string; allowEnvFallback: boolean }): { present: boolean; envKey: string } {
+export function credentialPresence(llm: { adapterId?: string; allowEnvFallback?: boolean }): { present: boolean; envKey: string } {
   const envKey = llm.adapterId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'
   return { present: Boolean(process.env[envKey]), envKey }
 }
