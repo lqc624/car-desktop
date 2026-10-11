@@ -255,9 +255,16 @@ export interface FileRuleDTO {
 }
 
 export interface FileSecurityState {
-  version: 1
+  version: number
   updatedAt: number
   rules: FileRuleDTO[]
+  /** S4 网络轴：域名/通配/URL 前缀规则（首条命中；未命中 = ask 落人审门） */
+  networkRules: NetworkRuleDTO[]
+}
+export interface NetworkRuleDTO {
+  id: string
+  pattern: string
+  tier: FileTierDTO
 }
 
 export interface FileSecuritySetRequest {
@@ -291,6 +298,39 @@ export interface SessionSetPolicyRequest {
   workspaceId: string
   sessionId: string
   policy: SessionPolicyDTO
+}
+
+// ── 插件/MCP 装载面 + doctor/端点（S4） ──
+export interface PluginStateDTO {
+  id: string
+  name: string | null
+  version: string | null
+  status: 'loaded' | 'failed'
+  tools: string[]
+  error?: string
+}
+export interface McpServerStateDTO {
+  serverId: string
+  transport: 'stdio' | 'http'
+  status: 'connected' | 'failed'
+  url: string | null
+  tools: string[]
+  error?: string
+}
+export interface DoctorRowDTO {
+  label: string
+  ok: boolean
+  detail: string
+}
+export interface ModelMetaDTO {
+  contextWindow: number
+  thinking: 'none' | 'model-level'
+  label: string
+}
+export interface EndpointMetaDTO {
+  baseUrl: string
+  model: string
+  contextWindow: number | null
 }
 
 // ── 审计报告 / 取证包（S3-S4） ────────────────────────────────────────────
@@ -388,7 +428,7 @@ export interface IpcRequestMap {
   [IpcChannel.SessionUsage]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionRename]: { workspaceId: string; sessionId: string; title: string }
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
-  [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string }
+  [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string; contextWindow?: number }
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
@@ -428,16 +468,27 @@ export interface CarBridge {
   sessionUsage(workspaceId: string, sessionId: string): Promise<SessionUsageResult>
   renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionInfo>
   deleteSession(workspaceId: string, sessionId: string): Promise<void>
-  setSessionModel(workspaceId: string, sessionId: string, model: string): Promise<void>
+  setSessionModel(workspaceId: string, sessionId: string, model: string, contextWindow?: number): Promise<void>
   // —— S3：文件安全设置面（安全中心页） ——
   fileSecurityGet(): Promise<FileSecurityState>
-  fileSecuritySet(rules: FileRuleDTO[]): Promise<FileSecurityState>
+  fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>
   fileSecurityReset(): Promise<FileSecurityState>
   // —— S3：安全中心设置（默认策略 + 备份开关/上限） ——
   securitySettingsGet(): Promise<SecuritySettings>
   securitySettingsSet(patch: SecuritySettingsPatch): Promise<SecuritySettings>
   setSessionPolicy(workspaceId: string, sessionId: string, policy: SessionPolicyDTO): Promise<{ ok: boolean; policy: SessionPolicyDTO }>
   openBackupDir(): Promise<{ ok: boolean; error?: string }>
+  // —— S4：插件/MCP 装载面（只读呈现） ——
+  pluginsList(): Promise<{ registrations: Array<{ id: string; file: string; manifest: unknown }>; states: PluginStateDTO[] }>
+  pluginsAdd(file: string, manifest: { name: string; version: string }): Promise<{ registrations: Array<{ id: string; file: string; manifest: unknown }>; states: PluginStateDTO[] }>
+  pluginsRemove(id: string): Promise<{ registrations: Array<{ id: string; file: string; manifest: unknown }>; states: PluginStateDTO[] }>
+  mcpList(workspaceId: string): Promise<{ states: McpServerStateDTO[]; tools: Array<{ name: string; declaredSideEffect: 'readonly' | 'write' }> }>
+  // —— S4-S2：doctor / 模型元数据 / 自定义端点 ——
+  doctorRun(workspaceId?: string): Promise<{ rows: DoctorRowDTO[] }>
+  modelsMeta(): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null }>
+  credentialsSave(payload: { baseUrl: string; model: string; key: string; contextWindow?: number }): Promise<EndpointMetaDTO>
+  credentialsMeta(): Promise<EndpointMetaDTO | null>
+  credentialsClear(): Promise<unknown>
   // —— S3-S4：审计报告 / 取证导出（审计页） ——
   auditReport(workspaceId: string, sessionId: string): Promise<AuditReport>
   auditExport(workspaceId: string, sessionId: string): Promise<AuditExportResult>

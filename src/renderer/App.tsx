@@ -12,7 +12,10 @@ import type {
 } from '../shared/ipc-contract'
 import { AuditView } from './views/AuditView'
 import { DashView } from './views/DashView'
+import { McpView } from './views/McpView'
+import { PluginsView } from './views/PluginsView'
 import { SecurityView } from './views/SecurityView'
+import { SettingsView } from './views/SettingsView'
 
 /**
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
@@ -126,9 +129,12 @@ export function App() {
   const [showCtx, setShowCtx] = useState(false)
   const [showModelInput, setShowModelInput] = useState(false)
   const [modelInput, setModelInput] = useState('')
-  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security'>('chat')
+  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings'>('chat')
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
   const [showPolicy, setShowPolicy] = useState(false)
+  const [showParams, setShowParams] = useState(false)
+  const [windowSel, setWindowSel] = useState<number | null>(null) // S4-S3 受控版：null = 跟随元数据/端点
+  const [contextWindow, setContextWindow] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const openRef = useRef<{ wsId: string; sessionId: string } | null>(null)
 
@@ -240,6 +246,7 @@ export function App() {
       setOpenId(sessionId)
       setEvents(r.events)
       setSessionModel(r.model)
+      setContextWindow(r.contextWindow ?? null)
       // 会话策略 = 链上最近一次 session/policy，无则回退安全中心默认值
       const polEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'session/policy')
       if (polEvent) {
@@ -265,6 +272,7 @@ export function App() {
     try {
       const info = await window.car.createSession(selected.id)
       await refreshSessions(selected.id)
+      setContextWindow(info.contextWindow ?? null)
       if (info.modelError) {
         setError(`会话已创建，但模型未装配（turn 发送将被拒绝）：${info.modelError}`)
       } else {
@@ -342,8 +350,9 @@ export function App() {
   const switchModel = async (m: string) => {
     if (!selected || !openId || !m.trim()) return
     try {
-      await window.car.setSessionModel(selected.id, openId, m.trim())
+      await window.car.setSessionModel(selected.id, openId, m.trim(), windowSel ?? undefined)
       setSessionModel(m.trim())
+      if (windowSel) setContextWindow(windowSel)
       setShowModelInput(false)
     } catch (e) {
       fail(e)
@@ -375,6 +384,9 @@ export function App() {
           <span className="ver">{probe ? `seam ${probe.seamVersion}` : '…'}</span>
         </div>
 
+        <div className="sec">运行</div>
+        <button className={`item ${view === 'plugins' ? 'sel' : ''}`} onClick={() => setView('plugins')}><span className="ico">⧉</span><span><b>插件</b><small>装载报告 · 工具清单</small></span></button>
+        <button className={`item ${view === 'mcp' ? 'sel' : ''}`} onClick={() => setView('mcp')}><span className="ico">⇄</span><span><b>MCP 服务</b><small>双传输 · 工具过授权门</small></span></button>
         <div className="sec">工作区</div>
         <div className="list">
           {workspaces.length === 0 && <div className="empty">尚未注册工作区</div>}
@@ -459,6 +471,7 @@ export function App() {
           ))}
         </div>
 
+        <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
         <div className="foot">事件级流式 · 与审计 JSONL 同源同序 · S2 会话主旅程</div>
 
         <div className="sec">治理</div>
@@ -500,7 +513,13 @@ export function App() {
         )}
         {status && <div className="status">{status}</div>}
 
-        {view === 'audit' ? (
+        {view === 'plugins' ? (
+          <PluginsView selected={selected} />
+        ) : view === 'mcp' ? (
+          <McpView selected={selected} />
+        ) : view === 'settings' ? (
+          <SettingsView onEndpointChanged={() => setStatus('自定义端点已更新——新会话生效')} />
+        ) : view === 'audit' ? (
           <AuditView selected={selected} sessions={sessions} />
         ) : view === 'dash' ? (
           <DashView selected={selected} />
@@ -532,6 +551,26 @@ export function App() {
                   </div>
                 )}
               </div>
+              <button className="pill" onClick={() => setShowParams((v) => !v)} title="模型参数（会话级——model/set 落链）">
+                窗口：{windowSel ? Math.round(windowSel / 1000) + 'k · 手动' : '跟随元数据'} ▾
+              </button>
+              {showParams && (
+                <div className="ctx-pop policy-menu">
+                  <div className="mm-sec" style={{ fontSize: '.7rem', opacity: 0.6, padding: '0 0 6px' }}>上下文窗口声明（D-C5：无值不显示百分比，禁估算）</div>
+                  {[
+                    [null, '跟随元数据 / 端点声明'],
+                    [32000, '32k · 手动'],
+                    [64000, '64k · 手动'],
+                    [128000, '128k · 手动'],
+                    [256000, '256k · 手动'],
+                  ].map(([v, label]) => (
+                    <button key={String(v)} className={'btn' + (windowSel === v ? ' primary' : '')} onClick={() => { setWindowSel(v as number | null); setShowParams(false) }}>
+                      {label as string}
+                    </button>
+                  ))}
+                  <div className="dim" style={{ fontSize: '.68rem', padding: '6px 2px 0' }}>内置模型窗口取元数据表；自定义端点可手动声明。声明随 model/set 落链。</div>
+                </div>
+              )}
               <button className="pill" onClick={() => setShowModelInput((v) => !v)} title="切换模型（model/set 落链）">
                 模型：{sessionModel ?? '未配置'} ▾
               </button>
@@ -559,6 +598,10 @@ export function App() {
             </div>
             {showCtx && usage && (
               <div className="ctx-pop">
+                <div className="ctx-title-row"><b>上下文容量</b><span className="mono">{contextWindow ? Math.round(((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow * 100) + '%' : '—'}</span></div>
+                <div className="ctx-segbar"><i style={{ width: contextWindow ? Math.min(100, ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow * 100) + '%' : '0%', background: contextWindow && ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow > 0.92 ? 'var(--danger, #d24949)' : contextWindow && ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow > 0.78 ? 'var(--warn, #b97d10)' : 'var(--accent, #5e6ad2)' }} /></div>
+                <div className="cp-row"><span>最近请求占用{contextWindow ? '（窗口 ' + Math.round(contextWindow / 1000) + 'k · 紧急阈值 78%）' : '（窗口未声明——百分比不显示，D-C5）'}</span><b>{fmtTok((usage.lastInput ?? 0) + (usage.lastOutput ?? 0))}</b></div>
+                <div className="cp-row"><span>平均缓存命中率</span><b>{usage.input + usage.cacheRead > 0 ? Math.round(usage.cacheRead / (usage.input + usage.cacheRead) * 100) + '%' : '—'}</b></div>
                 <div>turn 数：{usage.turns} · 请求：{usage.requests} · usage 覆盖率：{usage.coverage == null ? '—' : Math.round(usage.coverage * 100) + '%'}</div>
                 <div>累计：in {fmtTok(usage.input)} · out {fmtTok(usage.output)} · 缓存读 {fmtTok(usage.cacheRead)} · 缓存写 {fmtTok(usage.cacheCreation)}</div>
                 <div>最近请求：in {fmtTok(usage.lastInput)} / out {fmtTok(usage.lastOutput)}（usage 事件真实值，缺失不估算）</div>

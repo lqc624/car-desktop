@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { FileRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
+import type { FileRuleDTO, NetworkRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
 
 /**
  * S3-S3 安全中心设置页（对照原型 v0.3；S3-S2/S3-S3 通道消费）：
@@ -20,12 +20,16 @@ export function SecurityView() {
   const [status, setStatus] = useState<string | null>(null)
   const [newPath, setNewPath] = useState('')
   const [quotaInput, setQuotaInput] = useState('2000')
+  const [netRules, setNetRules] = useState<NetworkRuleDTO[]>([])
+  const [netPattern, setNetPattern] = useState('')
+  const [netTier, setNetTier] = useState<'allow' | 'ask' | 'deny'>('ask')
 
   const load = useCallback(async () => {
     setError(null)
     try {
       const st = await window.car.fileSecurityGet()
       setRules(st.rules)
+      setNetRules(st.networkRules)
       setDirty(false)
       setSettings(await window.car.securitySettingsGet())
     } catch (e) {
@@ -45,10 +49,11 @@ export function SecurityView() {
     setError(null)
     setStatus(null)
     try {
-      const st = await window.car.fileSecuritySet(rules)
+      const st = await window.car.fileSecuritySet({ version: 2, rules, networkRules: netRules })
       setRules(st.rules)
+      setNetRules(st.networkRules)
       setDirty(false)
-      setStatus(`规则已保存（${st.rules.length} 条·首条命中优先）`)
+      setStatus(`规则已保存（文件 ${st.rules.length} 条 · 网络 ${st.networkRules.length} 条·首条命中优先）`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -60,6 +65,7 @@ export function SecurityView() {
     try {
       const st = await window.car.fileSecurityReset()
       setRules(st.rules)
+      setNetRules(st.networkRules)
       setDirty(false)
       setStatus('已重置为出厂预设（8 条）')
     } catch (e) {
@@ -177,6 +183,40 @@ export function SecurityView() {
         </button>
       </div>
 
+      <h3>网络规则（远程 MCP 工具 · net 类）</h3>
+      <div className="row wrap">
+        <input className="grow mono" placeholder="域名（example.com / *.example.com）或 URL 前缀（https://api.example.com/v1）" value={netPattern} onChange={(e) => setNetPattern(e.target.value)} />
+        <select value={netTier} onChange={(e) => setNetTier(e.target.value as 'allow' | 'ask' | 'deny')}>
+          <option value="allow">允许</option>
+          <option value="ask">询问</option>
+          <option value="deny">拒绝</option>
+        </select>
+        <button className="btn" disabled={!netPattern.trim()} onClick={() => { setNetRules((prev) => [...prev, { id: 'net-' + Date.now().toString(36), pattern: netPattern.trim(), tier: netTier }]); setNetPattern(''); setDirty(true) }}>
+          ＋ 添加（默认{netTier === 'allow' ? '允许' : netTier === 'ask' ? '询问' : '拒绝'}）
+        </button>
+      </div>
+      <p className="dim">首条命中；未命中 = ask（MCP 工具全过人审门）。domain 精确/子域、*.domain 仅子域、URL 前缀精确匹配。</p>
+      <div className="rules">
+        {netRules.length === 0 && <p className="dim">无网络规则。</p>}
+        {netRules.map((r, i) => (
+          <div key={r.id} className="rule-row">
+            <span className="idx">{i === 0 ? '最先匹配' : '#' + (i + 1)}</span>
+            <code className="path">{r.pattern}</code>
+            <span className="tier">
+              <select value={r.tier} onChange={(e) => { setNetRules((prev) => prev.map((x, xi) => (xi === i ? { ...x, tier: e.target.value as 'allow' | 'ask' | 'deny' } : x))); setDirty(true) }}>
+                <option value="allow">允许</option>
+                <option value="ask">询问</option>
+                <option value="deny">拒绝</option>
+              </select>
+            </span>
+            <span className="ops">
+              <button className="mini" disabled={i === 0} onClick={() => { setNetRules((prev) => { const next = [...prev]; [next[i], next[i - 1]] = [next[i - 1], next[i]]; return next }); setDirty(true) }}>▲</button>
+              <button className="mini" disabled={i === netRules.length - 1} onClick={() => { setNetRules((prev) => { const next = [...prev]; [next[i], next[i + 1]] = [next[i + 1], next[i]]; return next }); setDirty(true) }}>▼</button>
+              <button className="mini danger" onClick={() => { setNetRules((prev) => prev.filter((_, xi) => xi !== i)); setDirty(true) }}>✕</button>
+            </span>
+          </div>
+        ))}
+      </div>
       <h3>自动备份</h3>
       {settings && (
         <div className="row wrap">

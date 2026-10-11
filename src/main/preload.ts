@@ -33,11 +33,9 @@ const bridge: CarBridge = {
   renameSession: (workspaceId, sessionId, title) =>
     ipcRenderer.invoke(IpcChannel.SessionRename, { workspaceId, sessionId, title }),
   deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionDelete, { workspaceId, sessionId }),
-  setSessionModel: (workspaceId, sessionId, model) =>
-    ipcRenderer.invoke(IpcChannel.SessionSetModel, { workspaceId, sessionId, model }),
   // —— S3：文件安全 / 安全中心设置 / 会话策略 / 备份 / 审计 / 计量 ——
   fileSecurityGet: () => ipcRenderer.invoke(IpcChannel.FileSecurityGet),
-  fileSecuritySet: (rules) => ipcRenderer.invoke(IpcChannel.FileSecuritySet, { rules }),
+  fileSecuritySet: (payload) => ipcRenderer.invoke(IpcChannel.FileSecuritySet, payload),
   fileSecurityReset: () => ipcRenderer.invoke(IpcChannel.FileSecurityReset),
   securitySettingsGet: () => ipcRenderer.invoke(IpcChannel.SecuritySettingsGet),
   securitySettingsSet: (patch) => ipcRenderer.invoke(IpcChannel.SecuritySettingsSet, { patch }),
@@ -47,6 +45,17 @@ const bridge: CarBridge = {
   auditReport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.AuditReport, { workspaceId, sessionId }),
   auditExport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.AuditExport, { workspaceId, sessionId }),
   meteringSummary: (workspaceId) => ipcRenderer.invoke(IpcChannel.MeteringSummary, { workspaceId }),
+  pluginsList: () => ipcRenderer.invoke(IpcChannel.PluginsList),
+  pluginsAdd: (file, manifest) => ipcRenderer.invoke(IpcChannel.PluginsAdd, { file, manifest }),
+  pluginsRemove: (id) => ipcRenderer.invoke(IpcChannel.PluginsRemove, { id }),
+  mcpList: (workspaceId) => ipcRenderer.invoke(IpcChannel.McpList, { workspaceId }),
+  doctorRun: (workspaceId) => ipcRenderer.invoke(IpcChannel.DoctorRun, workspaceId ? { workspaceId } : {}),
+  modelsMeta: () => ipcRenderer.invoke(IpcChannel.ModelsMeta),
+  credentialsSave: (payload) => ipcRenderer.invoke(IpcChannel.CredentialsSave, payload),
+  credentialsMeta: () => ipcRenderer.invoke(IpcChannel.CredentialsMeta),
+  credentialsClear: () => ipcRenderer.invoke(IpcChannel.CredentialsClear),
+  setSessionModel: (workspaceId, sessionId, model, contextWindow) =>
+    ipcRenderer.invoke(IpcChannel.SessionSetModel, { workspaceId, sessionId, model, ...(contextWindow !== undefined ? { contextWindow } : {}) }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),

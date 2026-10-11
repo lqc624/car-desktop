@@ -329,7 +329,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             title: alive.title,
             model: alive.sessionModel,
             modelError: alive.modelError,
-            contextWindow: alive.contextWindow,
+            contextWindow: alive.sessionWindow ?? alive.contextWindow,
             events: [...alive.knownEvents()],
           } satisfies SessionOpenResult
         }
@@ -337,10 +337,13 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const events = parseSessionEvents(root, sessionId)
         const idx = readSessionIndex(root)
         let model: string | null = null
+        let sessionWindow: number | null = null
         for (const e of events) {
           if (e.kind === 'system' && (e.payload as Record<string, unknown> | null)?.['type'] === 'model/set') {
             const m = (e.payload as Record<string, unknown>)['model']
             if (typeof m === 'string') model = m
+            const cw = (e.payload as Record<string, unknown>)['contextWindow']
+            if (typeof cw === 'number') sessionWindow = cw
           }
         }
         return {
@@ -454,8 +457,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
       case IpcChannel.SessionSetModel: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         const model = requireString(p.model, 'model')
+        const cw = typeof p.contextWindow === 'number' && p.contextWindow > 0 ? p.contextWindow : null
         handle.sessionModel = model
-        handle.appendNarrative('model/set', { model }) // D-S2-3：既有 system kind + payload.type，内核 EventKind 冻结面不新增
+        handle.sessionWindow = cw
+        // D-S2-3：既有 system kind + payload.type（payload 加法：窗口声明随 model/set 落链），EventKind 冻结面不新增
+        handle.appendNarrative('model/set', { model, ...(cw ? { contextWindow: cw } : {}) })
         return { ok: true, model }
       }
       case IpcChannel.FileSecurityGet:

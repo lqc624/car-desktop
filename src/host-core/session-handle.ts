@@ -50,6 +50,8 @@ export interface SessionHandleDeps {
   extraTools?: HostToolDef[]
   /** S4：MCP 工具名 → 远程 server url（网络轴判定数据源；stdio 工具不在册） */
   mcpToolUrl?: Map<string, string>
+  /** S4-S2：装配时解析的上下文窗口（元数据表/端点声明；null = 不显示百分比） */
+  contextWindow: number | null
 }
 
 interface HandleInit {
@@ -76,6 +78,10 @@ export class SessionHandle {
   readonly abort = { aborted: false }
   /** 会话策略（S3-S3）：新建 = securitySettings 默认值；会话内 setPolicy 切换（落链） */
   policy: SessionPolicy
+  /** S4-S2：装配时解析的上下文窗口（D-C5：null = 渲染层不显示百分比） */
+  readonly contextWindow: number | null
+  /** S4-S3：会话级窗口声明（model/set 随链；null = 未声明，回退装配值） */
+  sessionWindow: number | null = null
 
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
@@ -100,6 +106,7 @@ export class SessionHandle {
     this.log = opts.log ?? new SessionLog(init.sessionId)
     this.turnSeq = opts.turnSeq ?? 0
     this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
+    this.contextWindow = init.deps.contextWindow ?? null
     this.tools = mergeToolSources(
       builtinTools(
         init.workspaceRoot,
