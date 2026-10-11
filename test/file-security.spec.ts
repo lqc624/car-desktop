@@ -328,7 +328,7 @@ test('E2E·fallback-outside（S3-S2 语义升级）：未命中+工作区外 →
 
 test('E2E·fs_read 脱敏落链（K-FS-4）：凭据形态被遮蔽——链上不进密钥原文', async () => {
   const env = await makeEnv(() => ({ tool: 'fs_read', args: { path: 'cred.txt' } }))
-  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345'
+  const secret = 'sk-abcdefghijklmnopqrstuvwxyz012345' // secrets-scan:allow —— 假密钥 fixture（K-FS-4 脱敏断言的检测靶料，非真实凭据）
   writeFileSync(join(env.root, 'cred.txt'), 'token: ' + secret + '\n', 'utf8')
   const t = await sendTurn(env, '读凭据')
   await waitForTurnEnd(env, t)
