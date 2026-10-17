@@ -153,6 +153,11 @@ export function App() {
       .probe()
       .then(setProbe)
       .catch(fail)
+    // 启动加载已注册工作区（userData/workspaces.json——重启后侧栏不再为空）
+    window.car
+      .listWorkspaces()
+      .then(setWorkspaces)
+      .catch(fail)
     const offEvent = window.car.onSessionEvent((p: SessionEventPush) => {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
@@ -518,7 +523,7 @@ export function App() {
         ) : view === 'mcp' ? (
           <McpView selected={selected} />
         ) : view === 'settings' ? (
-          <SettingsView onEndpointChanged={() => setStatus('自定义端点已更新——新会话生效')} />
+          <SettingsView selected={selected} onEndpointChanged={() => setStatus('自定义端点已更新——新会话生效')} />
         ) : view === 'audit' ? (
           <AuditView selected={selected} sessions={sessions} />
         ) : view === 'dash' ? (

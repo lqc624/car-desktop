@@ -156,6 +156,9 @@ function registerIpc(): void {
     clearEndpoint(app.getPath('userData'))
     return callHost(IpcChannel.CredentialsKeyPush, { clear: true })
   })
+  // —— S4-S2：doctor 全项 + 模型元数据（值不打印；元数据表 Key 永不出面——终验红条修补：main 路由漏注册） ——
+  ipcMain.handle(IpcChannel.DoctorRun, (_event, payload: unknown) => callHost(IpcChannel.DoctorRun, payload))
+  ipcMain.handle(IpcChannel.ModelsMeta, () => callHost(IpcChannel.ModelsMeta))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

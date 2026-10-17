@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { DoctorRowDTO, EndpointMetaDTO, ModelMetaDTO } from '../../shared/ipc-contract'
+import type { DoctorRowDTO, EndpointMetaDTO, ModelMetaDTO, WorkspaceInfo } from '../../shared/ipc-contract'
 
 /**
  * S4-S2 设置/诊断（立项书 F-D5）：doctor 全项（凭据在位/LLM 连通性/seam——值不打印）
@@ -7,7 +7,7 @@ import type { DoctorRowDTO, EndpointMetaDTO, ModelMetaDTO } from '../../shared/i
  * Key 经 main 解密后内存推宿主装配；渲染层只见「已配置」态，Key 永不回显——N-D1）。
  */
 
-export function SettingsView({ onEndpointChanged }: { onEndpointChanged?: () => void }) {
+export function SettingsView({ selected, onEndpointChanged }: { selected?: WorkspaceInfo | null; onEndpointChanged?: () => void }) {
   const [rows, setRows] = useState<DoctorRowDTO[] | null>(null)
   const [endpoint, setEndpoint] = useState<EndpointMetaDTO | null>(null)
   const [meta, setMeta] = useState<Record<string, ModelMetaDTO> | null>(null)
@@ -34,7 +34,7 @@ export function SettingsView({ onEndpointChanged }: { onEndpointChanged?: () => 
     setError(null)
     setBusy(true)
     try {
-      const r = await window.car.doctorRun()
+      const r = await window.car.doctorRun(selected?.id)
       setRows(r.rows)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -46,7 +46,8 @@ export function SettingsView({ onEndpointChanged }: { onEndpointChanged?: () => 
   useEffect(() => {
     void load()
     void runDoctor()
-  }, [load, runDoctor])
+    // 工作区切换 = 诊断目标变化（adapterId/凭据键名/连通性 baseUrl 随工作区 car.config）
+  }, [load, runDoctor, selected?.id])
 
   const save = async () => {
     setError(null)
