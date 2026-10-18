@@ -17,7 +17,16 @@
  *  - 授权审计事件形态 = 内核 #commit：kind:'turnEnd' + turnId:'authz:*'（渲染层按
  *    turnId 前缀区分，不当真 turn 收口渲染）。
  */
-import { runTurn, SessionFileStore, SessionLog, AuthzService, type AuthzRequest } from '@lqc123qwe/car-runtime'
+import {
+  runTurn,
+  SessionFileStore,
+  SessionLog,
+  AuthzService,
+  shouldCompact,
+  applyCompaction,
+  type AuthzRequest,
+  type CompactionConfig,
+} from '@lqc123qwe/car-runtime'
 import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsageResult } from '../shared/ipc-contract.ts'
 import { parseEventLine } from './model.ts'
 import { builtinTools, fileActionOf } from './tools.ts'
@@ -52,6 +61,8 @@ export interface SessionHandleDeps {
   mcpToolUrl?: Map<string, string>
   /** S4-S2：装配时解析的上下文窗口（元数据表/端点声明；null = 不显示百分比） */
   contextWindow: number | null
+  /** S5（D-S5-2）：压缩策略（car.config llm.compaction——会话创建时读取注入；缺省 undefined = 关） */
+  compactionCfg?: CompactionConfig
 }
 
 interface HandleInit {
@@ -82,6 +93,10 @@ export class SessionHandle {
   readonly contextWindow: number | null
   /** S4-S3：会话级窗口声明（model/set 随链；null = 未声明，回退装配值） */
   sessionWindow: number | null = null
+  /** S5（D-S5-3）：会话级思考档位（model/set 随链；null = 未选，off 同义） */
+  sessionReasoning: 'off' | 'low' | 'medium' | 'high' | null = null
+  /** S5（D-S5-2）：压缩策略（sendTurn 自动挂载点判定入参） */
+  readonly compactionCfg: CompactionConfig | undefined
 
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
@@ -107,6 +122,7 @@ export class SessionHandle {
     this.turnSeq = opts.turnSeq ?? 0
     this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
     this.contextWindow = init.deps.contextWindow ?? null
+    this.compactionCfg = init.deps.compactionCfg
     this.tools = mergeToolSources(
       builtinTools(
         init.workspaceRoot,
@@ -174,6 +190,29 @@ export class SessionHandle {
     return this.policy
   }
 
+  /**
+   * 会话级思考档位（S5 / D-S5-3）：off/low/medium/high——落链口径 = model/set payload 加法
+   * （reasoning 键，EventKind 零新增）；off/缺席 = chatStep 不下发该字段（字节面零痕迹）。
+   */
+  setReasoning(effort: 'off' | 'low' | 'medium' | 'high'): void {
+    if (this.sessionReasoning !== effort) {
+      this.sessionReasoning = effort
+      // model/set 复用（会话级参数同一链面）：payload.reasoning 随链
+      this.appendNarrative('model/set', {
+        model: this.sessionModel ?? '',
+        reasoning: effort,
+        ...(this.sessionWindow ? { contextWindow: this.sessionWindow } : {}),
+      })
+    }
+  }
+
+  /** 立即压缩（S5 / D-S5-2 IPC session:compact）：fail-visible（CAR-E-COMPACT-* 向渲染层传播）；保护段 N 来自配置 */
+  compactNow(): { seq: number; compactedUpTo: number; compactedEvents: number } {
+    const ev = applyCompaction(this.log, { turnId: 'compaction', protectLastTurns: this.compactionCfg?.protectLastTurns ?? 4 })
+    const p = ev.payload as { compactedUpTo: number; compactedEvents: number }
+    return { seq: ev.seq, compactedUpTo: p.compactedUpTo, compactedEvents: p.compactedEvents }
+  }
+
   /** 已知事件全集（本会话生于本进程，内存即全量；usage/回放共用） */
   knownEvents(): readonly SessionEventDTO[] {
     return this.log.events as unknown as readonly SessionEventDTO[]
@@ -190,6 +229,17 @@ export class SessionHandle {
     }
     this.busy = true
     this.abort.aborted = false
+    // S5（D-S5-2）：自动压缩挂载点——先压缩后 append user（保护段 = 首个 system + 最近 N turn，
+    // 内核 planCompaction 语义；N 来自配置；shouldCompact 缺省关 = 1.13 行为零变化）。
+    // 自动触发 = best-effort：shouldCompact（事件计数）命中但保护段覆盖全部 turn（无可折叠区间）时
+    // 跳过本回合压缩——非降级面（用户显式 session:compact 仍 fail-visible 传播 NORANGE）。
+    if (this.compactionCfg && shouldCompact(this.log, this.compactionCfg)) {
+      try {
+        applyCompaction(this.log, { turnId: 'compaction', protectLastTurns: this.compactionCfg.protectLastTurns ?? 4 })
+      } catch (err) {
+        console.error('[host] 自动压缩跳过（无可折叠区间）：', err instanceof Error ? err.message : err)
+      }
+    }
     const turnId = 'T' + String(++this.turnSeq)
     this.currentTurnIdValue = turnId
     this.log.append('user', 'user', turnId, text)
@@ -422,6 +472,9 @@ export function usageOver(events: readonly SessionEventDTO[]): SessionUsageResul
   let cacheCreation = 0
   let lastInput: number | null = null
   let lastOutput: number | null = null
+  let reasoning = 0
+  let hasReasoning = false
+  let lastReasoning: number | null = null
   for (const e of events) {
     if (e.kind === 'turnEnd' && !e.turnId.startsWith('authz:')) turns++
     if (e.kind !== 'usage') continue
@@ -431,6 +484,13 @@ export function usageOver(events: readonly SessionEventDTO[]): SessionUsageResul
     output += n('output')
     cacheRead += n('cacheRead')
     cacheCreation += n('cacheCreation')
+    // S5（D-S5-3 / K-MP-2b）：分段事实聚合——provider 真实细分，无事实不带键（禁估算）
+    const seg = (p['segments'] ?? null) as { reasoningTokens?: unknown } | null
+    if (seg && typeof seg.reasoningTokens === 'number') {
+      reasoning += seg.reasoningTokens
+      hasReasoning = true
+      lastReasoning = seg.reasoningTokens
+    }
     if (typeof p['input'] === 'number') lastInput = p['input'] as number
     if (typeof p['output'] === 'number') lastOutput = p['output'] as number
     requests++
@@ -446,6 +506,7 @@ export function usageOver(events: readonly SessionEventDTO[]): SessionUsageResul
     cacheCreation,
     lastInput,
     lastOutput,
+    ...(hasReasoning ? { segments: { reasoningTokens: reasoning }, lastSegments: { reasoningTokens: lastReasoning! } } : {}),
     coverage: turns > 0 ? usageTurns.size / turns : null,
   }
 }

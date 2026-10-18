@@ -54,8 +54,16 @@ const bridge: CarBridge = {
   credentialsSave: (payload) => ipcRenderer.invoke(IpcChannel.CredentialsSave, payload),
   credentialsMeta: () => ipcRenderer.invoke(IpcChannel.CredentialsMeta),
   credentialsClear: () => ipcRenderer.invoke(IpcChannel.CredentialsClear),
-  setSessionModel: (workspaceId, sessionId, model, contextWindow) =>
-    ipcRenderer.invoke(IpcChannel.SessionSetModel, { workspaceId, sessionId, model, ...(contextWindow !== undefined ? { contextWindow } : {}) }),
+  setSessionModel: (workspaceId, sessionId, model, contextWindow, reasoningEffort) =>
+    ipcRenderer.invoke(IpcChannel.SessionSetModel, {
+      workspaceId,
+      sessionId,
+      model,
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    }),
+  // —— S5：立即压缩（append-only compact 事件） ——
+  compactNow: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionCompact, { workspaceId, sessionId }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),

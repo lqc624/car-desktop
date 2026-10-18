@@ -23,11 +23,39 @@
   "build": {
     "appId": "com.yicaifeng.car-desktop",
     "productName": "CAR Desktop",
-    "directories": { "output": "release" },
-    "files": ["dist-electron/**", "dist/**", "package.json"],
-    "asarUnpack": ["**/node_modules/koffi/**"],
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "dir", "arch": ["x64"] }], "signAndEditExecutable": false },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "artifactName": "CAR-Desktop-${version}-win-x64-setup.exe" },
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**",
+      "dist/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/koffi/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "CAR-Desktop-${version}-win-x64-setup.exe"
+    },
     "npmRebuild": false
   },
   "devDependencies": {
@@ -42,7 +70,7 @@
     "vite": "^5.4.21"
   },
   "dependencies": {
-    "@lqc123qwe/car-runtime": "1.13.0",
+    "@lqc123qwe/car-runtime": "1.14.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   }

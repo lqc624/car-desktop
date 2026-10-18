@@ -3,6 +3,7 @@ import type {
   AuthzPendingPush,
   AuthzResolvedPush,
   HostProbeResult,
+  ModelMetaDTO,
   SessionEventDTO,
   SessionEventPush,
   SessionInfo,
@@ -21,6 +22,8 @@ import { SettingsView } from './views/SettingsView'
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
  * 落链事件；授权 120s 倒计时仅展示口径，超时判定真值在内核——D-S2-5）。
  * 错误呈现纪律：任何 Promise 拒绝落红条全文展示（fail-visible，禁静默吞错）。
+ * S5：布局对齐原型 v0.5——左栏三段式（导航/列表/底部）+ 输入区右下聚类
+ * [上下文圆环][模型][发送] + 模型菜单（搜索/分组/✓/★默认）+ 模型池状态与降级横幅（fail-visible）。
  */
 
 interface ToolCard {
@@ -46,9 +49,26 @@ function argsPreview(args: unknown): string {
   return typeof path === 'string' ? path : JSON.stringify(args ?? {}).slice(0, 80)
 }
 
-function buildChatItems(events: SessionEventDTO[]): ChatItem[] {
+/** S5（D-S5-4）：模型清单项——分组呈现（内置元数据表 / 池端点） */
+interface ModelOption {
+  id: string
+  group: string
+  contextWindow: number | null
+  thinking: 'none' | 'model-level' | null
+}
+
+/** 池降级事件（routing/decide——fail-visible 横幅数据源） */
+interface RoutingEvent {
+  seq: number
+  selected: string | null
+  reason: string
+  retries: number
+}
+
+function buildChatItems(events: SessionEventDTO[]): { items: ChatItem[]; routing: RoutingEvent[] } {
   const items: ChatItem[] = []
   const cards = new Map<string, ToolCard>()
+  const routing: RoutingEvent[] = []
   for (const e of events) {
     const payload = e.payload
     const p = (payload ?? {}) as Record<string, unknown>
@@ -56,6 +76,19 @@ function buildChatItems(events: SessionEventDTO[]): ChatItem[] {
       items.push({ kind: 'msg', role: 'user', text: String(payload ?? '') })
     } else if (e.kind === 'assistant') {
       items.push({ kind: 'msg', role: 'agent', text: String(payload ?? '') })
+    } else if (e.kind === 'routing') {
+      // S5（D-S5-1）：模型池路由决策——降级 fail-visible（禁静默换模型）
+      routing.push({ seq: e.seq, selected: p['selected'] as string | null, reason: String(p['reason'] ?? '?'), retries: Number(p['retries'] ?? 0) })
+      if (p['reason'] === 'fallback' || p['reason'] === 'exhausted') {
+        items.push({
+          kind: 'line',
+          tone: 'warn',
+          text:
+            p['reason'] === 'exhausted'
+              ? `模型池全部候选不可用（重试 ${String(p['retries'] ?? 0)} 次）——本轮已停止`
+              : `模型池降级 → ${String(p['selected'] ?? '?')}（fallback · 重试 ${String(p['retries'] ?? 0)}——routing/decide 已落链）`,
+        })
+      }
     } else if (e.kind === 'toolCall') {
       const callId = String(p['id'] ?? '')
       const card: ToolCard = {
@@ -76,6 +109,8 @@ function buildChatItems(events: SessionEventDTO[]): ChatItem[] {
         // 内核授权决策留痕（先落日志后放行）——执行结果另有 toolResult
         card.authz = p['granted'] === true ? 'granted' : 'denied'
         if (p['granted'] !== true) card.error = '授权拒绝（authorization-denied）'
+      } else if (p['error'] === 'authorization-denied') {
+        card.error = '授权拒绝（authorization-denied）'
       } else if (typeof p['error'] === 'string') {
         card.error = p['error']
       } else if (p['result'] !== undefined) {
@@ -102,10 +137,23 @@ function buildChatItems(events: SessionEventDTO[]): ChatItem[] {
       else if (type === 'model/set') items.push({ kind: 'line', tone: 'dim', text: `模型切换 → ${String(p['model'] ?? '?')}（model/set 已落链）` })
       else if (type === 'session/rename') items.push({ kind: 'line', tone: 'dim', text: `会话重命名 → ${String(p['title'] ?? '?')}` })
       else if (type === 'session/policy') items.push({ kind: 'line', tone: 'dim', text: `会话策略 → ${String(p['policy'] ?? '?')}（session/policy 已落链）` })
+      else if (type === 'compact') items.push({ kind: 'line', tone: 'dim', text: `历史已压缩（context/compact 已落链，seq=${String(e.seq)}）` })
     }
     // kind usage：turnEnd 摘要已覆盖，不重复渲染
   }
-  return items
+  return { items, routing }
+}
+
+/** S5（D-S5-4）：★ 默认模型 = localStorage 端侧偏好（不落审计链） */
+const DEFAULT_MODEL_KEY = 'car-desktop.defaultModel'
+function readDefaultModel(): string | null {
+  try { return localStorage.getItem(DEFAULT_MODEL_KEY) } catch { return null }
+}
+function writeDefaultModel(m: string | null): void {
+  try {
+    if (m == null) localStorage.removeItem(DEFAULT_MODEL_KEY)
+    else localStorage.setItem(DEFAULT_MODEL_KEY, m)
+  } catch { /* 存储不可用 = 端侧偏好降级，不阻塞 */ }
 }
 
 export function App() {
@@ -117,6 +165,9 @@ export function App() {
   const [events, setEvents] = useState<SessionEventDTO[]>([])
   const [usage, setUsage] = useState<SessionUsageResult | null>(null)
   const [sessionModel, setSessionModel] = useState<string | null>(null)
+  const [meta, setMeta] = useState<Record<string, ModelMetaDTO>>({})
+  const [poolMembers, setPoolMembers] = useState<Array<{ id: string; baseUrl: string; model: string; adapterId: string }>>([])
+  const [defaultModel, setDefaultModelState] = useState<string | null>(() => readDefaultModel())
   const [pending, setPending] = useState<AuthzPendingPush | null>(null)
   const [countdown, setCountdown] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -127,18 +178,22 @@ export function App() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [showCtx, setShowCtx] = useState(false)
-  const [showModelInput, setShowModelInput] = useState(false)
-  const [modelInput, setModelInput] = useState('')
+  const [showModelMenu, setShowModelMenu] = useState(false)
+  const [modelSearch, setModelSearch] = useState('')
   const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings'>('chat')
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
   const [showPolicy, setShowPolicy] = useState(false)
-  const [showParams, setShowParams] = useState(false)
   const [windowSel, setWindowSel] = useState<number | null>(null) // S4-S3 受控版：null = 跟随元数据/端点
   const [contextWindow, setContextWindow] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const openRef = useRef<{ wsId: string; sessionId: string } | null>(null)
 
   const fail = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), [])
+
+  const setDefaultModel = useCallback((m: string | null) => {
+    setDefaultModelState(m)
+    writeDefaultModel(m)
+  }, [])
 
   const refreshSessions = useCallback(
     async (wsId: string) => {
@@ -158,6 +213,11 @@ export function App() {
       .listWorkspaces()
       .then(setWorkspaces)
       .catch(fail)
+    // S5（D-S5-4）：模型菜单数据面（内置元数据表——池端点随会话装配另取）
+    window.car
+      .modelsMeta()
+      .then((r) => setMeta(r.meta))
+      .catch(() => setMeta({}))
     const offEvent = window.car.onSessionEvent((p: SessionEventPush) => {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
@@ -262,6 +322,9 @@ export function App() {
           .then((s) => setPolicy(s.sessionDefaultPolicy))
           .catch(() => setPolicy('default'))
       }
+      // S5（D-S5-3）：会话级思考档位 = 链上最近一次 model/set 的 reasoning 键
+      const reEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'model/set' && typeof (e.payload as Record<string, unknown>)['reasoning'] === 'string')
+      setSessionReasoning(reEvent ? ((reEvent.payload as Record<string, unknown>)['reasoning'] as 'off' | 'low' | 'medium' | 'high') : null)
       setUsage(await window.car.sessionUsage(selected.id, sessionId))
       setPending(null)
       setBusy(false)
@@ -282,6 +345,14 @@ export function App() {
         setError(`会话已创建，但模型未装配（turn 发送将被拒绝）：${info.modelError}`)
       } else {
         setStatus('已新建会话（session-start 已落链）')
+        // S5（D-S5-4）：新建会话默认应用 ★ 模型（偏好本身不落链；应用为会话级 model/set 落链可解释）
+        const target = defaultModel
+        if (target && openRef.current) {
+          try {
+            await window.car.setSessionModel(openRef.current.wsId, openRef.current.sessionId, target, undefined, sessionReasoning ?? undefined)
+            setSessionModel(target)
+          } catch { /* 默认模型不可用 = 保留装配锚点，不阻塞 */ }
+        }
       }
     } catch (e) {
       fail(e)
@@ -352,13 +423,39 @@ export function App() {
     }
   }
 
+  const [sessionReasoning, setSessionReasoning] = useState<'off' | 'low' | 'medium' | 'high' | null>(null)
+
   const switchModel = async (m: string) => {
     if (!selected || !openId || !m.trim()) return
     try {
-      await window.car.setSessionModel(selected.id, openId, m.trim(), windowSel ?? undefined)
+      await window.car.setSessionModel(selected.id, openId, m.trim(), windowSel ?? undefined, sessionReasoning ?? undefined)
       setSessionModel(m.trim())
       if (windowSel) setContextWindow(windowSel)
-      setShowModelInput(false)
+      setShowModelMenu(false)
+      setModelSearch('')
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  const switchReasoning = async (e: 'off' | 'low' | 'medium' | 'high') => {
+    if (!selected || !openId) return
+    try {
+      await window.car.setSessionModel(selected.id, openId, sessionModel ?? '', windowSel ?? undefined, e)
+      setSessionReasoning(e)
+      setStatus(`思考程度 → ${e === 'off' ? '关（不下发 reasoning_effort）' : e}（model/set 已落链）`)
+    } catch (err) {
+      fail(err)
+    }
+  }
+
+  const compactSession = async () => {
+    if (!selected || !openId) return
+    setError(null)
+    try {
+      const r = await window.car.compactNow(selected.id, openId)
+      setStatus(`历史已压缩：seq=${r.seq}，折叠 ${r.compactedEvents} 条事件（context/compact 已落链）`)
+      void window.car.sessionUsage(selected.id, openId).then(setUsage).catch(fail)
     } catch (e) {
       fail(e)
     }
@@ -378,26 +475,76 @@ export function App() {
   }
 
   // ── 渲染 ──────────────────────────────────────────────────────────────
-  const items = buildChatItems(events)
+  const { items, routing } = buildChatItems(events)
+  // S5（D-S5-1）：最近的池降级/耗尽事件 → 顶部横幅（fail-visible，禁静默换模型）
+  const lastRouting = routing.at(-1) ?? null
+  const showRoutingBanner = lastRouting != null && (lastRouting.reason === 'fallback' || lastRouting.reason === 'exhausted')
+  // S5（D-S5-4）：模型菜单数据面 = 内置元数据表 + 池端点，搜索过滤
+  const builtinOptions: ModelOption[] = Object.entries(meta).map(([id, m]) => ({
+    id,
+    group: '内置模型',
+    contextWindow: m.contextWindow,
+    thinking: m.thinking,
+  }))
+  const poolOptions: ModelOption[] = poolMembers.map((m) => ({ id: m.model, group: `池端点 ${m.id}`, contextWindow: null, thinking: null }))
+  const seenModels = new Set<string>()
+  const allOptions = [...poolOptions, ...builtinOptions].filter((o) => {
+    if (seenModels.has(o.id)) return false
+    seenModels.add(o.id)
+    return modelSearch.trim() ? o.id.toLowerCase().includes(modelSearch.trim().toLowerCase()) : true
+  })
+  const groups = [...new Set(allOptions.map((o) => o.group))]
+  const lastUsed = (usage?.lastInput ?? 0) + (usage?.lastOutput ?? 0)
+  const pct = contextWindow ? Math.min(100, (lastUsed / contextWindow) * 100) : null
+  const pctColor = pct == null ? 'var(--accent, #5e6ad2)' : pct > 92 ? 'var(--danger, #d24949)' : pct > 78 ? 'var(--warn, #b97d10)' : 'var(--accent, #5e6ad2)'
 
   return (
     <div className="app">
       <aside className="sidebar">
+        {/* ── 段一：视图导航 ─────────────────────────────── */}
         <div className="brand">
-          <span className="logo">CR</span>
+          <span className="logo">◈</span>
           <b>CAR Desktop</b>
-          <span className="ver">{probe ? `seam ${probe.seamVersion}` : '…'}</span>
         </div>
-
         <div className="sec">运行</div>
         <button className={`item ${view === 'plugins' ? 'sel' : ''}`} onClick={() => setView('plugins')}><span className="ico">⧉</span><span><b>插件</b><small>装载报告 · 工具清单</small></span></button>
         <button className={`item ${view === 'mcp' ? 'sel' : ''}`} onClick={() => setView('mcp')}><span className="ico">⇄</span><span><b>MCP 服务</b><small>双传输 · 工具过授权门</small></span></button>
-        <div className="sec">工作区</div>
+        <div className="sec">治理</div>
+        <button className={`item ${view === 'audit' ? 'sel' : ''}`} onClick={() => setView('audit')}>
+          <span className="ico">≡</span>
+          <span>
+            <b>审计流水</b>
+            <small>链校验 · 断链定位 · 取证</small>
+          </span>
+        </button>
+        <button className={`item ${view === 'dash' ? 'sel' : ''}`} onClick={() => setView('dash')}>
+          <span className="ico">▦</span>
+          <span>
+            <b>仪表盘</b>
+            <small>计量 · 按模型 · turn 明细</small>
+          </span>
+        </button>
+        <button className={`item ${view === 'security' ? 'sel' : ''}`} onClick={() => setView('security')}>
+          <span className="ico">⛨</span>
+          <span>
+            <b>安全中心</b>
+            <small>文件规则 · 备份 · 策略</small>
+          </span>
+        </button>
+        <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
+
+        {/* ── 段二：工作区/会话列表 ───────────────────────── */}
+        <div className="sec">
+          工作区
+          <button className="mini" onClick={() => void pickWorkspace()}>
+            ＋ 注册
+          </button>
+        </div>
         <div className="list">
           {workspaces.length === 0 && <div className="empty">尚未注册工作区</div>}
           {workspaces.map((w) => (
             <button key={w.id} className={`item ${selected?.id === w.id ? 'sel' : ''}`} onClick={() => void selectWorkspace(w)} title={w.path}>
-              <span className="ico">◈</span>
+              <span className="ico">◆</span>
               <span>
                 <b>{w.name}</b>
                 <small>{w.configPath ? 'config 已装载' : '无 car.config'}</small>
@@ -405,32 +552,23 @@ export function App() {
             </button>
           ))}
         </div>
-        <div className="ws-actions">
-          <button className="btn" onClick={() => void pickWorkspace()}>
-            ＋ 选择文件夹注册…
-          </button>
-          <div className="manual">
-            <input
-              placeholder="或输入绝对路径…"
-              value={manualPath}
-              onChange={(e) => setManualPath(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && manualPath.trim()) void addByPath()
-              }}
-            />
-            <button className="btn" disabled={!manualPath.trim()} onClick={() => void addByPath()}>
-              注册
-            </button>
-          </div>
+        <div className="manual">
+          <input
+            placeholder="按绝对路径注册…"
+            value={manualPath}
+            onChange={(e) => setManualPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && manualPath.trim()) void addByPath()
+            }}
+          />
         </div>
-
         <div className="sec">
           会话
           <button className="mini" disabled={!selected} onClick={() => void newSession()}>
             ＋ 新建
           </button>
         </div>
-        <div className="list">
+        <div className="list grow">
           {!selected && <div className="empty">先选择工作区</div>}
           {selected && sessions.length === 0 && <div className="empty">此工作区暂无会话</div>}
           {sessions.map((s) => (
@@ -476,38 +614,15 @@ export function App() {
           ))}
         </div>
 
-        <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
-        <div className="foot">事件级流式 · 与审计 JSONL 同源同序 · S2 会话主旅程</div>
-
-        <div className="sec">治理</div>
-        <div className="nav">
-          <button className={`item ${view === 'audit' ? 'sel' : ''}`} onClick={() => setView('audit')}>
-            <span className="ico">≡</span>
-            <span>
-              <b>审计流水</b>
-              <small>链校验 · 断链定位 · 取证</small>
-            </span>
-          </button>
-          <button className={`item ${view === 'dash' ? 'sel' : ''}`} onClick={() => setView('dash')}>
-            <span className="ico">▦</span>
-            <span>
-              <b>仪表盘</b>
-              <small>计量 · 按模型 · turn 明细</small>
-            </span>
-          </button>
-          <button className={`item ${view === 'security' ? 'sel' : ''}`} onClick={() => setView('security')}>
-            <span className="ico">⛨</span>
-            <span>
-              <b>安全中心</b>
-              <small>文件规则 · 备份 · 策略</small>
-            </span>
-          </button>
+        {/* ── 段三：底部 ─────────────────────────────────── */}
+        <div className="side-foot">
+          {view !== 'chat' && (
+            <button className="btn" onClick={() => setView('chat')}>
+              ← 返回会话
+            </button>
+          )}
+          <div className="foot">事件级流式 · 与审计 JSONL 同源同序</div>
         </div>
-        {view !== 'chat' && (
-          <button className="btn" style={{ margin: '8px 10px' }} onClick={() => setView('chat')}>
-            ← 返回会话
-          </button>
-        )}
       </aside>
 
       <main className="main">
@@ -556,56 +671,23 @@ export function App() {
                   </div>
                 )}
               </div>
-              <button className="pill" onClick={() => setShowParams((v) => !v)} title="模型参数（会话级——model/set 落链）">
-                窗口：{windowSel ? Math.round(windowSel / 1000) + 'k · 手动' : '跟随元数据'} ▾
-              </button>
-              {showParams && (
-                <div className="ctx-pop policy-menu">
-                  <div className="mm-sec" style={{ fontSize: '.7rem', opacity: 0.6, padding: '0 0 6px' }}>上下文窗口声明（D-C5：无值不显示百分比，禁估算）</div>
-                  {[
-                    [null, '跟随元数据 / 端点声明'],
-                    [32000, '32k · 手动'],
-                    [64000, '64k · 手动'],
-                    [128000, '128k · 手动'],
-                    [256000, '256k · 手动'],
-                  ].map(([v, label]) => (
-                    <button key={String(v)} className={'btn' + (windowSel === v ? ' primary' : '')} onClick={() => { setWindowSel(v as number | null); setShowParams(false) }}>
-                      {label as string}
-                    </button>
-                  ))}
-                  <div className="dim" style={{ fontSize: '.68rem', padding: '6px 2px 0' }}>内置模型窗口取元数据表；自定义端点可手动声明。声明随 model/set 落链。</div>
+              {showRoutingBanner && lastRouting && (
+                <div className={`routing-banner ${lastRouting.reason === 'exhausted' ? 'danger' : ''}`} role="status">
+                  {lastRouting.reason === 'exhausted'
+                    ? `⚠ 模型池全部候选不可用（重试 ${lastRouting.retries} 次）——已按序降级尝试，fail-visible 落链`
+                    : `⚠ 模型池降级 → ${lastRouting.selected}（fallback · 重试 ${lastRouting.retries}——routing/decide 已落链）`}
                 </div>
               )}
-              <button className="pill" onClick={() => setShowModelInput((v) => !v)} title="切换模型（model/set 落链）">
-                模型：{sessionModel ?? '未配置'} ▾
-              </button>
-              {showModelInput && (
-                <span className="manual">
-                  <input
-                    placeholder="同端点 Model ID…"
-                    value={modelInput}
-                    autoFocus
-                    onChange={(e) => setModelInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void switchModel(modelInput)
-                      if (e.key === 'Escape') setShowModelInput(false)
-                    }}
-                  />
-                  <button className="btn" disabled={!modelInput.trim()} onClick={() => void switchModel(modelInput)}>
-                    切换
-                  </button>
-                </span>
-              )}
-              <button className="pill" onClick={() => setShowCtx((v) => !v)}>
-                上下文{usage ? `：累计 in ${fmtTok(usage.input)} / out ${fmtTok(usage.output)}` : ''}
-              </button>
               {busy && <span className="live">● turn 进行中</span>}
             </div>
             {showCtx && usage && (
-              <div className="ctx-pop">
-                <div className="ctx-title-row"><b>上下文容量</b><span className="mono">{contextWindow ? Math.round(((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow * 100) + '%' : '—'}</span></div>
-                <div className="ctx-segbar"><i style={{ width: contextWindow ? Math.min(100, ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow * 100) + '%' : '0%', background: contextWindow && ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow > 0.92 ? 'var(--danger, #d24949)' : contextWindow && ((usage.lastInput ?? 0) + (usage.lastOutput ?? 0)) / contextWindow > 0.78 ? 'var(--warn, #b97d10)' : 'var(--accent, #5e6ad2)' }} /></div>
-                <div className="cp-row"><span>最近请求占用{contextWindow ? '（窗口 ' + Math.round(contextWindow / 1000) + 'k · 紧急阈值 78%）' : '（窗口未声明——百分比不显示，D-C5）'}</span><b>{fmtTok((usage.lastInput ?? 0) + (usage.lastOutput ?? 0))}</b></div>
+              <div className="ctx-pop ctx-up">
+                <div className="ctx-title-row"><b>上下文容量</b><span className="mono">{pct != null ? Math.round(pct) + '%' : '—'}</span></div>
+                <div className="ctx-segbar"><i style={{ width: (pct ?? 0) + '%', background: pctColor }} /></div>
+                {usage.segments && (
+                  <div className="cp-row"><span>思考输出（reasoning_tokens，provider 真实细分）</span><b>{fmtTok(usage.segments.reasoningTokens)}</b></div>
+                )}
+                <div className="cp-row"><span>最近请求占用{contextWindow ? `（窗口 ${Math.round(contextWindow / 1000)}k · 紧急阈值 78%）` : '（窗口未声明——百分比不显示，D-C5）'}</span><b>{fmtTok(lastUsed)}</b></div>
                 <div className="cp-row"><span>平均缓存命中率</span><b>{usage.input + usage.cacheRead > 0 ? Math.round(usage.cacheRead / (usage.input + usage.cacheRead) * 100) + '%' : '—'}</b></div>
                 <div>turn 数：{usage.turns} · 请求：{usage.requests} · usage 覆盖率：{usage.coverage == null ? '—' : Math.round(usage.coverage * 100) + '%'}</div>
                 <div>累计：in {fmtTok(usage.input)} · out {fmtTok(usage.output)} · 缓存读 {fmtTok(usage.cacheRead)} · 缓存写 {fmtTok(usage.cacheCreation)}</div>
@@ -672,6 +754,7 @@ export function App() {
                 )
               })}
             </div>
+            {/* ── S5：输入区右下聚类 [上下文圆环][模型][发送]（原型 v0.5 同构，弹层向上） ── */}
             <div className="chat-input">
               <input
                 placeholder={busy ? 'turn 进行中…（可停止）' : '给 Agent 布置任务…（Enter 发送）'}
@@ -682,24 +765,123 @@ export function App() {
                   if (e.key === 'Enter' && !busy) void send()
                 }}
               />
-              {busy ? (
-                <button className="btn danger" onClick={() => void stop()}>
-                  ■ 停止
-                </button>
-              ) : (
-                <button className="btn primary" disabled={!input.trim()} onClick={() => void send()}>
-                  发送
-                </button>
-              )}
+              <div className="input-cluster">
+                <div className="cluster-item" style={{ position: 'relative' }}>
+                  <button className="ctx-ring" onClick={() => setShowCtx((v) => !v)} title="上下文容量">
+                    <svg viewBox="0 0 36 36" width="30" height="30">
+                      <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--line, #2a2f3a)" strokeWidth="3.5" />
+                      {pct != null && (
+                        <circle
+                          cx="18"
+                          cy="18"
+                          r="15.5"
+                          fill="none"
+                          stroke={pctColor}
+                          strokeWidth="3.5"
+                          strokeLinecap="round"
+                          strokeDasharray={`${(pct / 100) * 97.4} 97.4`}
+                          transform="rotate(-90 18 18)"
+                        />
+                      )}
+                    </svg>
+                  </button>
+                </div>
+                <div className="cluster-item" style={{ position: 'relative' }}>
+                  <button className="pill" onClick={() => setShowModelMenu((v) => !v)} title="模型选择与参数（会话级，model/set 落链）">
+                    {sessionModel ?? '未配置'} ▾
+                  </button>
+                  {showModelMenu && (
+                    <div className="ctx-pop model-menu ctx-up">
+                      <input
+                        className="mm-search"
+                        placeholder="搜索模型…"
+                        value={modelSearch}
+                        autoFocus
+                        onChange={(e) => setModelSearch(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && allOptions.length > 0) void switchModel(allOptions[0]!.id)
+                          if (e.key === 'Escape') setShowModelMenu(false)
+                        }}
+                      />
+                      {defaultModel && <div className="mm-default">★ 默认：{defaultModel}（端侧偏好，不落链）</div>}
+                      {groups.map((g) => (
+                        <div key={g} className="mm-group">
+                          <div className="mm-sec">{g}</div>
+                          {allOptions
+                            .filter((o) => o.group === g)
+                            .map((o) => (
+                              <button key={o.id} className={`mm-item${sessionModel === o.id ? ' sel' : ''}`} onClick={() => void switchModel(o.id)}>
+                                <span className="mm-check">{sessionModel === o.id ? '✓' : ''}</span>
+                                <span className="mm-name">
+                                  {defaultModel === o.id ? '★ ' : ''}
+                                  {o.id}
+                                </span>
+                                <small className="dim">
+                                  {o.contextWindow ? Math.round(o.contextWindow / 1000) + 'k' : ''}
+                                  {o.thinking === 'model-level' ? ' · 思考绑定模型' : o.thinking === 'none' ? ' · 非思考档' : ''}
+                                </small>
+                              </button>
+                            ))}
+                        </div>
+                      ))}
+                      {allOptions.length === 0 && <div className="empty">无匹配模型</div>}
+                      <div className="mm-sec" style={{ borderTop: '1px solid var(--line, #2a2f3a)', marginTop: 6, paddingTop: 8 }}>思考程度（reasoning_effort，关 = 不下发）</div>
+                      <div className="mm-row">
+                        {(['off', 'low', 'medium', 'high'] as const).map((e) => (
+                          <button key={e} className={'btn' + (sessionReasoning === e ? ' primary' : '')} onClick={() => void switchReasoning(e)}>
+                            {e === 'off' ? '关' : e}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mm-sec">上下文窗口声明（D-C5：无值不显示百分比）</div>
+                      <div className="mm-row">
+                        {(
+                          [
+                            [null, '跟随'],
+                            [32000, '32k'],
+                            [64000, '64k'],
+                            [128000, '128k'],
+                            [256000, '256k'],
+                          ] as const
+                        ).map(([v, label]) => (
+                          <button
+                            key={String(v)}
+                            className={'btn' + (windowSel === v ? ' primary' : '')}
+                            onClick={() => {
+                              setWindowSel(v as number | null)
+                              if (selected && openId && sessionModel) void window.car.setSessionModel(selected.id, openId, sessionModel, v as number | undefined, sessionReasoning ?? undefined)
+                              if (v != null) setContextWindow(v as number)
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mm-sec">自动压缩（阈值在 car.config llm.compaction；缺省关）</div>
+                      <button className="btn" onClick={() => void compactSession()}>立即压缩（context/compact 落链）</button>
+                    </div>
+                  )}
+                </div>
+                {busy ? (
+                  <button className="btn danger" onClick={() => void stop()}>
+                    ■ 停止
+                  </button>
+                ) : (
+                  <button className="btn primary" disabled={!input.trim()} onClick={() => void send()}>
+                    发送
+                  </button>
+                )}
+              </div>
             </div>
           </section>
         ) : (
           <section className="card">
             <h2>会话主旅程</h2>
             <p className="dim">
-              选择/新建会话开始。S3 能力：chat 事件级流式 · M3 授权门三档（120s 超时默认拒绝）·
-              文件安全规则（安全中心）· 自动备份 · 会话策略三档 · 审计流水（链校验/取证导出）·
-              计量仪表盘 · 跨运行续写。
+              选择/新建会话开始。S5 能力：chat 事件级流式 · M3 授权门三档（120s 超时默认拒绝）·
+              模型菜单（搜索/分组/★默认）· 思考程度（reasoning_effort）· 模型池（降级 fail-visible）·
+              立即压缩（context/compact 落链）· 文件安全规则 · 自动备份 · 会话策略三档 ·
+              审计流水 · 计量仪表盘 · 跨运行续写。
             </p>
           </section>
         )}

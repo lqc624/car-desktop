@@ -35,7 +35,7 @@ import {
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
 import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
-import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter } from '@lqc123qwe/car-runtime'
+import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
 import { runDoctor } from './doctor.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
@@ -200,6 +200,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
           currentTurnId: () => handle.currentTurnId(),
           currentModel: () => handle.sessionModel ?? '',
           toolDefs: mergeToolSources(builtinTools(root, fileSecurity), extraTools),
+          // S5（D-S5-3）：会话级思考档位实时读（model/set 即时生效）
+          currentReasoning: () => handle.sessionReasoning,
         }),
       )
     }
@@ -209,12 +211,22 @@ export function createHostService(opts: HostServiceOptions): HostService {
   // —— S4-S2：自定义端点（main safeStorage 解密后经 credentials:key-push 内存推送——不落盘不打印） ——
   let endpoint: { baseUrl: string; model: string; key: string; contextWindow: number | null } | null = null
 
-  /** 装载模型（doctor/会话共用）：端点覆盖 > car.config（R-D6）；contextWindow = 元数据表/端点声明（D-C5 无值 null） */
-  async function loadRuntimeFor(root: string): Promise<{ runtime: HostRuntime | null; modelError: string | null; contextWindow: number | null }> {
-    let runtime: HostRuntime | null = null
+  /** 装载模型（doctor/会话共用）：端点覆盖 > car.config（R-D6）；contextWindow = 元数据表/端点声明（D-C5 无值 null）。
+   *  S5（D-S5-1）：routingSink holder 随装配返回——RuntimeCore 先建、句柄 log 后建回填（routing/decide 落链）。 */
+  async function loadRuntimeFor(root: string): Promise<{
+    runtime: Awaited<ReturnType<typeof loadHostRuntime>> | null
+    modelError: string | null
+    contextWindow: number | null
+    routingSink: { current: ((d: RoutingDecision) => void) | null }
+  }> {
+    let runtime: Awaited<ReturnType<typeof loadHostRuntime>> | null = null
     let modelError: string | null = null
+    const routingSink: { current: ((d: RoutingDecision) => void) | null } = { current: null }
     try {
-      runtime = await loadHostRuntime(root, endpoint)
+      runtime = await loadHostRuntime(root, endpoint, {
+        // onDecide → holder（句柄 log 回填后落链；未回填期决策丢弃——会话创建早于任何请求）
+        routingSink: (d) => routingSink.current?.(d),
+      })
     } catch (err) {
       modelError = err instanceof Error ? err.message : String(err)
       console.error('[host] 模型未装配（turn 发送将被拒绝）：', modelError)
@@ -222,7 +234,20 @@ export function createHostService(opts: HostServiceOptions): HostService {
     const activeModel = endpoint?.model ?? runtime?.llm.model ?? null
     const meta = resolveModelMeta(activeModel)
     const contextWindow = meta?.contextWindow ?? endpoint?.contextWindow ?? null
-    return { runtime, modelError, contextWindow }
+    return { runtime, modelError, contextWindow, routingSink }
+  }
+
+  /** routing/decide 落链（S5 / D-S5-1）：句柄 log 回填——事件链只追加红线 */
+  function wireRoutingSink(routingSink: { current: ((d: RoutingDecision) => void) | null }, handle: SessionHandle): void {
+    routingSink.current = (d) => {
+      handle.log.append('runtime', 'routing', d.turnId ?? 'T0', {
+        type: 'decide',
+        selected: d.selected,
+        reason: d.reason,
+        retries: d.retries,
+        attempts: d.attempts,
+      })
+    }
   }
 
   async function dispatch(channel: string, payload: unknown): Promise<unknown> {
@@ -250,13 +275,23 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const workspaceId = p['workspaceId'] ? requireString(p.workspaceId, 'workspaceId') : null
         let llm: { adapterId?: string; allowEnvFallback?: boolean; baseUrl?: string } = { allowEnvFallback: false, baseUrl: undefined }
         let configError: string | null = null
+        let poolMembers: Array<{ id: string; baseUrl: string; model: string; adapterId: 'openai-compat' | 'anthropic' }> = []
         if (workspaceId) {
           try {
             const root = registry.pathOf(workspaceId)
             await warmCarConfig({ cwd: root })
             const loaded = loadCarConfig({ cwd: root })
             if (loaded.error) configError = loaded.error
-            else llm = mergeLlmConfig(process.env, loaded.config, {})
+            else {
+              llm = mergeLlmConfig(process.env, loaded.config, {})
+              // S5（D-S5-5）：池端点 → doctor 池健康行（probe 只需 baseUrl/adapterId——id 为展示定位）
+              poolMembers = (loaded.config.modelPool?.endpoints ?? []).map((ep, i) => ({
+                id: ep.id ?? `ep-${i + 1}`,
+                baseUrl: ep.baseUrl,
+                model: ep.model,
+                adapterId: ep.adapterId ?? 'openai-compat',
+              }))
+            }
           } catch (err) {
             configError = err instanceof Error ? err.message : String(err)
           }
@@ -270,6 +305,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             endpointKeyPresent: endpoint !== null,
             effectiveBaseUrl: endpoint?.baseUrl ?? llm.baseUrl ?? '',
             probeKey: endpoint?.key ?? process.env[llm.adapterId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] ?? null,
+            poolMembers,
           }).then((r) => r.rows)),
         ]
         return { rows }
@@ -292,7 +328,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const root = registry.pathOf(workspaceId)
         const sessionId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
         mkdirSync(sessionsDirFor(root), { recursive: true })
-        const { runtime, modelError, contextWindow } = await loadRuntimeFor(root)
+        const { runtime, modelError, contextWindow, routingSink } = await loadRuntimeFor(root)
         // S4-S1：工具源装载（builtin + 插件 + MCP）——跨源同名显式报错（mergeToolSources）
         const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
         const handle = SessionHandle.createFresh({
@@ -301,8 +337,10 @@ export function createHostService(opts: HostServiceOptions): HostService {
           workspaceRoot: root,
           configModel: runtime?.llm.model ?? null,
           modelError,
-          deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl },
+          deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
         })
+        // S5（D-S5-1）：routing/decide 落链出口回填（先于任何请求——未回填期无决策丢失面）
+        wireRoutingSink(routingSink, handle)
         attachRuntimeModel(handle, runtime, root, extraTools)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
@@ -376,7 +414,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           if (loaded.brokenAt !== null) {
             throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
           }
-          const { runtime, modelError, contextWindow } = await loadRuntimeFor(root)
+          const { runtime, modelError, contextWindow, routingSink } = await loadRuntimeFor(root)
           const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
           handle = SessionHandle.resume(
             {
@@ -385,10 +423,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
               workspaceRoot: root,
               configModel: runtime?.llm.model ?? null,
               modelError,
-              deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl },
+              deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
             },
             loaded.log,
           )
+          wireRoutingSink(routingSink, handle)
           attachRuntimeModel(handle, runtime, root, extraTools)
           handle.title = idx.sessions[sessionId]?.title ?? '未命名会话'
           handles.set(key(workspaceId, sessionId), handle)
@@ -458,11 +497,24 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         const model = requireString(p.model, 'model')
         const cw = typeof p.contextWindow === 'number' && p.contextWindow > 0 ? p.contextWindow : null
+        const re = typeof p.reasoningEffort === 'string' && ['off', 'low', 'medium', 'high'].includes(p.reasoningEffort)
+          ? (p.reasoningEffort as 'off' | 'low' | 'medium' | 'high')
+          : null
         handle.sessionModel = model
         handle.sessionWindow = cw
-        // D-S2-3：既有 system kind + payload.type（payload 加法：窗口声明随 model/set 落链），EventKind 冻结面不新增
-        handle.appendNarrative('model/set', { model, ...(cw ? { contextWindow: cw } : {}) })
+        if (re) handle.sessionReasoning = re
+        // D-S2-3：既有 system kind + payload.type（payload 加法：窗口声明/思考档随 model/set 落链），EventKind 冻结面不新增
+        handle.appendNarrative('model/set', {
+          model,
+          ...(cw ? { contextWindow: cw } : {}),
+          ...(re ? { reasoning: re } : {}),
+        })
         return { ok: true, model }
+      }
+      // —— S5（D-S5-2）：立即压缩（内核 applyCompaction——append-only compact 事件） ——
+      case IpcChannel.SessionCompact: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return handle.compactNow()
       }
       case IpcChannel.FileSecurityGet:
         return fileSecurityStore.get()

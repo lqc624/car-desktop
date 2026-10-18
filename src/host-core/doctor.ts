@@ -7,6 +7,7 @@
  *    计耗时；失败回错误类别（HTTP 状态 / 网络错误），不回请求内容；
  *  ③seam 探测：probeSeam 复用（版本/符号数——doctor 展示位既有事实）。
  */
+import { probePoolMember, type PoolMember } from '@lqc123qwe/car-runtime'
 import { probeSeam } from './probe.ts'
 import { credentialPresence } from './model.ts'
 
@@ -26,6 +27,8 @@ export interface DoctorInput {
   effectiveBaseUrl: string
   /** 连通性探测用 Key（自定义端点内存 Key 或 env——只进请求头，禁打印） */
   probeKey: string | null
+  /** S5（D-S5-5）：池成员（car.config llm.modelPool——无池 = 空数组，不出池健康段） */
+  poolMembers?: PoolMember[]
 }
 
 /** LLM 连通性最小探测：GET {baseUrl}/models（OpenAI 兼容）/ {baseUrl}/v1/models（anthropic），5s 超时 */
@@ -70,5 +73,16 @@ export async function runDoctor(input: DoctorInput): Promise<{ rows: DoctorRow[]
   // ③seam 探测（probeSeam 既有展示位）
   const seam = probeSeam()
   rows.push({ label: '内核 seam', ok: seam.symbolCount > 0, detail: `${seam.seamVersion}（${seam.symbolCount} 符号导出）` })
+  // ④S5（D-S5-5）：池健康行——逐端点 probePoolMember（值不打印纪律延续：只出状态/延迟/类别）
+  for (const m of input.poolMembers ?? []) {
+    const h = await probePoolMember(m, { timeoutMs: 4000 })
+    rows.push({
+      label: `池端点 ${m.id}`,
+      ok: h.ok,
+      detail: h.ok
+        ? `可达 · HTTP ${h.status ?? '?'} · ${h.latencyMs}ms · model=${m.model}`
+        : `不可达 · ${h.errorCategory ?? 'network-error'} · ${h.latencyMs}ms（降级时按序 fallback，fail-visible 落链）`,
+    })
+  }
   return { rows }
 }

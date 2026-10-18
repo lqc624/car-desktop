@@ -121,6 +121,8 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SessionSetModel, (_event, payload: { workspaceId: string; sessionId: string; model: string }) =>
     callHost(IpcChannel.SessionSetModel, payload),
   )
+  // —— S5：立即压缩（内核 applyCompaction——append-only compact 事件） ——
+  ipcMain.handle(IpcChannel.SessionCompact, (_event, payload: unknown) => callHost(IpcChannel.SessionCompact, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——
   ipcMain.handle(IpcChannel.FileSecurityGet, () => callHost(IpcChannel.FileSecurityGet))
   ipcMain.handle(IpcChannel.FileSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.FileSecuritySet, payload))

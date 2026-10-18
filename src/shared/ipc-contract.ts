@@ -41,6 +41,8 @@ export const IpcChannel = {
   SessionDelete: 'session:delete',
   /** 会话级模型切换（model/set 事件落链——D-S2-3） */
   SessionSetModel: 'session:set-model',
+  /** S5（D-S5-2）：立即压缩（内核 applyCompaction——append-only compact 事件；fail-visible CAR-E-COMPACT-*） */
+  SessionCompact: 'session:compact',
   // —— S3：文件安全设置面（SEC_SETTINGS；host 持久化 + 校验，渲染层接线 S3-S6） ——
   /** 读当前规则表（出厂预设 8 条 / 用户规则） */
   FileSecurityGet: 'fileSecurity:get',
@@ -153,7 +155,8 @@ export interface SessionEventDTO {
   seq: number
   ts: number
   actor: 'user' | 'model' | 'plugin' | 'runtime'
-  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage'
+  /** 内核 EventKind 镜像（1.14 实查：+usage/compact/routing） */
+  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage' | 'compact' | 'routing'
   turnId: string
   payload: unknown
   meta?: Record<string, unknown> | null
@@ -233,6 +236,13 @@ export interface SessionUsageResult {
   /** 最近一次请求的真实 prompt/completion tokens（ctx-pop「已用」口径） */
   lastInput: number | null
   lastOutput: number | null
+  /**
+   * S5（D-S5-3 / K-MP-2b）：分段计量事实（provider 真实输出细分）——
+   * 无分段能力 provider / 无事实 = 不带键（禁估算，ctx-pop 色条退化单色）
+   */
+  segments?: { reasoningTokens: number }
+  /** 最近一次请求的分段事实（同上——无事实不带键） */
+  lastSegments?: { reasoningTokens: number }
   /** turnsWithUsage / turns（turns=0 时 null——禁伪造 100%） */
   coverage: number | null
 }
@@ -428,7 +438,8 @@ export interface IpcRequestMap {
   [IpcChannel.SessionUsage]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionRename]: { workspaceId: string; sessionId: string; title: string }
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
-  [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string; contextWindow?: number }
+  [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string; contextWindow?: number; reasoningEffort?: 'off' | 'low' | 'medium' | 'high' }
+  [IpcChannel.SessionCompact]: { workspaceId: string; sessionId: string }
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
@@ -468,7 +479,9 @@ export interface CarBridge {
   sessionUsage(workspaceId: string, sessionId: string): Promise<SessionUsageResult>
   renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionInfo>
   deleteSession(workspaceId: string, sessionId: string): Promise<void>
-  setSessionModel(workspaceId: string, sessionId: string, model: string, contextWindow?: number): Promise<void>
+  setSessionModel(workspaceId: string, sessionId: string, model: string, contextWindow?: number, reasoningEffort?: 'off' | 'low' | 'medium' | 'high'): Promise<void>
+  /** S5（D-S5-2）：立即压缩（append-only compact 事件；无区间 = CAR-E-COMPACT-NORANGE fail-visible） */
+  compactNow(workspaceId: string, sessionId: string): Promise<{ seq: number; compactedUpTo: number; compactedEvents: number }>
   // —— S3：文件安全设置面（安全中心页） ——
   fileSecurityGet(): Promise<FileSecurityState>
   fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>
