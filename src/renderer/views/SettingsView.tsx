@@ -57,7 +57,8 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         baseUrl: baseUrl.trim(),
         model: model.trim(),
         key: key.trim(),
-        ...(windowInput ? { contextWindow: Number(windowInput) } : {}),
+        // 窗口单位换算：输入框标签是「窗口 k」，宿主 contextWindow 是 token 绝对值（1018 终验红条）
+        ...(windowInput ? { contextWindow: Number(windowInput) * 1000 } : {}),
       })
       setEndpoint(ep)
       setKey('') // Key 不回显（值不打印红线）

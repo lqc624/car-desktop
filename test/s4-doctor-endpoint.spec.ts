@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createHostService, type HostService, type PushMessage } from '../src/host-core/service.ts'
-import type { SessionInfo, WorkspaceInfo } from '../src/shared/ipc-contract.ts'
+import type { SessionInfo, SessionEventDTO, WorkspaceInfo } from '../src/shared/ipc-contract.ts'
 import type { SessionHandle } from '../src/host-core/session-handle.ts'
 import type { HostModelFn } from '../src/host-core/types.ts'
 
@@ -154,4 +154,101 @@ test('E2E·contextWindow 流转（D-C5）：无端点 + 模型不在元数据表
   assert.equal(env.sess.contextWindow ?? null, null, 'test-model 不在元数据表且无端点声明 → null')
   const opened = (await env.svc.dispatch('session:open', { workspaceId: env.ws.id, sessionId: env.sess.sessionId })) as { contextWindow?: number | null }
   assert.equal(opened.contextWindow ?? null, null)
+})
+
+/** OpenAI 兼容 chat 端点 mock：GET /models + POST /chat/completions（SSE 流 + usage 尾块） */
+function startChatEndpointMock(): Promise<{
+  url: string
+  posts: Array<{ auth: string | undefined; body: Record<string, unknown> }>
+  close: () => Promise<void>
+}> {
+  const posts: Array<{ auth: string | undefined; body: Record<string, unknown> }> = []
+  const server: Server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => (raw += c))
+    req.on('end', () => {
+      const url = req.url ?? ''
+      if (req.method === 'GET' && url.endsWith('/models')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ data: [] }))
+        return
+      }
+      if (req.method === 'POST' && url.endsWith('/chat/completions')) {
+        let body: Record<string, unknown> = {}
+        try {
+          body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+        } catch {}
+        posts.push({ auth: req.headers.authorization as string | undefined, body })
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+        res.write(
+          'data: ' +
+            JSON.stringify({
+              id: 'ep-1',
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: { role: 'assistant', content: 'endpoint-ok' }, finish_reason: null }],
+            }) +
+            '\n\n',
+        )
+        res.write(
+          'data: ' +
+            JSON.stringify({
+              id: 'ep-1',
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+            }) +
+            '\n\n',
+        )
+        res.write('data: [DONE]\n\n')
+        res.end()
+        return
+      }
+      res.writeHead(404).end()
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+      resolve({ url, posts, close: () => new Promise<void>((r) => server.close(() => r())) })
+    })
+  })
+}
+
+test('E2E·端点真调（1018 终验回归）：car.config adapterId=anthropic + 端点激活 → 装配 openai-compat 真转 chatStep（无 NOADAPTER）', async () => {
+  const mock = await startChatEndpointMock()
+  const userData = tmpDir('ud')
+  const root = tmpDir('ws')
+  // 复刻 1018 终验现场：car.config 为 anthropic 形态（商汤网关），端点激活后 adapterId 必须被覆盖
+  writeFileSync(join(root, 'car.config.ts'), "export default { llm: { adapterId: 'anthropic', baseUrl: 'http://127.0.0.1:9', model: 'cfg-model' } }\n", 'utf8')
+  const svc = createHostService({ userDataDir: userData })
+  const pushes: PushMessage[] = []
+  svc.onPush((m) => pushes.push(m))
+  const events = (): SessionEventDTO[] =>
+    pushes.filter((m) => m.topic === 'push:session-event').map((m) => (m.payload as { event: SessionEventDTO }).event)
+  try {
+    const ws = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
+    await svc.dispatch('credentials:key-push', { baseUrl: mock.url, model: 'endpoint-model', key: ENDPOINT_KEY, contextWindow: 64_000 })
+    const info = (await svc.dispatch('session:create', { workspaceId: ws.id })) as SessionInfo & { sessionId: string; modelError?: string | null }
+    assert.equal(info.modelError ?? null, null, '端点装配无错（modelError null）')
+    const sent = (await svc.dispatch('turn:send', { workspaceId: ws.id, sessionId: info.sessionId, text: 'hi' })) as { turnId: string }
+    const deadline = Date.now() + 8000
+    let end: SessionEventDTO | undefined
+    while (Date.now() < deadline) {
+      end = events().find((e) => e.kind === 'turnEnd' && e.turnId === sent.turnId)
+      if (end) break
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    assert.ok(end, 'turnEnd 到达')
+    assert.equal((end.meta as Record<string, unknown>)['reason'], 'completed', '端点真调 completed（1018 红条：此前 NOADAPTER error）')
+    assert.ok(
+      events().some((e) => e.kind === 'assistant' && String(e.payload).includes('endpoint-ok')),
+      'assistant 内容来自端点',
+    )
+    assert.equal(mock.posts.length, 1, '端点收到 chat/completions')
+    assert.equal(mock.posts[0].auth, `Bearer ${ENDPOINT_KEY}`, '端点 Key 进 Authorization')
+    assert.equal(mock.posts[0].body['model'], 'endpoint-model', '端点 model 覆盖 car.config')
+  } finally {
+    svc.dispose()
+    await mock.close()
+  }
 })

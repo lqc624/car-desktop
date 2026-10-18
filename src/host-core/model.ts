@@ -78,7 +78,15 @@ export async function loadHostRuntime(
       : createOpenAICompatAdapter({ baseUrl, credentials: credService, provider: 'openai-compat' })
   core.registerLlmAdapter(adapter, { default: true })
   const contextWindow = endpoint?.contextWindow ?? null
-  return { core, llm: { ...llm, baseUrl, model }, toolDefs: [], mcpServers: loaded.config.mcp?.servers ?? {}, contextWindow }
+  // 端点激活 = OpenAI 兼容形态（R-D6）：adapterId 必须同步覆盖——否则 createChatModelFn 按
+  // car.config 的旧 adapterId（如 anthropic）查找未注册适配器 → CAR-E-LLM-NOADAPTER（1018 终验红条）
+  return {
+    core,
+    llm: { ...llm, baseUrl, model, ...(endpoint ? { adapterId: 'openai-compat' } : {}) },
+    toolDefs: [],
+    mcpServers: loaded.config.mcp?.servers ?? {},
+    contextWindow,
+  }
 }
 
 /** 生产 model 回调：chatStep 包装（内核 N1/脱敏/投影内嵌；模型名取会话态——D-S2-3 model/set 生效点） */
