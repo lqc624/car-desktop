@@ -213,10 +213,10 @@ export function App() {
       .listWorkspaces()
       .then(setWorkspaces)
       .catch(fail)
-    // S5（D-S5-4）：模型菜单数据面（内置元数据表——池端点随会话装配另取）
+    // S5（D-S5-4）：模型菜单数据面（内置元数据表——池端点随工作区选择刷新）
     window.car
       .modelsMeta()
-      .then((r) => setMeta(r.meta))
+      .then((r) => { setMeta(r.meta); setPoolMembers(r.pool) })
       .catch(() => setMeta({}))
     const offEvent = window.car.onSessionEvent((p: SessionEventPush) => {
       const cur = openRef.current
@@ -297,6 +297,10 @@ export function App() {
     setBusy(false)
     try {
       setSessions(await window.car.listSessions(w.id))
+      // S5（D-S5-4）：池端点分组数据面（car.config modelPool——随工作区切换刷新）
+      const m = await window.car.modelsMeta(w.id)
+      setMeta(m.meta)
+      setPoolMembers(m.pool)
     } catch (e) {
       fail(e)
     }
@@ -345,14 +349,16 @@ export function App() {
         setError(`会话已创建，但模型未装配（turn 发送将被拒绝）：${info.modelError}`)
       } else {
         setStatus('已新建会话（session-start 已落链）')
-        // S5（D-S5-4）：新建会话默认应用 ★ 模型（偏好本身不落链；应用为会话级 model/set 落链可解释）
-        const target = defaultModel
-        if (target && openRef.current) {
-          try {
-            await window.car.setSessionModel(openRef.current.wsId, openRef.current.sessionId, target, undefined, sessionReasoning ?? undefined)
-            setSessionModel(target)
-          } catch { /* 默认模型不可用 = 保留装配锚点，不阻塞 */ }
-        }
+      }
+      // 新建即打开（S5：会话绑定模型恢复语义 + ★ 默认模型应用面）
+      await openSessionById(info.sessionId)
+      // S5（D-S5-4）：★ 默认模型 → 新会话应用（偏好本身不落链；应用 = 会话级 model/set 落链可解释）
+      const target = defaultModel
+      if (target && !info.modelError) {
+        try {
+          await window.car.setSessionModel(selected.id, info.sessionId, target, undefined, sessionReasoning ?? undefined)
+          setSessionModel(target)
+        } catch { /* 默认模型不可用 = 保留装配锚点，不阻塞 */ }
       }
     } catch (e) {
       fail(e)
@@ -810,17 +816,26 @@ export function App() {
                           {allOptions
                             .filter((o) => o.group === g)
                             .map((o) => (
-                              <button key={o.id} className={`mm-item${sessionModel === o.id ? ' sel' : ''}`} onClick={() => void switchModel(o.id)}>
-                                <span className="mm-check">{sessionModel === o.id ? '✓' : ''}</span>
-                                <span className="mm-name">
-                                  {defaultModel === o.id ? '★ ' : ''}
-                                  {o.id}
-                                </span>
-                                <small className="dim">
-                                  {o.contextWindow ? Math.round(o.contextWindow / 1000) + 'k' : ''}
-                                  {o.thinking === 'model-level' ? ' · 思考绑定模型' : o.thinking === 'none' ? ' · 非思考档' : ''}
-                                </small>
-                              </button>
+                              <div key={o.id} className={`mm-item${sessionModel === o.id ? ' sel' : ''}`}>
+                                <button
+                                  className="mm-star"
+                                  title="设为默认模型（端侧偏好，不落审计链）"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setDefaultModel(defaultModel === o.id ? null : o.id)
+                                  }}
+                                >
+                                  {defaultModel === o.id ? '★' : '☆'}
+                                </button>
+                                <button className="mm-pick" onClick={() => void switchModel(o.id)}>
+                                  <span className="mm-check">{sessionModel === o.id ? '✓' : ''}</span>
+                                  <span className="mm-name">{o.id}</span>
+                                  <small className="dim">
+                                    {o.contextWindow ? Math.round(o.contextWindow / 1000) + 'k' : ''}
+                                    {o.thinking === 'model-level' ? ' · 思考绑定模型' : o.thinking === 'none' ? ' · 非思考档' : ''}
+                                  </small>
+                                </button>
+                              </div>
                             ))}
                         </div>
                       ))}

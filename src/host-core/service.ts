@@ -311,8 +311,27 @@ export function createHostService(opts: HostServiceOptions): HostService {
         return { rows }
       }
       // —— S4-S2：模型元数据（内置静态表 + 端点声明——ctx 百分比真值来源；Key 永不出面） ——
-      case 'models:meta':
-        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow } : null }
+      // —— S5（D-S5-4）：池成员随元数据返回（模型菜单分组数据面——car.config modelPool） ——
+      case 'models:meta': {
+        const wid = p['workspaceId'] ? requireString(p.workspaceId, 'workspaceId') : null
+        let pool: Array<{ id: string; baseUrl: string; model: string; adapterId: 'openai-compat' | 'anthropic' }> = []
+        if (wid) {
+          try {
+            const root = registry.pathOf(wid)
+            await warmCarConfig({ cwd: root })
+            const loaded = loadCarConfig({ cwd: root })
+            if (!loaded.error) {
+              pool = (loaded.config.modelPool?.endpoints ?? []).map((ep, i) => ({
+                id: ep.id ?? `ep-${i + 1}`,
+                baseUrl: ep.baseUrl,
+                model: ep.model,
+                adapterId: ep.adapterId ?? 'openai-compat',
+              }))
+            }
+          } catch { /* 工作区配置不可读 = 空池（元数据面不因池失败而红） */ }
+        }
+        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow } : null, pool }
+      }
       case IpcChannel.HostProbe: {
         const probe = probeSeam()
         return probe satisfies HostProbeResult

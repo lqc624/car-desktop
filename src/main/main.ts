@@ -160,7 +160,8 @@ function registerIpc(): void {
   })
   // —— S4-S2：doctor 全项 + 模型元数据（值不打印；元数据表 Key 永不出面——终验红条修补：main 路由漏注册） ——
   ipcMain.handle(IpcChannel.DoctorRun, (_event, payload: unknown) => callHost(IpcChannel.DoctorRun, payload))
-  ipcMain.handle(IpcChannel.ModelsMeta, () => callHost(IpcChannel.ModelsMeta))
+  // S5：models:meta 载荷透传（workspaceId → 池成员分组数据面——此前无载荷形态丢弃了 workspaceId）
+  ipcMain.handle(IpcChannel.ModelsMeta, (_event, payload: unknown) => callHost(IpcChannel.ModelsMeta, payload))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

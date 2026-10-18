@@ -208,6 +208,34 @@ test('s5-4 自动压缩挂载点：sendTurn 起点先压缩后 append user（thr
   }
 })
 
+// ==================== 模型菜单池数据面（D-S5-4） ====================
+
+test('s5-6 models:meta 池成员数据面：workspaceId → pool 分组（模型菜单消费）；无 workspace = 空池；Key 不出面', async () => {
+  const env = await makeEnv({
+    carConfigExtra:
+      `, modelPool: { endpoints: [` +
+      `{ id: 'ep-a', baseUrl: 'http://127.0.0.1:9/v1', model: 'm-a', keyEnv: 'CAR_S5_MENU_KEY' },` +
+      `{ baseUrl: 'http://127.0.0.1:10/v1', model: 'm-b' }` +
+      `], probe: { enabled: false } }`,
+    modelFnOverride: (h: SessionHandle) => async () => emitAssistant(h, { stopReason: 'stop', text: 'ok' }),
+  })
+  try {
+    const withWs = (await env.svc.dispatch('models:meta', { workspaceId: env.ws.id })) as {
+      pool: Array<{ id: string; baseUrl: string; model: string; adapterId: string }>
+    }
+    assert.equal(withWs.pool.length, 2)
+    assert.equal(withWs.pool[0]!.id, 'ep-a')
+    assert.equal(withWs.pool[0]!.model, 'm-a')
+    assert.equal(withWs.pool[1]!.id, 'ep-2', '无 id 端点派生 ep-2')
+    assert.equal(withWs.pool[1]!.adapterId, 'openai-compat')
+    assert.ok(!JSON.stringify(withWs).includes('CAR_S5_MENU_KEY'), 'keyEnv 键名不携带明文（模型菜单数据面无凭据面）')
+    const noWs = (await env.svc.dispatch('models:meta', {})) as { pool: unknown[] }
+    assert.deepEqual(noWs.pool, [], '无 workspace = 空池（菜单只显内置表）')
+  } finally {
+    env.svc.dispose()
+  }
+})
+
 // ==================== doctor 池健康行（D-S5-5） ====================
 
 test('s5-5 doctor 池健康行：逐端点 probe（可达 ok / 不可达错误类别；值不打印）', async () => {

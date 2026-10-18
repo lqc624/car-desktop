@@ -595,3 +595,12 @@ body {
 .mm-row { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 0 4px; }
 .routing-banner { font-size: 12px; border-radius: 8px; padding: 5px 10px; background: rgba(185, 125, 16, 0.12); color: #8a5f0d; border: 1px solid rgba(185, 125, 16, 0.4); }
 .routing-banner.danger { background: rgba(210, 73, 73, 0.12); color: #a33030; border-color: rgba(210, 73, 73, 0.45); }
+
+/* S5：★ 默认模型切换 + 模型选中行（按钮嵌套） */
+.mm-item { display: flex; align-items: center; gap: 2px; border-radius: 6px; padding: 2px 4px; }
+.mm-item.sel { background: var(--accent-soft); }
+.mm-item:hover { background: var(--bg); }
+.mm-star { border: 0; background: transparent; cursor: pointer; color: #b97d10; font-size: 13px; padding: 2px 4px; border-radius: 4px; flex-shrink: 0; }
+.mm-star:hover { background: var(--bg); }
+.mm-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: transparent; border-radius: 6px; padding: 5px 6px; cursor: pointer; font-family: inherit; text-align: left; }
+.mm-pick:hover { background: transparent; }

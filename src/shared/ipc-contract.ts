@@ -342,6 +342,13 @@ export interface EndpointMetaDTO {
   model: string
   contextWindow: number | null
 }
+/** S5（D-S5-4）：模型菜单池端点项（car.config modelPool——无池 = 空数组） */
+export interface PoolMemberDTO {
+  id: string
+  baseUrl: string
+  model: string
+  adapterId: 'openai-compat' | 'anthropic'
+}
 
 // ── 审计报告 / 取证包（S3-S4） ────────────────────────────────────────────
 
@@ -455,7 +462,7 @@ export interface IpcRequestMap {
   [IpcChannel.PluginsRemove]: { id: string }
   [IpcChannel.McpList]: { workspaceId: string }
   [IpcChannel.DoctorRun]: { workspaceId?: string }
-  [IpcChannel.ModelsMeta]: undefined
+  [IpcChannel.ModelsMeta]: { workspaceId?: string }
   [IpcChannel.CredentialsKeyPush]: { baseUrl: string; model: string; key: string; contextWindow?: number } | { clear: true }
   [IpcChannel.CredentialsSave]: { baseUrl: string; model: string; key: string; contextWindow?: number }
   [IpcChannel.CredentialsMeta]: undefined
@@ -498,7 +505,7 @@ export interface CarBridge {
   mcpList(workspaceId: string): Promise<{ states: McpServerStateDTO[]; tools: Array<{ name: string; declaredSideEffect: 'readonly' | 'write' }> }>
   // —— S4-S2：doctor / 模型元数据 / 自定义端点 ——
   doctorRun(workspaceId?: string): Promise<{ rows: DoctorRowDTO[] }>
-  modelsMeta(): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null }>
+  modelsMeta(workspaceId?: string): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null; pool: PoolMemberDTO[] }>
   credentialsSave(payload: { baseUrl: string; model: string; key: string; contextWindow?: number }): Promise<EndpointMetaDTO>
   credentialsMeta(): Promise<EndpointMetaDTO | null>
   credentialsClear(): Promise<unknown>
