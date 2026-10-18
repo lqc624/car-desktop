@@ -6,3 +6,4 @@ dist-electron/
 release/
 release-1018/
 release-*/
+.verify-s5/
