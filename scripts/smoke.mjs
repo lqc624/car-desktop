@@ -13,7 +13,7 @@ if (typeof electronBin !== 'string') {
   process.exit(1)
 }
 
-const r = spawnSync(electronBin, ['.'], {
+const r = spawnSync(electronBin, ['.', ...(process.env.CAR_SMOKE_ARGS ? process.env.CAR_SMOKE_ARGS.split(' ').filter(Boolean) : [])], {
   env: { ...process.env, CAR_SMOKE: '1' },
   encoding: 'utf8',
   timeout: 120_000,

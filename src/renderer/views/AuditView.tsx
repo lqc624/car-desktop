@@ -108,13 +108,17 @@ export function AuditView({ selected, sessions }: { selected: WorkspaceInfo | nu
                 <tbody>
                   {report.events.map((e) => {
                     const isAuthz = e.turnId.startsWith('authz:')
+                    // S6（D-S6-4）：记忆操作行高亮（memory/write·edit·delete·rollback——落链可查联动）
+                    const isMemory = e.kind === 'memory'
+                    const memType = isMemory ? String((e.payload as Record<string, unknown> | null)?.['type'] ?? '?') : null
+                    const memId = isMemory ? String((e.payload as Record<string, unknown> | null)?.['id'] ?? '?') : null
                     return (
-                      <tr key={e.seq} className={isAuthz ? 'hl-authz' : ''}>
+                      <tr key={e.seq} className={isAuthz ? 'hl-authz' : isMemory ? 'hl-memory' : ''}>
                         <td>{e.seq}</td>
                         <td className="mono">{ts(e.ts)}</td>
-                        <td>{e.kind}</td>
+                        <td>{isMemory ? `memory·${memType}` : e.kind}</td>
                         <td className="mono">{isAuthz ? 'authz:*' : e.turnId}</td>
-                        <td className="mono dim2">{preview(e.payload)}</td>
+                        <td className="mono dim2">{isMemory ? `${memId} · ${preview(e.payload)}` : preview(e.payload)}</td>
                       </tr>
                     )
                   })}

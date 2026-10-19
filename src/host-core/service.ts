@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { loadSessionLog } from '@lqc123qwe/car-runtime'
+import { loadSessionLog, MemoryStore } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
   IpcPushTopic,
@@ -152,6 +152,17 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return h
   }
 
+  // —— S6（D-S6-1）：工作区记忆存储（per-workspace 懒创建；dir = <workspaceRoot>/.car/memory/） ——
+  const memoryStores = new Map<string, MemoryStore>()
+  function getMemoryStore(workspaceRoot: string): MemoryStore {
+    let store = memoryStores.get(workspaceRoot)
+    if (!store) {
+      store = new MemoryStore(join(workspaceRoot, '.car', 'memory'))
+      memoryStores.set(workspaceRoot, store)
+    }
+    return store
+  }
+
   function depsFor(workspaceId: string, workspaceRoot: string, contextWindow: number | null): Parameters<typeof SessionHandle.createFresh>[0]['deps'] {
     return {
       workspaceId,
@@ -168,6 +179,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
       securitySettings: () => securitySettings.get(),
       backup,
       contextWindow,
+      // S6（D-S6-1）：工作区记忆存储注入（per-workspace 懒创建——<workspaceRoot>/.car/memory/）
+      memoryStore: getMemoryStore(workspaceRoot),
     }
   }
 
@@ -451,7 +464,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           handle.title = idx.sessions[sessionId]?.title ?? '未命名会话'
           handles.set(key(workspaceId, sessionId), handle)
         }
-        return handle.sendTurn(text)
+        return handle.sendTurn(text, { memoryInject: p.memoryInject === true })
       }
       case IpcChannel.TurnAbort: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
@@ -534,6 +547,34 @@ export function createHostService(opts: HostServiceOptions): HostService {
       case IpcChannel.SessionCompact: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         return handle.compactNow()
+      }
+      // —— S6：白盒记忆面（K-MEM-1 消费面；写操作落链承载 = 活跃会话 log——D-46 ②/D-S6-1） ——
+      case IpcChannel.MemoryList:
+        return getMemoryStore(registry.pathOf(requireString(p.workspaceId, 'workspaceId'))).list()
+      case IpcChannel.MemoryWrite: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        const text = requireString(p.text, 'text')
+        const id = typeof p.id === 'string' && p.id.length ? p.id : undefined
+        const tags = Array.isArray(p.tags) ? (p.tags as string[]) : undefined
+        return getMemoryStore(handle.workspaceRoot).write(handle.log, {
+          ...(id ? { id } : {}),
+          text,
+          ...(tags ? { tags } : {}),
+          sourceSession: handle.sessionId,
+        })
+      }
+      case IpcChannel.MemoryEdit: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return getMemoryStore(handle.workspaceRoot).edit(handle.log, requireString(p.id, 'id'), requireString(p.text, 'text'), Array.isArray(p.tags) ? (p.tags as string[]) : undefined)
+      }
+      case IpcChannel.MemoryRemove: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        getMemoryStore(handle.workspaceRoot).remove(handle.log, requireString(p.id, 'id'))
+        return { ok: true }
+      }
+      case IpcChannel.MemoryRollback: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return getMemoryStore(handle.workspaceRoot).rollback(handle.log, requireString(p.id, 'id'))
       }
       case IpcChannel.FileSecurityGet:
         return fileSecurityStore.get()

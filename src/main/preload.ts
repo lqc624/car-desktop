@@ -25,7 +25,8 @@ const bridge: CarBridge = {
   createSession: (workspaceId) => ipcRenderer.invoke(IpcChannel.SessionCreate, { workspaceId }),
   listSessions: (workspaceId) => ipcRenderer.invoke(IpcChannel.SessionList, { workspaceId }),
   openSession: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionOpen, { workspaceId, sessionId }),
-  sendTurn: (workspaceId, sessionId, text) => ipcRenderer.invoke(IpcChannel.TurnSend, { workspaceId, sessionId, text }),
+  sendTurn: (workspaceId, sessionId, text, memoryInject) =>
+    ipcRenderer.invoke(IpcChannel.TurnSend, { workspaceId, sessionId, text, ...(memoryInject !== undefined ? { memoryInject } : {}) }),
   abortTurn: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.TurnAbort, { workspaceId, sessionId }),
   respondAuthz: (workspaceId, sessionId, requestId, decision) =>
     ipcRenderer.invoke(IpcChannel.AuthzRespond, { workspaceId, sessionId, requestId, decision }),
@@ -64,6 +65,13 @@ const bridge: CarBridge = {
     }),
   // —— S5：立即压缩（append-only compact 事件） ——
   compactNow: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionCompact, { workspaceId, sessionId }),
+  // —— S6：白盒记忆面（K-MEM-1 消费面） ——
+  memoryList: (workspaceId) => ipcRenderer.invoke(IpcChannel.MemoryList, { workspaceId }),
+  memoryWrite: (workspaceId, sessionId, input) => ipcRenderer.invoke(IpcChannel.MemoryWrite, { workspaceId, sessionId, ...input }),
+  memoryEdit: (workspaceId, sessionId, id, text, tags) =>
+    ipcRenderer.invoke(IpcChannel.MemoryEdit, { workspaceId, sessionId, id, text, ...(tags !== undefined ? { tags } : {}) }),
+  memoryRemove: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRemove, { workspaceId, sessionId, id }),
+  memoryRollback: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRollback, { workspaceId, sessionId, id }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),

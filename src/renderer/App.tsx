@@ -14,6 +14,7 @@ import type {
 import { AuditView } from './views/AuditView'
 import { DashView } from './views/DashView'
 import { McpView } from './views/McpView'
+import { MemoryView } from './views/MemoryView'
 import { PluginsView } from './views/PluginsView'
 import { SecurityView } from './views/SecurityView'
 import { SettingsView } from './views/SettingsView'
@@ -36,7 +37,7 @@ interface ToolCard {
 }
 
 type ChatItem =
-  | { kind: 'msg'; role: 'user' | 'agent'; text: string }
+  | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean }
   | { kind: 'tool'; card: ToolCard }
   | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string }
 
@@ -69,11 +70,18 @@ function buildChatItems(events: SessionEventDTO[]): { items: ChatItem[]; routing
   const items: ChatItem[] = []
   const cards = new Map<string, ToolCard>()
   const routing: RoutingEvent[] = []
+  // S6（D-S6-6）：待执行判定 = user 事件其 turnId 无 turnEnd（引导排队消息——turnEnd 到达即消隐）
+  const closed = new Set(events.filter((e) => e.kind === 'turnEnd').map((e) => e.turnId))
+  const pendingTurnIds = new Set(
+    events
+      .filter((e) => e.kind === 'user' && !closed.has(e.turnId) && /^T\d+$/.test(e.turnId))
+      .map((e) => e.turnId),
+  )
   for (const e of events) {
     const payload = e.payload
     const p = (payload ?? {}) as Record<string, unknown>
     if (e.kind === 'user') {
-      items.push({ kind: 'msg', role: 'user', text: String(payload ?? '') })
+      items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: pendingTurnIds.has(e.turnId) || undefined })
     } else if (e.kind === 'assistant') {
       items.push({ kind: 'msg', role: 'agent', text: String(payload ?? '') })
     } else if (e.kind === 'routing') {
@@ -133,6 +141,12 @@ function buildChatItems(events: SessionEventDTO[]): { items: ChatItem[]; routing
       })
     } else if (e.kind === 'system') {
       const type = String(p['type'] ?? '')
+      // S6（D-S6-5 / D-C3 转真值）：记忆注入行——meta.injection==='memory'（宿主装配层落链）
+      const meta = (e.meta ?? {}) as Record<string, unknown>
+      if (meta['injection'] === 'memory') {
+        items.push({ kind: 'line', tone: 'dim', text: `记忆注入 ${String(meta['count'] ?? '?')} 条（${String(meta['chars'] ?? '?')} 字符——loadMemoryForInjection 确定性拼装）` })
+        continue
+      }
       if (type === 'session-start') items.push({ kind: 'line', tone: 'dim', text: '会话已创建（session-start 已落链）' })
       else if (type === 'model/set') items.push({ kind: 'line', tone: 'dim', text: `模型切换 → ${String(p['model'] ?? '?')}（model/set 已落链）` })
       else if (type === 'session/rename') items.push({ kind: 'line', tone: 'dim', text: `会话重命名 → ${String(p['title'] ?? '?')}` })
@@ -180,7 +194,7 @@ export function App() {
   const [showCtx, setShowCtx] = useState(false)
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
-  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings'>('chat')
+  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory'>('chat')
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
   const [showPolicy, setShowPolicy] = useState(false)
   const [windowSel, setWindowSel] = useState<number | null>(null) // S4-S3 受控版：null = 跟随元数据/端点
@@ -395,16 +409,29 @@ export function App() {
   }
 
   // ── turn / 授权 / 模型 ────────────────────────────────────────────────
+  // S6（D-S6-2）：会话级记忆注入开关（localStorage 端侧偏好，默认开——与 ★ 默认模型同手法）
+  const memInjectKey = openId ? `mem-inject:${openId}` : ''
+  const memoryInjectOn = openId ? localStorage.getItem(memInjectKey) !== '0' : false
+  const toggleMemoryInject = (): void => {
+    if (!openId) return
+    localStorage.setItem(memInjectKey, memoryInjectOn ? '0' : '1')
+    setStatus(memoryInjectOn ? '记忆注入已关（本会话后续新 turn 不再注入——已注入行保留在链）' : '记忆注入已开（下个 turn 首次注入生效）')
+    setMemInjectTick((v) => v + 1)
+  }
+  const [memInjectTick, setMemInjectTick] = useState(0)
+  void memInjectTick
+
   const send = async () => {
     if (!selected || !openId || !input.trim()) return
     setError(null)
     const text = input.trim()
     setInput('')
     try {
-      setBusy(true)
-      await window.car.sendTurn(selected.id, openId, text)
+      if (!busy) setBusy(true)
+      const r = await window.car.sendTurn(selected.id, openId, text, memoryInjectOn)
+      if (r.steer) setStatus('引导会话，消息将被发出但模型不会中断（待当前 turn 收口后自动续跑）')
     } catch (e) {
-      setBusy(false)
+      if (!busy) setBusy(false)
       fail(e)
     }
   }
@@ -503,6 +530,9 @@ export function App() {
   const lastUsed = (usage?.lastInput ?? 0) + (usage?.lastOutput ?? 0)
   const pct = contextWindow ? Math.min(100, (lastUsed / contextWindow) * 100) : null
   const pctColor = pct == null ? 'var(--accent, #5e6ad2)' : pct > 92 ? 'var(--danger, #d24949)' : pct > 78 ? 'var(--warn, #b97d10)' : 'var(--accent, #5e6ad2)'
+  // S6（D-S6-6）：待执行队列（user 事件无对应 turnEnd = 引导排队中）→ 提示条显隐 + ctx-pop 记忆注入行数据
+  const pendingCount = items.filter((it) => it.kind === 'msg' && it.role === 'user' && it.pending).length
+  const lastInjectionEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
 
   return (
     <div className="app">
@@ -535,6 +565,13 @@ export function App() {
           <span>
             <b>安全中心</b>
             <small>文件规则 · 备份 · 策略</small>
+          </span>
+        </button>
+        <button className={`item ${view === 'memory' ? 'sel' : ''}`} onClick={() => setView('memory')}>
+          <span className="ico">❏</span>
+          <span>
+            <b>记忆</b>
+            <small>白盒 CRUD · 落链可查</small>
           </span>
         </button>
         <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
@@ -651,6 +688,8 @@ export function App() {
           <DashView selected={selected} />
         ) : view === 'security' ? (
           <SecurityView />
+        ) : view === 'memory' ? (
+          <MemoryView selected={selected} openId={openId} onFail={fail} onStatus={setStatus} />
         ) : openId && selected ? (
           <section className="chat">
             <div className="chat-toolbar">
@@ -685,6 +724,11 @@ export function App() {
                 </div>
               )}
               {busy && <span className="live">● turn 进行中</span>}
+              {pendingCount > 0 && (
+                <div className="steer-banner" role="status">
+                  引导会话，消息将被发出但模型不会中断——待执行 {pendingCount} 条（当前 turn 收口后 FIFO 续跑）
+                </div>
+              )}
             </div>
             {showCtx && usage && (
               <div className="ctx-pop ctx-up">
@@ -698,6 +742,19 @@ export function App() {
                 <div>turn 数：{usage.turns} · 请求：{usage.requests} · usage 覆盖率：{usage.coverage == null ? '—' : Math.round(usage.coverage * 100) + '%'}</div>
                 <div>累计：in {fmtTok(usage.input)} · out {fmtTok(usage.output)} · 缓存读 {fmtTok(usage.cacheRead)} · 缓存写 {fmtTok(usage.cacheCreation)}</div>
                 <div>最近请求：in {fmtTok(usage.lastInput)} / out {fmtTok(usage.lastOutput)}（usage 事件真实值，缺失不估算）</div>
+                {lastInjectionEvent && (
+                  <div className="cp-row">
+                    <span>记忆注入（D-C3 行位真值——system 落链，Model-visible means logged）</span>
+                    <b>
+                      {String((lastInjectionEvent.meta as Record<string, unknown>)['count'] ?? '?')} 条 · {String((lastInjectionEvent.meta as Record<string, unknown>)['chars'] ?? '?')} 字符
+                    </b>
+                  </div>
+                )}
+                {openId && (
+                  <button className="btn mem-toggle" onClick={toggleMemoryInject} title="会话级记忆注入开关（端侧偏好，不落链）">
+                    记忆注入：{memoryInjectOn ? '开（下个 turn 首次注入生效）' : '关'}
+                  </button>
+                )}
               </div>
             )}
             {pending && (
@@ -727,7 +784,10 @@ export function App() {
                 if (it.kind === 'msg') {
                   return (
                     <div key={i} className={`msg ${it.role}`}>
-                      <div className="who">{it.role === 'user' ? '我' : 'CR'}</div>
+                      <div className="who">
+                        {it.role === 'user' ? '我' : 'CR'}
+                        {it.pending && <span className="pending-badge">待执行</span>}
+                      </div>
                       <div className="bubble">{it.text}</div>
                     </div>
                   )
@@ -763,12 +823,11 @@ export function App() {
             {/* ── S5：输入区右下聚类 [上下文圆环][模型][发送]（原型 v0.5 同构，弹层向上） ── */}
             <div className="chat-input">
               <input
-                placeholder={busy ? 'turn 进行中…（可停止）' : '给 Agent 布置任务…（Enter 发送）'}
+                placeholder={busy ? '引导发出：当前 turn 收口后自动续跑（不打断）…' : '给 Agent 布置任务…（Enter 发送）'}
                 value={input}
-                disabled={busy}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !busy) void send()
+                  if (e.key === 'Enter' && input.trim()) void send()
                 }}
               />
               <div className="input-cluster">
@@ -878,9 +937,14 @@ export function App() {
                   )}
                 </div>
                 {busy ? (
-                  <button className="btn danger" onClick={() => void stop()}>
-                    ■ 停止
-                  </button>
+                  <>
+                    <button className="btn danger" onClick={() => void stop()} title="中断当前 turn（pending 引导消息不删除，收口后不再自动续跑）">
+                      ■ 停止
+                    </button>
+                    <button className="btn primary send-steer" disabled={!input.trim()} onClick={() => void send()} title="引导发出（不打断当前 turn——收口后 FIFO 续跑）">
+                      ↣ 引导
+                    </button>
+                  </>
                 ) : (
                   <button className="btn primary" disabled={!input.trim()} onClick={() => void send()}>
                     发送

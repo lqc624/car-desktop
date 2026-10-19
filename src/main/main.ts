@@ -123,6 +123,12 @@ function registerIpc(): void {
   )
   // —— S5：立即压缩（内核 applyCompaction——append-only compact 事件） ——
   ipcMain.handle(IpcChannel.SessionCompact, (_event, payload: unknown) => callHost(IpcChannel.SessionCompact, payload))
+  // —— S6：白盒记忆面（K-MEM-1 消费面——写操作落链承载 = 活跃会话，D-S6-1） ——
+  ipcMain.handle(IpcChannel.MemoryList, (_event, payload: unknown) => callHost(IpcChannel.MemoryList, payload))
+  ipcMain.handle(IpcChannel.MemoryWrite, (_event, payload: unknown) => callHost(IpcChannel.MemoryWrite, payload))
+  ipcMain.handle(IpcChannel.MemoryEdit, (_event, payload: unknown) => callHost(IpcChannel.MemoryEdit, payload))
+  ipcMain.handle(IpcChannel.MemoryRemove, (_event, payload: unknown) => callHost(IpcChannel.MemoryRemove, payload))
+  ipcMain.handle(IpcChannel.MemoryRollback, (_event, payload: unknown) => callHost(IpcChannel.MemoryRollback, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——
   ipcMain.handle(IpcChannel.FileSecurityGet, () => callHost(IpcChannel.FileSecurityGet))
   ipcMain.handle(IpcChannel.FileSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.FileSecuritySet, payload))

@@ -43,6 +43,17 @@ export const IpcChannel = {
   SessionSetModel: 'session:set-model',
   /** S5（D-S5-2）：立即压缩（内核 applyCompaction——append-only compact 事件；fail-visible CAR-E-COMPACT-*） */
   SessionCompact: 'session:compact',
+  // —— S6：白盒记忆面（K-MEM-1 消费面；内核 1.15.x MemoryStore——落链承载 = 调用时活跃会话，D-46 ②） ——
+  /** 记忆列表（只读——无会话也可查看；updatedAt 降序） */
+  MemoryList: 'memory:list',
+  /** 创建记忆（需活跃会话——无句柄显式拒绝，D-S6-1） */
+  MemoryWrite: 'memory:write',
+  /** 修改记忆（需活跃会话；链上 before/after 全文 = rollback 数据源） */
+  MemoryEdit: 'memory:edit',
+  /** 删除记忆（需活跃会话；补偿事件 + 文件移除） */
+  MemoryRemove: 'memory:remove',
+  /** 回滚记忆（需活跃会话；内核 undo 栈单步回退——返回 null = 已回退到删除态） */
+  MemoryRollback: 'memory:rollback',
   // —— S3：文件安全设置面（SEC_SETTINGS；host 持久化 + 校验，渲染层接线 S3-S6） ——
   /** 读当前规则表（出厂预设 8 条 / 用户规则） */
   FileSecurityGet: 'fileSecurity:get',
@@ -155,8 +166,8 @@ export interface SessionEventDTO {
   seq: number
   ts: number
   actor: 'user' | 'model' | 'plugin' | 'runtime'
-  /** 内核 EventKind 镜像（1.14 实查：+usage/compact/routing） */
-  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage' | 'compact' | 'routing'
+  /** 内核 EventKind 镜像（1.15 实查：+usage/compact/routing/memory） */
+  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage' | 'compact' | 'routing' | 'memory'
   turnId: string
   payload: unknown
   meta?: Record<string, unknown> | null
@@ -219,6 +230,28 @@ export interface SessionOpenResult {
 
 export interface TurnSendResult {
   turnId: string
+  /** S6（D-S6-3）：true = 执行中引导发出（消息已落链排队，当前 turn 收口后 FIFO 续跑） */
+  steer?: boolean
+}
+
+// ── 白盒记忆面（S6；内核 MemoryEntry 镜像——1.15 实查 id/text/tags/createdAt/updatedAt/sourceSession） ──
+
+export interface MemoryEntryDTO {
+  id: string
+  text: string
+  tags?: string[]
+  createdAt: number
+  updatedAt: number
+  sourceSession?: string
+}
+
+/** 记忆操作请求载荷（write 可缺省 id = 内核派生 mem-*；edit/remove/rollback 以 id 定位） */
+export interface MemoryOpRequest {
+  workspaceId: string
+  sessionId: string
+  id?: string
+  text?: string
+  tags?: string[]
 }
 
 /** 会话用量聚合（usage 事件真实值求和；无 usage 的 turn 计入分母不估算——D-S2-4） */
@@ -439,7 +472,7 @@ export interface IpcRequestMap {
   [IpcChannel.SessionCreate]: { workspaceId: string }
   [IpcChannel.SessionList]: { workspaceId: string }
   [IpcChannel.SessionOpen]: { workspaceId: string; sessionId: string }
-  [IpcChannel.TurnSend]: { workspaceId: string; sessionId: string; text: string }
+  [IpcChannel.TurnSend]: { workspaceId: string; sessionId: string; text: string; memoryInject?: boolean }
   [IpcChannel.TurnAbort]: { workspaceId: string; sessionId: string }
   [IpcChannel.AuthzRespond]: { workspaceId: string; sessionId: string; requestId: string; decision: AuthzDecisionInput }
   [IpcChannel.SessionUsage]: { workspaceId: string; sessionId: string }
@@ -447,6 +480,11 @@ export interface IpcRequestMap {
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string; contextWindow?: number; reasoningEffort?: 'off' | 'low' | 'medium' | 'high' }
   [IpcChannel.SessionCompact]: { workspaceId: string; sessionId: string }
+  [IpcChannel.MemoryList]: { workspaceId: string }
+  [IpcChannel.MemoryWrite]: MemoryOpRequest
+  [IpcChannel.MemoryEdit]: MemoryOpRequest
+  [IpcChannel.MemoryRemove]: MemoryOpRequest
+  [IpcChannel.MemoryRollback]: MemoryOpRequest
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
@@ -480,7 +518,7 @@ export interface CarBridge {
   createSession(workspaceId: string): Promise<SessionInfo>
   listSessions(workspaceId: string): Promise<SessionInfo[]>
   openSession(workspaceId: string, sessionId: string): Promise<SessionOpenResult>
-  sendTurn(workspaceId: string, sessionId: string, text: string): Promise<TurnSendResult>
+  sendTurn(workspaceId: string, sessionId: string, text: string, memoryInject?: boolean): Promise<TurnSendResult>
   abortTurn(workspaceId: string, sessionId: string): Promise<void>
   respondAuthz(workspaceId: string, sessionId: string, requestId: string, decision: AuthzDecisionInput): Promise<{ outcome: string }>
   sessionUsage(workspaceId: string, sessionId: string): Promise<SessionUsageResult>
@@ -489,6 +527,17 @@ export interface CarBridge {
   setSessionModel(workspaceId: string, sessionId: string, model: string, contextWindow?: number, reasoningEffort?: 'off' | 'low' | 'medium' | 'high'): Promise<void>
   /** S5（D-S5-2）：立即压缩（append-only compact 事件；无区间 = CAR-E-COMPACT-NORANGE fail-visible） */
   compactNow(workspaceId: string, sessionId: string): Promise<{ seq: number; compactedUpTo: number; compactedEvents: number }>
+  // —— S6：白盒记忆面（K-MEM-1 消费面）——
+  /** 记忆列表（只读，无会话可查；updatedAt 降序） */
+  memoryList(workspaceId: string): Promise<MemoryEntryDTO[]>
+  /** 创建（id 缺省内核派生；需活跃会话——无句柄 = 宿主显式拒绝） */
+  memoryWrite(workspaceId: string, sessionId: string, input: { id?: string; text: string; tags?: string[] }): Promise<MemoryEntryDTO>
+  /** 修改（需活跃会话） */
+  memoryEdit(workspaceId: string, sessionId: string, id: string, text: string, tags?: string[]): Promise<MemoryEntryDTO>
+  /** 删除（需活跃会话） */
+  memoryRemove(workspaceId: string, sessionId: string, id: string): Promise<void>
+  /** 回滚（undo 栈单步；返回 null = 已回退到删除态） */
+  memoryRollback(workspaceId: string, sessionId: string, id: string): Promise<MemoryEntryDTO | null>
   // —— S3：文件安全设置面（安全中心页） ——
   fileSecurityGet(): Promise<FileSecurityState>
   fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>

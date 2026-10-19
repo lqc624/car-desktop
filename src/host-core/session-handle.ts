@@ -24,8 +24,12 @@ import {
   AuthzService,
   shouldCompact,
   applyCompaction,
+  recoverInterrupted,
+  loadMemoryForInjection,
+  pendingSteerTurns,
   type AuthzRequest,
   type CompactionConfig,
+  type MemoryStore,
 } from '@lqc123qwe/car-runtime'
 import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsageResult } from '../shared/ipc-contract.ts'
 import { parseEventLine } from './model.ts'
@@ -63,6 +67,10 @@ export interface SessionHandleDeps {
   contextWindow: number | null
   /** S5（D-S5-2）：压缩策略（car.config llm.compaction——会话创建时读取注入；缺省 undefined = 关） */
   compactionCfg?: CompactionConfig
+  /** S6（D-S6-2）：工作区记忆存储（service 按工作区懒创建注入；缺省 = 记忆面不可用） */
+  memoryStore?: MemoryStore
+  /** S6（D-S6-2）：记忆注入字符预算（缺省 8000——字符近似门控，超限 fail-visible） */
+  memoryBudgetChars?: number
 }
 
 interface HandleInit {
@@ -153,6 +161,9 @@ export class SessionHandle {
    * 调用方 service 断链 fail-visible 前置），store 同路径 O_APPEND 续写零截断。
    * turnSeq 对齐历史链（扫描既有 T<n> 取最大——新 turn 不与历史 turnId 撞号，usage 聚合按
    * turnId 扫描，撞号即串账）；session-start 不补记（链上已有）。
+   * S6（D-S6-3 / R-8）：resume 即接入内核恢复层——未闭合 turn（含消费前崩溃的引导排队事件）
+   * 补记 turnEnd=interrupted（内核 s56 定性锁定：消息已发未跑）；补记经 sink 落盘 + 推送，
+   * 渲染层待执行徽标据此消隐。
    */
   static resume(init: HandleInit, log: SessionLog): SessionHandle {
     let maxTurn = 0
@@ -160,7 +171,12 @@ export class SessionHandle {
       const m = /^T(\d+)$/.exec(e.turnId)
       if (m) maxTurn = Math.max(maxTurn, Number(m[1]))
     }
-    return new SessionHandle(init, { log, turnSeq: maxTurn })
+    const h = new SessionHandle(init, { log, turnSeq: maxTurn })
+    const report = recoverInterrupted(h.log)
+    if (report.turnsClosed > 0 || report.pairedCalls > 0) {
+      console.error(`[host] resume 恢复层补记：interrupted turn ×${report.turnsClosed}、合成 toolResult ×${report.pairedCalls}`)
+    }
+    return h
   }
 
   /** 生产装配（service 调用）：chatStep 模型回调或测试覆盖 */
@@ -218,14 +234,35 @@ export class SessionHandle {
     return this.log.events as unknown as readonly SessionEventDTO[]
   }
 
-  sendTurn(text: string): { turnId: string } {
-    if (this.busy) throw new Error('CAR-E-DESKTOP: 上一 turn 仍在进行（停止或等待收口后再发）')
+  /**
+   * 发送消息开 turn；S6（D-S6-3）busy 分流 = **引导发出**：执行中输入框保持可用——消息
+   * 以新 turnId 落链排队（发出时刻 append user 事件——内核 SessionLog.append 本就可调），
+   * 当前 turn 收口后 FIFO 续跑（drainPending）。**引导 ≠ 注入当前 turn 上下文**——内核
+   * 投影隔离（deriveMessages activeTurnId 口径）保证当前 turn 各步请求体零污染。
+   */
+  sendTurn(text: string, opts: { memoryInject?: boolean } = {}): { turnId: string; steer?: boolean } {
+    if (this.busy) {
+      const steerId = 'T' + String(++this.turnSeq)
+      this.log.append('user', 'user', steerId, text)
+      return { turnId: steerId, steer: true }
+    }
     if (!this.modelFn) {
       throw new Error(
         'CAR-E-LLM-CONFIG: 模型回调未装配——需要 car.config llm（baseUrl+model）与凭据' +
           '（OPENAI_API_KEY / ANTHROPIC_API_KEY；env 兜底需 CAR_ALLOW_ENV_CREDENTIALS=1——' +
           '内核适配器 resolve 未透传 llm.allowEnvFallback，接线缺口已登记）',
       )
+    }
+    // S6（D-S6-2）：记忆注入装配——会话首轮一次（链上已有注入行 = resume 会话不重注，
+    // append-only 链的注入刷新语义登记 v0.3 评估）；开关 = 渲染层每次发送显式携带（端侧偏好
+    // localStorage，默认开）；超预算 = 内核 fail-visible 异常同步抛出（渲染层红条——禁静默截断）。
+    // **置于 busy=true 之前**：throw 时 turn 未开、busy 未置（否则预算红条后用户再发会被
+    // busy 分流吞进引导队列——S6M-4 实证的死锁形态）。
+    if (opts.memoryInject && this.deps.memoryStore && !this.chainHasMemoryInjection()) {
+      const inj = loadMemoryForInjection(this.deps.memoryStore, { budgetChars: this.deps.memoryBudgetChars ?? 8000 })
+      if (inj.count > 0) {
+        this.log.append('user', 'system', 'system', inj.rendered, { injection: 'memory', count: inj.count, chars: inj.totalChars })
+      }
     }
     this.busy = true
     this.abort.aborted = false
@@ -243,6 +280,17 @@ export class SessionHandle {
     const turnId = 'T' + String(++this.turnSeq)
     this.currentTurnIdValue = turnId
     this.log.append('user', 'user', turnId, text)
+    this.runTurnFor(turnId)
+    return { turnId }
+  }
+
+  /** 链上是否已有记忆注入行（meta.injection==='memory' 的 system 事件） */
+  chainHasMemoryInjection(): boolean {
+    return this.log.events.some((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+  }
+
+  /** 单 turn 执行（turnId 对应的 user 事件由调用方保证已落链——普通 turn 与引导消费共用） */
+  private runTurnFor(turnId: string): void {
     const tools = new Map<string, HostToolDef>(this.tools.map((t) => [t.name, t]))
     // 内核 runTurn 自带全部收口语义（error/aborted/成对补记/turnEnd usage 聚合）——
     // 桌面 catch 仅宿主日志，禁补造任何链上事件。
@@ -251,21 +299,49 @@ export class SessionHandle {
     void runTurn({
       log: this.log,
       turnId,
-      model: this.modelFn,
+      model: this.modelFn!,
       tools,
       preset: turnPreset,
       signal: this.abort,
     }).then(
-      (r) => {
+      () => {
         this.busy = false
-        return r
+        // S6（D-S6-3）：turn 收口后 FIFO 续跑——扫描引导排队逐条消费（引导 turn 的 user 事件
+        // 已在链上，消费 = 以其自身 turnId 开 runTurn，模型读 sessionModel 现值 = 末次 model/set）
+        void this.drainPending()
       },
       (err) => {
         this.busy = false
         console.error(`[host] turn ${turnId} 异常（内核已收口）：`, err instanceof Error ? err.message : err)
       },
     )
-    return { turnId }
+  }
+
+  /**
+   * 引导队列 FIFO 消费（D-S6-3）：pendingSteerTurns 按 seq 序逐条 runTurn；每条消费前检查
+   * abort.aborted（停止 = 中断当前 turn + 停止续跑——pending 留链，下次 sendTurn 收口后统一
+   * 消费保持 FIFO 顺序）；busy 由调用方维持 true（消费中再发消息 = 继续排队，语义正确）。
+   */
+  private async drainPending(): Promise<void> {
+    for (;;) {
+      if (this.abort.aborted) return
+      const pending = pendingSteerTurns(this.log)
+      if (!pending.length) return
+      const next = pending[0]!
+      this.currentTurnIdValue = next.turnId
+      this.runTurnFor(next.turnId)
+      // runTurnFor 是 void 触发——等待收口：轮询 busy 翻转（收口后 then 里 busy=false + 触发下一轮 drain）
+      await new Promise<void>((resolve) => {
+        const t = setInterval(() => {
+          if (!this.busy || this.abort.aborted) {
+            clearInterval(t)
+            resolve()
+          }
+        }, 25)
+      })
+      if (!this.busy) continue // 正常收口 → 继续扫下一条
+      return // aborted → 停止续跑（pending 留链）
+    }
   }
 
   abortTurn(): void {
