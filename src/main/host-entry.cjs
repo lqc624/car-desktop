@@ -16,6 +16,15 @@
 
 let servicePromise = null
 
+// 宿主进程级兜底：未捕获拒绝/异常必须留痕（此前形态 = 进程静默退出，句柄全失 → 下次
+// 续写走 resume 把引导队列误标 interrupted；stderr 已由 main 接管输出）
+process.on('unhandledRejection', (err) => {
+  console.error('[host] unhandledRejection:', (err && err.stack) || String(err))
+})
+process.on('uncaughtException', (err) => {
+  console.error('[host] uncaughtException:', (err && err.stack) || String(err))
+})
+
 function getService() {
   if (!servicePromise) {
     servicePromise = import('./host-core.mjs').then((mod) => {

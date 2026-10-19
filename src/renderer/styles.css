@@ -672,3 +672,20 @@ body {
 .hl-memory {
   background: color-mix(in srgb, var(--accent, #5e6ad2) 8%, transparent);
 }
+
+.mem-trash {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed var(--line, #2a2f3a);
+  padding-top: 8px;
+}
+
+.mem-pill {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+.mem-pill.off {
+  opacity: 0.55;
+}

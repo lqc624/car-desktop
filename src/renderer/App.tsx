@@ -66,7 +66,7 @@ interface RoutingEvent {
   retries: number
 }
 
-function buildChatItems(events: SessionEventDTO[]): { items: ChatItem[]; routing: RoutingEvent[] } {
+function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatItem[]; routing: RoutingEvent[] } {
   const items: ChatItem[] = []
   const cards = new Map<string, ToolCard>()
   const routing: RoutingEvent[] = []
@@ -77,11 +77,14 @@ function buildChatItems(events: SessionEventDTO[]): { items: ChatItem[]; routing
       .filter((e) => e.kind === 'user' && !closed.has(e.turnId) && /^T\d+$/.test(e.turnId))
       .map((e) => e.turnId),
   )
+  // 执行中的 turn 不是「排队」：busy 时 seq 最靠前的未闭合 turn = 正在跑，其消息不挂待执行徽标
+  // （徽标语义 = 引导排队；此前 T1 自身也挂徽标，S6 终验③ 实测量到 3 条而非 2 条）
+  const runningTurnId = busy ? [...pendingTurnIds][0] : undefined
   for (const e of events) {
     const payload = e.payload
     const p = (payload ?? {}) as Record<string, unknown>
     if (e.kind === 'user') {
-      items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: pendingTurnIds.has(e.turnId) || undefined })
+      items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: (pendingTurnIds.has(e.turnId) && e.turnId !== runningTurnId) || undefined })
     } else if (e.kind === 'assistant') {
       items.push({ kind: 'msg', role: 'agent', text: String(payload ?? '') })
     } else if (e.kind === 'routing') {
@@ -508,7 +511,7 @@ export function App() {
   }
 
   // ── 渲染 ──────────────────────────────────────────────────────────────
-  const { items, routing } = buildChatItems(events)
+  const { items, routing } = buildChatItems(events, busy)
   // S5（D-S5-1）：最近的池降级/耗尽事件 → 顶部横幅（fail-visible，禁静默换模型）
   const lastRouting = routing.at(-1) ?? null
   const showRoutingBanner = lastRouting != null && (lastRouting.reason === 'fallback' || lastRouting.reason === 'exhausted')
@@ -750,11 +753,6 @@ export function App() {
                     </b>
                   </div>
                 )}
-                {openId && (
-                  <button className="btn mem-toggle" onClick={toggleMemoryInject} title="会话级记忆注入开关（端侧偏好，不落链）">
-                    记忆注入：{memoryInjectOn ? '开（下个 turn 首次注入生效）' : '关'}
-                  </button>
-                )}
               </div>
             )}
             {pending && (
@@ -831,6 +829,17 @@ export function App() {
                 }}
               />
               <div className="input-cluster">
+                {openId && (
+                  <div className="cluster-item">
+                    <button
+                      className={`pill mem-pill${memoryInjectOn ? '' : ' off'}`}
+                      onClick={toggleMemoryInject}
+                      title="会话级记忆注入开关（端侧偏好，不落链）——注入发生在会话首轮，须在首条消息前设定"
+                    >
+                      记忆·{memoryInjectOn ? '开' : '关'}
+                    </button>
+                  </div>
+                )}
                 <div className="cluster-item" style={{ position: 'relative' }}>
                   <button className="ctx-ring" onClick={() => setShowCtx((v) => !v)} title="上下文容量">
                     <svg viewBox="0 0 36 36" width="30" height="30">

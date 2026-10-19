@@ -33,6 +33,8 @@ export function MemoryView({
   const [newText, setNewText] = useState('')
   const [newTags, setNewTags] = useState('')
   const [creating, setCreating] = useState(false)
+  /** 已删除条目（本次面板会话内）——delete 后列表行消失，undelete 入口靠此留存（rollback 恢复链上删除前正文） */
+  const [tombstones, setTombstones] = useState<string[]>([])
 
   const load = useCallback(async () => {
     if (!selected) return
@@ -47,6 +49,7 @@ export function MemoryView({
     setEntries(null)
     setCreating(false)
     setEditingId(null)
+    setTombstones([])
     if (selected) void load()
   }, [selected, load])
 
@@ -85,6 +88,7 @@ export function MemoryView({
     if (!window.confirm(`删除记忆 ${id}？（memory/delete 补偿事件落链——rollback 可恢复）`)) return
     try {
       await window.car.memoryRemove(selected.id, openId, id)
+      setTombstones((t) => (t.includes(id) ? t : [...t, id]))
       onStatus(`记忆已删除（${id}）——delete 落链，链上留痕可 rollback 恢复`)
       await load()
     } catch (err) {
@@ -96,12 +100,15 @@ export function MemoryView({
     if (!selected || !openId) return
     try {
       const r = await window.car.memoryRollback(selected.id, openId, id)
+      setTombstones((t) => (r ? t.filter((x) => x !== id) : t.includes(id) ? t : [...t, id]))
       onStatus(r ? `记忆已回退一步（${id} → 更早版本）——rollback 落链（链即版本库）` : `记忆已回退到删除态（${id}）——条目移除，再回退可恢复更早版本`)
       await load()
     } catch (err) {
       onFail(err)
     }
   }
+
+  const tombstonesVisible = tombstones.filter((id) => !(entries ?? []).some((m) => m.id === id))
 
   const writeBlocked = !openId
 
@@ -216,6 +223,19 @@ export function MemoryView({
                 ))}
               </tbody>
             </table>
+          )}
+          {tombstonesVisible.length > 0 && (
+            <div className="mem-trash">
+              <div className="dim">最近删除（delete 已落链——回滚可 undelete 恢复删除前正文，恢复数据源 = 链上 payload）</div>
+              {tombstonesVisible.map((id) => (
+                <div className="mem-ops" key={id}>
+                  <code className="mono">{id}</code>
+                  <button className="mini" title="撤销删除（rollback 到删除前状态）" onClick={() => void rollback(id)}>
+                    ↩ 撤销删除
+                  </button>
+                </div>
+              ))}
+            </div>
           )}
         </>
       )}

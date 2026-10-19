@@ -28,9 +28,13 @@ function ensureHost(): ReturnType<typeof utilityProcess.fork> {
   if (hostProc) return hostProc
   hostProc = utilityProcess.fork(path.join(__dirname, 'host-entry.cjs'), [], {
     serviceName: 'car-host',
+    // 宿主 stderr/stdout 显式接管：宿主崩溃原因必须可见（此前默认形态下崩溃零线索）
+    stdio: 'pipe',
     // D-S1-4：工作区索引/后续加密凭据落 userData；smoke 形态下 main 已重定向到临时目录
     env: { ...process.env, CAR_USER_DATA: app.getPath('userData') },
   })
+  hostProc.stdout?.on('data', (d: Buffer) => console.log('[host:out]', String(d).trimEnd()))
+  hostProc.stderr?.on('data', (d: Buffer) => console.error('[host:err]', String(d).trimEnd()))
   hostProc.on('message', (raw: unknown) => {
     const msg = raw as { reqId?: number; result?: unknown; error?: string; push?: boolean; topic?: string; payload?: unknown }
     // S2 推送面：宿主 emit → 全部窗口广播（主题白名单校验——非契约主题丢弃）
