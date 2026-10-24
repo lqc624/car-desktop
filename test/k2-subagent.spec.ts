@@ -13,7 +13,12 @@
  *  6. 恢复幂等（K1 POC 四形态转正式）：崩溃态子链 open 恢复补记 interrupted ×1、
  *     重复 open 全零、断链子链只读跳过不阻塞父链恢复；
  *  7. 删除级联：删父 = 子链索引随父标记（文件保留）；
- *  8. seam 零加法门禁：1.15.2 符号面零 subagent 加法（版本 + 计数 + 方向断言）。
+ *  8. seam 门禁：1.16.0 符号面运行时零 subagent 加法（版本 + 计数 + 方向断言；SubagentConfig
+ *     为类型面加法——K3 / D-K2-2 合法通道）。
+ *  9. K3（D-K2-2）：`llm.subagent` 三键——model 覆盖直达子链 start 载荷 + 模型回调锚点；
+ *     maxConcurrent=1 并发拒（错误数值随配置）；maxCumulative=2 累计拒；guards 落链真值。
+ * 10. K3 压过口径：modelPool 在场 = subagent.model 被池压过（子锚点回落父现值，与 llm.model 同口径）。
+ * 11. K3 压过口径：端点覆盖（R-D6 key-push）在场 = subagent.model 被端点压过（子锚点 = 端点 model）。
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
@@ -535,14 +540,149 @@ test('K2: spawn 子链文件已存在 = CAR-E-SUBAGENT-DUP fail-visible（跨会
   svc.dispose()
 })
 
-// ── 8：seam 零加法门禁（K2 冻结结论：加法清单 = 空集） ──
+// ── 8：seam 门禁（K3 / D-K2-2：1.16.0 = 类型面加法，运行时符号零加法） ──
 
-test('K2: seam 零加法核对——1.15.2 符号面无 subagent 加法（版本 + 计数 + 方向断言）', () => {
+test('K2/K3: seam 门禁——1.16.0 运行时符号面无 subagent 加法（版本 + 计数 + 方向断言）', () => {
   const probe = probeSeam()
-  assert.equal(probe.seamVersion, '1.15.2', 'K2 消费基线 = 1.15.2（内核未动——D-K2-1）')
-  assert.equal(probe.symbolCount, 43, '符号面计数与基线一致（零加法——加法触发需先发布 1.16.0）')
+  assert.equal(probe.seamVersion, '1.16.0', 'K3 消费基线 = 1.16.0（llm.subagent schema——D-K2-2）')
+  assert.equal(probe.symbolCount, 43, '运行时符号计数与基线一致（1.16.0 加法 = SubagentConfig 类型面，零运行时符号）')
   assert.ok(
     !probe.symbols.some((s) => /subagent/i.test(s)),
-    'seam 无 subagent* 符号（K2 = 宿主侧组合；若此处红 = 内核加了法但未走发布纪律）',
+    'seam 无 subagent* 运行时符号（编排 = 宿主侧组合；若此处红 = 内核加了法但未走发布纪律）',
   )
+})
+
+// ── 9：K3 llm.subagent 三键（model 覆盖 + 护栏上限 config 化） ──
+
+test('K3: llm.subagent 三键——model 覆盖到子链/模型回调 + maxConcurrent=1 并发拒 + maxCumulative=2 累计拒', async () => {
+  const root = tmpDir('k3cfg')
+  writeFileSync(
+    join(root, 'car.config.ts'),
+    "export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'parent-m', subagent: { model: 'child-ovr', maxConcurrent: 1, maxCumulative: 2 } } }\n",
+    'utf8',
+  )
+  const captured: { models: Record<string, string> } = { models: {} }
+  // 挂起子 500ms 自然收口：turn1 内两次相邻 spawn 稳定撞并发；turn2 以 join 阻塞汇合（确定性
+  // settle 同步——kill 后紧邻 spawn 会因子链异步 settle 未清 active 而再撞 CONC，禁用该形态）
+  const baseChild = scriptedChildModel({ 'SA-K3H': [{ hangMs: 500, text: '子完成' }] })
+  const svc = createHostService({
+    userDataDir: tmpDir('ud'),
+    authzTimeoutMs: 120_000,
+    modelFnOverride: scriptedParentModel([
+      { tool: 'subagent_spawn', id: 'c1', args: { task: '挂起子任务', id: 'SA-K3H' } },
+      { tool: 'subagent_spawn', id: 'c2', args: { task: '撞并发上限', id: 'SA-K3X' } },
+      { text: 'turn1 收口' },
+      { tool: 'subagent_join', id: 'c3', args: { id: 'SA-K3H' } },
+      { tool: 'subagent_spawn', id: 'c4', args: { task: '第二个有效派生', id: 'SA-K3Y' } },
+      { tool: 'subagent_spawn', id: 'c5', args: { task: '撞累计上限', id: 'SA-K3Z' } },
+      { text: 'turn2 收口' },
+    ]),
+    childModelFnOverride: (o) => {
+      captured.models[o.log.sessionId] = o.currentModel()
+      return baseChild(o)
+    },
+  })
+  const pushes: PushMessage[] = []
+  autoAuthz(svc, pushes)
+  const w = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
+  const sess = (await svc.dispatch('session:create', { workspaceId: w.id })) as { sessionId: string }
+  await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: 'K3 三键演练 turn1（并发护栏）' })
+  await waitTurnEnd(svc, w.id, sess.sessionId, (e) => (e.meta as Record<string, unknown>)?.['reason'] === 'completed')
+  await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: 'K3 三键演练 turn2（join 汇合 + 累计护栏）' })
+  // waitTurnEnd 谓词不区分轮次（会即刻匹配 turn1 的旧 turnEnd）——双 turn 流改计数等待
+  const t0 = Date.now()
+  for (;;) {
+    const rep = (await svc.dispatch('audit:report', { workspaceId: w.id, sessionId: sess.sessionId })) as { events: Array<{ kind: string; turnId: string; meta?: Record<string, unknown> }> }
+    const done = rep.events.filter((e) => e.kind === 'turnEnd' && !e.turnId.startsWith('authz:') && (e.meta as Record<string, unknown>)?.['reason'] === 'completed').length
+    if (done >= 2) break
+    if (Date.now() - t0 > 20_000) throw new Error('等待 turn2 收口超时')
+    await new Promise((r) => setTimeout(r, 50))
+  }
+
+  const parent = chainEvents(svc, w.id, root, sess.sessionId)
+  // 覆盖锚点 + guards 配置真值落链
+  const spawns = systemPayloads(parent, 'subagent/spawn')
+  assert.equal(spawns.length, 2, '恰两条成功 spawn（挂起子 + join 汇合后第二个有效派生）')
+  assert.equal(spawns[0]!['model'], 'child-ovr', 'spawn 事件 model = config 覆盖锚点（非父现值 parent-m）')
+  const guards = spawns[0]!['guards'] as Record<string, number>
+  assert.equal(guards['maxConcurrent'], 1, 'guards.maxConcurrent = 配置值 1（链上真值）')
+  assert.equal(guards['maxCumulative'], 2, 'guards.maxCumulative = 配置值 2（链上真值）')
+  // 护栏错误：数值随配置（非 Q-A3 常量 3/10）
+  const conc = parent.find((e) => e['kind'] === 'toolResult' && String((e['payload'] as Record<string, unknown>)['error'] ?? '').includes('CAR-E-SUBAGENT-CONC'))
+  assert.ok(conc, '并发撞限以 CAR-E-SUBAGENT-CONC 结构化错误交回模型')
+  assert.match(String((conc!['payload'] as Record<string, unknown>)['error']), /1 ≥ 1/, '错误数值随配置 maxConcurrent=1')
+  const cum = parent.find((e) => e['kind'] === 'toolResult' && String((e['payload'] as Record<string, unknown>)['error'] ?? '').includes('CAR-E-SUBAGENT-CUM'))
+  assert.ok(cum, '累计撞限以 CAR-E-SUBAGENT-CUM 结构化错误交回模型')
+  assert.match(String((cum!['payload'] as Record<string, unknown>)['error']), /2 ≥ 2/, '错误数值随配置 maxCumulative=2')
+  // 子链锚点 + 模型回调锚点 = 覆盖值
+  const childStart = systemPayloads(chainEvents(svc, w.id, root, 'SA-K3Y'), 'session-start')
+  assert.equal(childStart[0]!['model'], 'child-ovr', '子链 session-start model = config 覆盖锚点')
+  assert.equal(captured.models['SA-K3H'], 'child-ovr', '子模型回调 currentModel 锚点 = config 覆盖')
+  assert.ok(!existsSync(join(root, '.car', 'sessions', 'SA-K3X.jsonl')), '并发撞限的 SA-K3X 未建子链（护栏先于创建）')
+  svc.dispose()
+})
+
+// ── 10：K3 压过口径（池在场 = subagent.model 被压过） ──
+
+test('K3: modelPool 在场压过 llm.subagent.model——子锚点回落父现值（与 llm.model 同口径）', async () => {
+  const root = tmpDir('k3pool')
+  writeFileSync(
+    join(root, 'car.config.ts'),
+    "export default { llm: { model: 'parent-anchor', subagent: { model: 'ignored-ovr' } }, modelPool: { endpoints: [{ baseUrl: 'http://127.0.0.1:9', model: 'pool-first' }] } }\n",
+    'utf8',
+  )
+  const svc = createHostService({
+    userDataDir: tmpDir('ud'),
+    authzTimeoutMs: 120_000,
+    modelFnOverride: scriptedParentModel([
+      { tool: 'subagent_spawn', id: 'c1', args: { task: '池形态派生', id: 'SA-PL' } },
+      { text: '父收口' },
+    ]),
+    childModelFnOverride: scriptedChildModel({ 'SA-PL': [{ text: '子完成' }] }),
+  })
+  const pushes: PushMessage[] = []
+  autoAuthz(svc, pushes)
+  const w = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
+  const sess = (await svc.dispatch('session:create', { workspaceId: w.id })) as { sessionId: string }
+  await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: '池压过演练' })
+  await waitTurnEnd(svc, w.id, sess.sessionId, () => true, 20_000)
+  const childStart = systemPayloads(chainEvents(svc, w.id, root, 'SA-PL'), 'session-start')
+  assert.ok(childStart.length === 1, 'SA-PL 子链已建')
+  assert.equal(childStart[0]!['model'], 'parent-anchor', '池在场 = subagent.model 被压过，子锚点 = 父现值（≠ ignored-ovr）')
+  svc.dispose()
+})
+
+// ── 11：K3 压过口径（端点覆盖 R-D6 在场 = subagent.model 被压过） ──
+
+test('K3: 端点覆盖压过 llm.subagent.model——子锚点 = 端点 model（R-D6 优先级）', async () => {
+  const root = tmpDir('k3ep')
+  writeFileSync(
+    join(root, 'car.config.ts'),
+    "export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'cfg-m', subagent: { model: 'ignored-ovr' } } }\n",
+    'utf8',
+  )
+  const svc = createHostService({
+    userDataDir: tmpDir('ud'),
+    authzTimeoutMs: 120_000,
+    modelFnOverride: scriptedParentModel([
+      { tool: 'subagent_spawn', id: 'c1', args: { task: '端点覆盖形态派生', id: 'SA-EP' } },
+      { text: '父收口' },
+    ]),
+    childModelFnOverride: scriptedChildModel({ 'SA-EP': [{ text: '子完成' }] }),
+  })
+  const pushes: PushMessage[] = []
+  autoAuthz(svc, pushes)
+  const w = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
+  await svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', model: 'ep-model', key: 'k', contextWindow: 32000 })
+  try {
+    const sess = (await svc.dispatch('session:create', { workspaceId: w.id })) as { sessionId: string }
+    await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: '端点压过演练' })
+    await waitTurnEnd(svc, w.id, sess.sessionId, () => true, 20_000)
+    const childStart = systemPayloads(chainEvents(svc, w.id, root, 'SA-EP'), 'session-start')
+    assert.ok(childStart.length === 1, 'SA-EP 子链已建')
+    assert.equal(childStart[0]!['model'], 'ep-model', '端点覆盖在场 = subagent.model 被压过，子锚点 = 端点 model（≠ ignored-ovr）')
+  } finally {
+    await svc.dispatch('credentials:key-push', { clear: true }).catch(() => { /* 清理端点态 */ })
+    svc.dispose()
+  }
 })

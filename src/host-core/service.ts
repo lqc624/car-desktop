@@ -274,9 +274,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
 
   /**
    * K2（1.16 子 Agent）：编排管理器装配（session:create 与 resume 共用——禁两份漂移）。
-   * 子 Agent 模型锚点 = 继承父会话现值（Q-A2 基线；`car.config llm.subagent.model` 覆盖 =
-   * 内核 config schema strict 缺口，登记 1.16.0 加法候选 D-K2-2，发布后接线）。
+   * 子 Agent 模型锚点 = 继承父会话现值（Q-A2 基线）；K3（D-K2-2 / 内核 1.16.0）：
+   * `car.config llm.subagent.model` 覆盖继承——**池（modelPool）或端点覆盖（R-D6）激活时被压过**
+   * （与 llm.model 同口径，service 层置 undefined）；护栏上限同键位可配（缺省 = Q-A3 常量）。
    * 模型回调不可装配（runtime null 且无测试覆盖）= 编排工具不挂——spawn 面零暴露。
+   * config 载体：调用点上游 loadExtraTools 已 warmCarConfig（同 root）——此处同步装载安全。
    */
   function attachSubagentsFor(workspaceId: string, root: string, handle: SessionHandle, runtime: HostRuntime | null): void {
     const makeChildModelFn =
@@ -293,6 +295,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
             })
         : null)
     if (!makeChildModelFn) return
+    const cfgLoaded = loadCarConfig({ cwd: root })
+    const subCfg = cfgLoaded.error ? undefined : cfgLoaded.config.llm?.subagent
+    const overrideable = !cfgLoaded.error && !cfgLoaded.config.modelPool && !endpoint
     handle.attachSubagents(
       new SubagentManager({
         parentSessionId: handle.sessionId,
@@ -304,6 +309,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         parentPolicy: () => handle.policy,
         parentCurrentTurnId: () => handle.currentTurnId(),
         parentModel: () => handle.sessionModel,
+        subagent: subCfg ? { ...subCfg, model: overrideable ? subCfg.model : undefined } : undefined,
         fileSecurity,
         emitEvent: (sessionId, event) => emit(IpcPushTopic.SessionEvent, { workspaceId, sessionId, event }),
         emitAuthzPending: (p) => emit(IpcPushTopic.AuthzPending, p),

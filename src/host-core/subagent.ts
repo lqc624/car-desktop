@@ -13,6 +13,9 @@
  *    不回退）；人审弹窗在父（pending/resolved 推送携父 sessionId，requestId 内嵌子 id 路由）；
  *  - **护栏 fail-visible**：并发 ≤3 / 单父累计 ≤10（累计沿父链 spawn 事件计数——跨重启
  *    收敛）；超限 = spawn 工具结构化错误交回模型 + 父链 toolCall/toolResult 成对落痕，禁静默排队；
+ *    K3（D-K2-2，内核 1.16.0）：上限可经 `car.config llm.subagent.maxConcurrent/maxCumulative`
+ *    配置——缺省回落 Q-A3 常量（无键 = 行为与 K2 逐字节一致）；模型锚点
+ *    `llm.subagent.model` 覆盖继承（池/端点覆盖激活时被压过——service 层裁决，与 llm.model 同口径）；
  *  - **停止级联**：杀父（abortTurn/close）= 全部活跃子链 abort（内核 runTurn 以 aborted
  *    收口——运行期取消，与 interrupted 恢复补记不混用）；在途人审即时取消；
  *  - **孤儿/恢复形态**（K1 POC 实证）：spawn 事件先落父链再建子链——崩溃于两者之间 =
@@ -30,6 +33,7 @@ import {
   recoverInterrupted,
   runTurn,
   type AuthzRequest,
+  type SubagentConfig,
 } from '@lqc123qwe/car-runtime'
 import { parseEventLine } from './model.ts'
 import { fsReadTool } from './tools.ts'
@@ -67,6 +71,8 @@ export interface SubagentManagerDeps {
   parentPolicy: () => SessionPolicy
   parentCurrentTurnId: () => string
   parentModel: () => string | null
+  /** K3（D-K2-2 / 内核 1.16.0）：car.config `llm.subagent` 三键——model 覆盖（池/端点压过由 service 裁决后传 undefined）/ 护栏上限（缺省 = Q-A3 常量） */
+  subagent?: SubagentConfig
   fileSecurity: FileSecurityEngine | null
   emitEvent: (sessionId: string, event: SessionEventDTO) => void
   emitAuthzPending: (p: AuthzPendingPush) => void
@@ -111,6 +117,15 @@ export class SubagentManager {
   private readonly whitelistDefs: HostToolDef[]
   private readonly deps: SubagentManagerDeps
 
+  /** 护栏生效上限（K3：config 覆盖 > Q-A3 常量缺省——无键 = 行为与 K2 逐字节一致） */
+  private get maxConcurrent(): number {
+    return this.deps.subagent?.maxConcurrent ?? SUBAGENT_MAX_CONCURRENT
+  }
+
+  private get maxCumulative(): number {
+    return this.deps.subagent?.maxCumulative ?? SUBAGENT_MAX_CUMULATIVE
+  }
+
   constructor(deps: SubagentManagerDeps) {
     this.deps = deps
     this.whitelistDefs = SUBAGENT_TOOL_WHITELIST.flatMap((name) => {
@@ -148,14 +163,15 @@ export class SubagentManager {
 
   spawn(task: string, id?: string): { ok: true; subagentId: string; state: 'running'; note: string } {
     const active = this.activeCount()
-    if (active >= SUBAGENT_MAX_CONCURRENT) {
-      throw new Error(`CAR-E-SUBAGENT-CONC: 并发子 Agent 超上限（${active} ≥ ${SUBAGENT_MAX_CONCURRENT}）——护栏 fail-visible，禁静默排队`)
+    if (active >= this.maxConcurrent) {
+      throw new Error(`CAR-E-SUBAGENT-CONC: 并发子 Agent 超上限（${active} ≥ ${this.maxConcurrent}）——护栏 fail-visible，禁静默排队`)
     }
     const cumulative = this.cumulativeSpawns()
-    if (cumulative >= SUBAGENT_MAX_CUMULATIVE) {
-      throw new Error(`CAR-E-SUBAGENT-CUM: 本会话累计派生子 Agent 超上限（${cumulative} ≥ ${SUBAGENT_MAX_CUMULATIVE}）——护栏 fail-visible，禁静默排队`)
+    if (cumulative >= this.maxCumulative) {
+      throw new Error(`CAR-E-SUBAGENT-CUM: 本会话累计派生子 Agent 超上限（${cumulative} ≥ ${this.maxCumulative}）——护栏 fail-visible，禁静默排队`)
     }
-    const model = this.deps.parentModel()
+    // K3（D-K2-2）：config 覆盖锚点 > 继承父现值（Q-A2）——service 层已在池/端点覆盖激活时置 undefined
+    const model = this.deps.subagent?.model ?? this.deps.parentModel()
     if (!model) {
       throw new Error('CAR-E-SUBAGENT-MODEL: 父会话模型锚点缺失——子 Agent 继承父锚点（Q-A2），无法派生')
     }
@@ -177,7 +193,7 @@ export class SubagentManager {
       parentTurnId: turnId,
       task,
       model,
-      guards: { maxConcurrent: SUBAGENT_MAX_CONCURRENT, maxCumulative: SUBAGENT_MAX_CUMULATIVE, active: active + 1, cumulative: cumulative + 1 },
+      guards: { maxConcurrent: this.maxConcurrent, maxCumulative: this.maxCumulative, active: active + 1, cumulative: cumulative + 1 },
       whitelist: [...SUBAGENT_TOOL_WHITELIST],
     })
     const log = new SessionLog(subagentId)
