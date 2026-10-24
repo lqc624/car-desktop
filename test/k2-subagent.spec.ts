@@ -673,7 +673,7 @@ test('K3: 端点覆盖压过 llm.subagent.model——子锚点 = 端点 model（
   const pushes: PushMessage[] = []
   autoAuthz(svc, pushes)
   const w = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
-  await svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', model: 'ep-model', key: 'k', contextWindow: 32000 })
+  await svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', key: 'k', models: [{ id: 'ep-model', contextWindow: 32000 }] })
   try {
     const sess = (await svc.dispatch('session:create', { workspaceId: w.id })) as { sessionId: string }
     await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: '端点压过演练' })

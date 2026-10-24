@@ -89,7 +89,7 @@ test('E2E·端点覆盖装配：key-push 后 session:create 走端点（doctor �
   const mock = await startModelsMock()
   const env = await makeEnv()
   try {
-    await env.svc.dispatch('credentials:key-push', { baseUrl: mock.url, model: 'endpoint-model', key: ENDPOINT_KEY, contextWindow: 64_000 })
+    await env.svc.dispatch('credentials:key-push', { baseUrl: mock.url, key: ENDPOINT_KEY, models: [{ id: 'endpoint-model', contextWindow: 64_000 }] })
     const info = (await env.svc.dispatch('session:create', { workspaceId: env.ws.id })) as SessionInfo & { contextWindow?: number | null }
     assert.equal(info.contextWindow, 64_000, '端点声明窗口进会话面（D-C5）')
     // doctor：连通性探测目标 = 端点 baseUrl + Bearer 端点 Key（Authorization 实证）
@@ -113,7 +113,7 @@ test('E2E·端点覆盖装配：key-push 后 session:create 走端点（doctor �
 test('E2E·连通性失败 fail-visible：不可达端点 → doctor 行 ok=false（错误类别，非请求内容）', async () => {
   const env = await makeEnv()
   try {
-    await env.svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', model: 'm', key: 'k' })
+    await env.svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', key: 'k', models: ['m'] })
     const doctor = (await env.svc.dispatch('doctor:run', { workspaceId: env.ws.id })) as { rows: Array<{ label: string; ok: boolean; detail: string }> }
     const conn = doctor.rows.find((r) => r.label === 'LLM 连通性')!
     assert.equal(conn.ok, false)
@@ -134,12 +134,12 @@ test('models:meta：内置静态表（DeepSeek 家族窗口/思考档位）+ 端
     assert.equal(before.meta['deepseek-chat'].thinking, 'none')
     assert.equal(before.meta['deepseek-reasoner'].thinking, 'model-level')
     assert.equal(before.endpoint, null, '无端点 = null')
-    await env.svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', model: 'endpoint-model', key: ENDPOINT_KEY, contextWindow: 96_000 })
+    await env.svc.dispatch('credentials:key-push', { baseUrl: 'http://127.0.0.1:9', key: ENDPOINT_KEY, models: [{ id: 'endpoint-model', contextWindow: 96_000 }] })
     const after = (await env.svc.dispatch('models:meta', {})) as {
-      endpoint: { baseUrl: string; model: string; contextWindow: number | null; adapterId: 'openai-compat' | 'anthropic' } | null
+      endpoint: { baseUrl: string; adapterId: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow: number | null }> } | null
     }
-    // K5-D（V2）：端点面带 adapterId（key-push 缺省 = openai-compat——存量语义）
-    assert.deepEqual(after.endpoint, { baseUrl: 'http://127.0.0.1:9', model: 'endpoint-model', contextWindow: 96_000, adapterId: 'openai-compat' })
+    // K5-D（V2）：端点面带 adapterId（key-push 缺省 = openai-compat——存量语义）；K5-F：models 列表形态
+    assert.deepEqual(after.endpoint, { baseUrl: 'http://127.0.0.1:9', adapterId: 'openai-compat', models: [{ id: 'endpoint-model', contextWindow: 96_000 }] })
     assert.ok(!JSON.stringify(after).includes(ENDPOINT_KEY), '端点 Key 永不出 meta 面（N-D1）')
     // 清除
     await env.svc.dispatch('credentials:key-push', { clear: true })
@@ -228,7 +228,7 @@ test('E2E·端点真调（1018 终验回归）：car.config adapterId=anthropic 
     pushes.filter((m) => m.topic === 'push:session-event').map((m) => (m.payload as { event: SessionEventDTO }).event)
   try {
     const ws = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
-    await svc.dispatch('credentials:key-push', { baseUrl: mock.url, model: 'endpoint-model', key: ENDPOINT_KEY, contextWindow: 64_000 })
+    await svc.dispatch('credentials:key-push', { baseUrl: mock.url, key: ENDPOINT_KEY, models: [{ id: 'endpoint-model', contextWindow: 64_000 }] })
     const info = (await svc.dispatch('session:create', { workspaceId: ws.id })) as SessionInfo & { sessionId: string; modelError?: string | null }
     assert.equal(info.modelError ?? null, null, '端点装配无错（modelError null）')
     const sent = (await svc.dispatch('turn:send', { workspaceId: ws.id, sessionId: info.sessionId, text: 'hi' })) as { turnId: string }
@@ -317,12 +317,14 @@ test('E2E·K5-D 端点 anthropic 形态：adapterId=anthropic → /v1/messages �
   try {
     const ws = (await svc.dispatch('workspace:register', { path: root })) as WorkspaceInfo
     await svc.dispatch('credentials:key-push', {
-      baseUrl: mock.url, model: 'anthropic-model', key: ENDPOINT_KEY, contextWindow: 128_000, adapterId: 'anthropic',
+      baseUrl: mock.url, key: ENDPOINT_KEY, adapterId: 'anthropic',
+      models: [{ id: 'anthropic-model', contextWindow: 128_000 }, { id: 'kimi-slot' }],
     })
     const meta = (await svc.dispatch('models:meta', {})) as {
-      endpoint: { adapterId: 'openai-compat' | 'anthropic'; contextWindow: number | null } | null
+      endpoint: { adapterId: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow: number | null }> } | null
     }
     assert.equal(meta.endpoint?.adapterId, 'anthropic', 'meta 面带端点 adapterId 声明')
+    assert.deepEqual(meta.endpoint?.models, [{ id: 'anthropic-model', contextWindow: 128_000 }, { id: 'kimi-slot', contextWindow: null }], 'K5-F：一 URL 多模型进 meta 面（模型菜单数据源）')
     const info = (await svc.dispatch('session:create', { workspaceId: ws.id })) as SessionInfo & { sessionId: string; modelError?: string | null; contextWindow?: number | null }
     assert.equal(info.modelError ?? null, null, 'anthropic 端点装配无错')
     assert.equal(info.contextWindow, 128_000, '端点声明窗口进会话面（token 阈值窗口真值来源）')

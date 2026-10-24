@@ -12,9 +12,9 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
   const [endpoint, setEndpoint] = useState<EndpointMetaDTO | null>(null)
   const [meta, setMeta] = useState<Record<string, ModelMetaDTO> | null>(null)
   const [baseUrl, setBaseUrl] = useState('')
-  const [model, setModel] = useState('')
   const [key, setKey] = useState('')
-  const [windowInput, setWindowInput] = useState('')
+  // K5-F：端点模型列表（一 URL 多模型——Claude Code 式；首行 = 装配锚点模型）
+  const [models, setModels] = useState<Array<{ id: string; win: string }>>([{ id: '', win: '' }])
   // K5-D（V2）：适配器族（openai-compat | anthropic——anthropic 网关端点路线，缺省 openai-compat）
   const [adapterId, setAdapterId] = useState<'openai-compat' | 'anthropic'>('openai-compat')
   const [error, setError] = useState<string | null>(null)
@@ -24,7 +24,13 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
   const load = useCallback(async () => {
     setError(null)
     try {
-      setEndpoint(await window.car.credentialsMeta())
+      const ep = await window.car.credentialsMeta()
+      setEndpoint(ep)
+      // K5-F：模型列表编辑器回填（一 URL 多模型——Claude Code 式；首行 = 装配锚点）
+      // baseUrl 必须回填——否则空 URL 令保存键禁用（k5f 实测红条：编辑模型列表看似保存实则未触发）
+      if (ep) setBaseUrl(ep.baseUrl)
+      setModels(ep ? ep.models.map((m) => ({ id: m.id, win: m.contextWindow ? String(Math.round(m.contextWindow / 1000)) : '' })) : [{ id: '', win: '' }])
+      setAdapterId(ep?.adapterId ?? 'openai-compat')
       const m = await window.car.modelsMeta()
       setMeta(m.meta)
     } catch (e) {
@@ -55,17 +61,23 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
     setError(null)
     setStatus(null)
     try {
+      // K5-F：模型列表（去空行；首行 = 装配锚点）；Key 留空 = 沿用已存加密 Key（改模型不重输 Key）
+      const list = models.map((m) => ({ id: m.id.trim(), win: m.win.trim() })).filter((m) => m.id)
+      if (!list.length) throw new Error('CAR-E-DESKTOP: 至少填写一个模型 ID（首行为装配锚点）')
       const ep = await window.car.credentialsSave({
         baseUrl: baseUrl.trim(),
-        model: model.trim(),
-        key: key.trim(),
         adapterId,
-        // 窗口单位换算：输入框标签是「窗口 k」，宿主 contextWindow 是 token 绝对值（1018 终验红条）
-        ...(windowInput ? { contextWindow: Number(windowInput) * 1000 } : {}),
+        models: list.map((m) => ({
+          id: m.id,
+          // 窗口单位换算：输入框标签是「窗口 k」，宿主 contextWindow 是 token 绝对值（1018 终验红条）
+          ...(m.win ? { contextWindow: Number(m.win) * 1000 } : {}),
+        })),
+        ...(key.trim() ? { key: key.trim() } : {}),
       })
       setEndpoint(ep)
+      setModels(ep.models.map((m) => ({ id: m.id, win: m.contextWindow ? String(Math.round(m.contextWindow / 1000)) : '' })))
       setKey('') // Key 不回显（值不打印红线）
-      setStatus('端点已保存（safeStorage 加密）并推宿主装配——新会话生效')
+      setStatus(key.trim() ? '端点已保存（safeStorage 加密）并推宿主装配——新会话生效' : '端点已更新（沿用已存 Key）并推宿主装配——新会话生效')
       onEndpointChanged?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -106,12 +118,12 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         </div>
       ))}
 
-      <h3>自定义模型端点</h3>
+      <h3>自定义模型端点（一个 URL 配多个模型）</h3>
       {endpoint && (
         <div className="banner ok">
-          已配置：<b>{endpoint.model}</b> @ <code className="mono">{endpoint.baseUrl}</code>
+          已配置：<code className="mono">{endpoint.baseUrl}</code>
           {` · ${endpoint.adapterId === 'anthropic' ? 'Anthropic 形态' : 'OpenAI 兼容'}`}
-          {endpoint.contextWindow ? ` · 窗口 ${Math.round(endpoint.contextWindow / 1000)}k` : ' · 窗口未声明（ctx 百分比不显示，压缩 token 阈值不武装）'}
+          {` · 模型：${endpoint.models.map((m) => m.id + (m.contextWindow ? `(${Math.round(m.contextWindow / 1000)}k)` : '')).join('、')}`}
         </div>
       )}
       <div className="row wrap">
@@ -120,22 +132,36 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
           <option value="anthropic">Anthropic 形态</option>
         </select>
         <input className="grow mono" placeholder={adapterId === 'anthropic' ? 'Base URL（https://… 不带 /v1）' : 'Base URL（https://… OpenAI 兼容）'} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-        <input placeholder="Model ID" value={model} style={{ width: 160 }} onChange={(e) => setModel(e.target.value)} />
-        <input placeholder="API Key（safeStorage 加密，不回显）" type="password" value={key} style={{ width: 180 }} onChange={(e) => setKey(e.target.value)} />
-        <input placeholder="窗口 k（可选）" value={windowInput} style={{ width: 110 }} onChange={(e) => setWindowInput(e.target.value.replace(/[^0-9]/g, ''))} />
+        <input placeholder="API Key（已存可留空——沿用）" type="password" value={key} style={{ width: 170 }} onChange={(e) => setKey(e.target.value)} />
+      </div>
+      <div style={{ margin: '8px 0' }}>
+        <div className="dim" style={{ marginBottom: 4 }}>模型列表（首行为装配锚点——新建会话的默认模型；窗口 k 可选，声明后选中即武装 ctx 百分比与压缩阈值）</div>
+        {models.map((m, i) => (
+          <div key={i} className="row wrap" style={{ marginBottom: 4 }}>
+            <input className="mono" placeholder={`模型 ID${i === 0 ? '（锚点）' : ''}`} value={m.id} style={{ width: 240 }} onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, id: e.target.value } : x)))} />
+            <input placeholder="窗口 k（可选）" value={m.win} style={{ width: 110 }} onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, win: e.target.value.replace(/[^0-9]/g, '') } : x)))} />
+            {i === 0 ? (
+              <button className="btn" onClick={() => setModels([...models, { id: '', win: '' }])} title="追加模型（同一 URL 下的另一个模型 ID）">＋ 模型</button>
+            ) : (
+              <button className="btn danger" onClick={() => setModels(models.filter((_, j) => j !== i))} title="移除该模型">✕</button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="row wrap">
         <button
           className="btn primary"
-          disabled={!baseUrl.trim() || !model.trim() || !key.trim()}
+          disabled={!baseUrl.trim() || models.every((m) => !m.id.trim()) || (!key.trim() && !endpoint)}
           onClick={() => void save()}
-          title="保存 = safeStorage 加密落盘 + 解密推宿主装配（新会话生效）"
+          title="保存 = safeStorage 加密落盘 + 推宿主装配（新会话生效）；首次保存必须填 Key，之后更新模型列表可留空沿用"
         >
           保存并使用
         </button>
         <button className="btn danger" disabled={!endpoint} onClick={() => void clear()}>
-          清除
+          清除端点
         </button>
       </div>
-      <p className="dim">优先级 = 自定义端点 &gt; car.config llm（R-D6）· Key 经 safeStorage 加密、解密后仅内存推宿主装配（不落盘、不回显、不打印）· Anthropic 形态 = Claude Code 型网关（商汤等）：baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道 · 窗口声明可选——无值时 ctx 百分比不显示、压缩 token 阈值不武装（禁估算）。</p>
+      <p className="dim">优先级 = 自定义端点 &gt; car.config llm（R-D6）· Key 经 safeStorage 加密（首次必填，之后更新可留空沿用）、解密后仅内存推宿主装配（不落盘、不回显、不打印）· Anthropic 形态 = Claude Code 型网关（商汤等）：baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道 · 窗口声明可选——无值时该模型 ctx 百分比不显示、压缩 token 阈值不武装（禁估算）。</p>
 
       <h3>内置模型元数据</h3>
       <table className="mtable">

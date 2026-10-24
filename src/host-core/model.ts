@@ -42,13 +42,13 @@ export interface HostRuntime {
 
 /** S4-S2 自定义端点覆盖（装配级——Key 经 main safeStorage 解密后由 IPC 内存推送，不落盘不打印）。
  *  K5-D（V2）：adapterId 端点声明（anthropic 网关有了端点路线——商汤类 Claude Code 型网关
- *  baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道）；缺省/缺省值 = openai-compat（存量档兼容）。 */
+ *  baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道）；缺省/缺省值 = openai-compat（存量档兼容）。
+ *  K5-F：一 URL 多模型（Claude Code 式）——models ≥1，首条 = 装配锚点。 */
 export interface EndpointOverride {
   baseUrl: string
-  model: string
   key: string
-  contextWindow: number | null
   adapterId?: 'openai-compat' | 'anthropic'
+  models: Array<{ id: string; contextWindow: number | null }>
 }
 
 /**
@@ -72,8 +72,10 @@ export async function loadHostRuntime(
   if (loaded.error) throw new Error(loaded.error)
   const llm = mergeLlmConfig(process.env, loaded.config, {})
   const poolCfg = loaded.config.modelPool ?? null
+  // K5-F：端点锚点 = 模型列表首条（一 URL 多模型——会话内切模型走 model/set）
+  const endpointPrimary = endpoint?.models[0]?.id ?? null
   const baseUrl = endpoint?.baseUrl ?? llm.baseUrl
-  const model = endpoint?.model ?? llm.model
+  const model = endpointPrimary ?? llm.model
   if (endpoint?.key) {
     // K5-D（V2）：Key 通道随端点 adapterId 分流（anthropic 网关 = ANTHROPIC_API_KEY——内核
     // credentials.ts provider 通道表；openai-compat 维持 OPENAI_API_KEY）
@@ -116,7 +118,7 @@ export async function loadHostRuntime(
       : createOpenAICompatAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'openai-compat' })
   }
   core.registerLlmAdapter(adapter, { default: true })
-  const contextWindow = endpoint?.contextWindow ?? null
+  const contextWindow = endpoint?.models[0]?.contextWindow ?? null
   // 端点激活 = 显式声明形态（R-D6 / K5-D）：adapterId 必须同步覆盖——否则 createChatModelFn 按
   // car.config 的旧 adapterId 查找未注册适配器 → CAR-E-LLM-NOADAPTER（1018 终验红条）
   return {

@@ -231,7 +231,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
 
   /** 装载模型（configModel 锚点）；装配失败不阻塞会话面，原因必须回到渲染层（S2 修补：禁吞 console） */
   // —— S4-S2：自定义端点（main safeStorage 解密后经 credentials:key-push 内存推送——不落盘不打印） ——
-  let endpoint: { baseUrl: string; model: string; key: string; contextWindow: number | null; adapterId?: 'openai-compat' | 'anthropic' } | null = null
+  // K5-F：一 URL 多模型（Claude Code 式）——models 首条 = 装配锚点
+  let endpoint: { baseUrl: string; key: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow: number | null }> } | null = null
 
   /** 装载模型（doctor/会话共用）：端点覆盖 > car.config（R-D6）；contextWindow = 元数据表/端点声明（D-C5 无值 null）。
    *  S5（D-S5-1）：routingSink holder 随装配返回——RuntimeCore 先建、句柄 log 后建回填（routing/decide 落链）。 */
@@ -253,9 +254,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
       modelError = err instanceof Error ? err.message : String(err)
       console.error('[host] 模型未装配（turn 发送将被拒绝）：', modelError)
     }
-    const activeModel = endpoint?.model ?? runtime?.llm.model ?? null
+    const activeModel = endpoint?.models[0]?.id ?? runtime?.llm.model ?? null
     const meta = resolveModelMeta(activeModel)
-    const contextWindow = meta?.contextWindow ?? endpoint?.contextWindow ?? null
+    const contextWindow = meta?.contextWindow ?? endpoint?.models[0]?.contextWindow ?? null
     return { runtime, modelError, contextWindow, routingSink }
   }
 
@@ -373,13 +374,21 @@ export function createHostService(opts: HostServiceOptions): HostService {
           return { ok: true, active: false }
         }
         const baseUrl = requireString(p.baseUrl, 'baseUrl')
-        const model = requireString(p.model, 'model')
         const key = requireString(p.key, 'key')
+        // K5-F：模型列表归一（字符串/{id,contextWindow} 混装容错；去空去重；≥1 条 fail-visible）
+        const rawModels = Array.isArray(p.models) ? p.models : []
+        const models: Array<{ id: string; contextWindow: number | null }> = []
+        for (const e of rawModels) {
+          const id = typeof e === 'string' ? e.trim() : typeof (e as { id?: unknown })?.id === 'string' ? (e as { id: string }).id.trim() : ''
+          if (!id || models.some((m) => m.id === id)) continue
+          const w = (e as { contextWindow?: unknown })?.contextWindow
+          models.push({ id, contextWindow: typeof w === 'number' && w > 0 ? w : null })
+        }
+        if (!models.length) throw new Error('CAR-E-DESKTOP: credentials:key-push 模型列表为空（端点至少一个模型）')
         endpoint = {
           baseUrl,
-          model,
           key,
-          contextWindow: typeof p.contextWindow === 'number' && p.contextWindow > 0 ? p.contextWindow : null,
+          models,
           // K5-D（V2）：adapterId 随端点（main 已枚举校验；宿主侧缺省 openai-compat）
           adapterId: p.adapterId === 'anthropic' ? 'anthropic' : 'openai-compat',
         }
@@ -447,7 +456,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             }
           } catch { /* 工作区配置不可读 = 空池（元数据面不因池失败而红） */ }
         }
-        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow, adapterId: endpoint.adapterId ?? 'openai-compat' } : null, pool }
+        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, adapterId: endpoint.adapterId ?? 'openai-compat', models: endpoint.models } : null, pool }
       }
       case IpcChannel.HostProbe: {
         const probe = probeSeam()

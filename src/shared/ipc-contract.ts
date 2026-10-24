@@ -478,12 +478,17 @@ export interface ModelMetaDTO {
   thinking: 'none' | 'model-level'
   label: string
 }
+/** K5-F：端点模型条目（一 URL 多模型——Claude Code 式；首条 = 装配锚点） */
+export interface EndpointModelDTO {
+  id: string
+  contextWindow: number | null
+}
 export interface EndpointMetaDTO {
   baseUrl: string
-  model: string
-  contextWindow: number | null
   /** K5-D（V2）：适配器族声明；缺省 openai-compat（存量语义——anthropic 网关有了端点路线） */
   adapterId: 'openai-compat' | 'anthropic'
+  /** K5-F：模型列表（≥1；首条 = 锚点）。旧端点面（单 model/contextWindow）读侧折叠为单条列表 */
+  models: EndpointModelDTO[]
 }
 /** S5（D-S5-4）：模型菜单池端点项（car.config modelPool——无池 = 空数组） */
 export interface PoolMemberDTO {
@@ -694,7 +699,7 @@ export interface CarBridge {
   // —— S4-S2：doctor / 模型元数据 / 自定义端点 ——
   doctorRun(workspaceId?: string): Promise<{ rows: DoctorRowDTO[] }>
   modelsMeta(workspaceId?: string): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null; pool: PoolMemberDTO[] }>
-  credentialsSave(payload: { baseUrl: string; model: string; key: string; contextWindow?: number; adapterId?: 'openai-compat' | 'anthropic' }): Promise<EndpointMetaDTO>
+  credentialsSave(payload: { baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }): Promise<EndpointMetaDTO>
   credentialsMeta(): Promise<EndpointMetaDTO | null>
   credentialsClear(): Promise<unknown>
   // —— S3-S4：审计报告 / 取证导出（审计页） ——
