@@ -40,12 +40,15 @@ export interface HostRuntime {
   poolMembers: PoolMember[] | null
 }
 
-/** S4-S2 自定义端点覆盖（装配级——Key 经 main safeStorage 解密后由 IPC 内存推送，不落盘不打印） */
+/** S4-S2 自定义端点覆盖（装配级——Key 经 main safeStorage 解密后由 IPC 内存推送，不落盘不打印）。
+ *  K5-D（V2）：adapterId 端点声明（anthropic 网关有了端点路线——商汤类 Claude Code 型网关
+ *  baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道）；缺省/缺省值 = openai-compat（存量档兼容）。 */
 export interface EndpointOverride {
   baseUrl: string
   model: string
   key: string
   contextWindow: number | null
+  adapterId?: 'openai-compat' | 'anthropic'
 }
 
 /**
@@ -72,7 +75,10 @@ export async function loadHostRuntime(
   const baseUrl = endpoint?.baseUrl ?? llm.baseUrl
   const model = endpoint?.model ?? llm.model
   if (endpoint?.key) {
-    process.env['OPENAI_API_KEY'] = endpoint.key
+    // K5-D（V2）：Key 通道随端点 adapterId 分流（anthropic 网关 = ANTHROPIC_API_KEY——内核
+    // credentials.ts provider 通道表；openai-compat 维持 OPENAI_API_KEY）
+    const keyEnv = endpoint.adapterId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'
+    process.env[keyEnv] = endpoint.key
     // 端点 Key = 用户显式配置（safeStorage 面板）——env 通道开启（进程内封闭；
     // 此前该通路依赖会话 env 残留的 CAR_ALLOW_ENV_CREDENTIALS 假绿——确定性前提修正）
     process.env['CAR_ALLOW_ENV_CREDENTIALS'] = '1'
@@ -99,30 +105,37 @@ export async function loadHostRuntime(
     adapter = assembly.adapter
     poolMembers = assembly.members
   } else {
-    // 单端点装配（baseUrl/model 已由上方守卫保证非空——TS 属性收窄不穿透池分支，此处断言）
-    adapter = endpoint
-      ? createOpenAICompatAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'openai-compat' })
-      : llm.adapterId === 'anthropic'
-        ? createAnthropicAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'anthropic' })
-        : createOpenAICompatAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'openai-compat' })
+    // 单端点装配（baseUrl/model 已由上方守卫保证非空——TS 属性收窄不穿透池分支，此处断言）。
+    // K5-D（V2）：端点 adapterId 声明生效（anthropic = Messages API 形态）；无端点 = car.config
+    // llm.adapterId 原语义（商汤类 anthropic 网关的既有通路，S4 终验实证）
+    const adapterId = endpoint
+      ? (endpoint.adapterId ?? 'openai-compat')
+      : (llm.adapterId === 'anthropic' ? 'anthropic' : 'openai-compat')
+    adapter = adapterId === 'anthropic'
+      ? createAnthropicAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'anthropic' })
+      : createOpenAICompatAdapter({ baseUrl: baseUrl!, credentials: credService, provider: 'openai-compat' })
   }
   core.registerLlmAdapter(adapter, { default: true })
   const contextWindow = endpoint?.contextWindow ?? null
-  // 端点激活 = OpenAI 兼容形态（R-D6）：adapterId 必须同步覆盖——否则 createChatModelFn 按
-  // car.config 的旧 adapterId（如 anthropic）查找未注册适配器 → CAR-E-LLM-NOADAPTER（1018 终验红条）
+  // 端点激活 = 显式声明形态（R-D6 / K5-D）：adapterId 必须同步覆盖——否则 createChatModelFn 按
+  // car.config 的旧 adapterId 查找未注册适配器 → CAR-E-LLM-NOADAPTER（1018 终验红条）
   return {
     core,
     llm: {
       ...llm,
       ...(poolCfg ? { adapterId: 'model-pool' } : { baseUrl, model }),
-      ...(endpoint && !poolCfg ? { adapterId: 'openai-compat' } : {}),
+      ...(endpoint && !poolCfg ? { adapterId: endpoint.adapterId ?? 'openai-compat' } : {}),
     },
     toolDefs: [],
     mcpServers: loaded.config.mcp?.servers ?? {},
     contextWindow,
     poolMembers,
-    // S5（D-S5-2）：压缩策略随装配单次读出（sendTurn 自动挂载点判定入参）
-    compaction: loaded.config.llm?.compaction,
+    // S5（D-S5-2）：压缩策略随装配单次读出（sendTurn 自动挂载点判定入参）。
+    // K5-D（V1）：桌面缺省开——car.config 无 llm.compaction 键 = { enabled: true }
+    // （token 维度阈值由句柄 armedCompactionCfg 按窗口真值 ×0.78 装甲；无窗口 = 仅事件维度，
+    // 实际短会话不触发）。**键在场 = 内核语义原样**（含 enabled 缺席 = 关——显式配置优先，
+    // 退关通道 = compaction: { enabled: false }）；内核 1.13 兼容线（enabled 缺省关）不动。
+    compaction: loaded.config.llm?.compaction ?? { enabled: true },
   }
 }
 

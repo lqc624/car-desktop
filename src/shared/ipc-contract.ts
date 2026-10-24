@@ -482,6 +482,8 @@ export interface EndpointMetaDTO {
   baseUrl: string
   model: string
   contextWindow: number | null
+  /** K5-D（V2）：适配器族声明；缺省 openai-compat（存量语义——anthropic 网关有了端点路线） */
+  adapterId: 'openai-compat' | 'anthropic'
 }
 /** S5（D-S5-4）：模型菜单池端点项（car.config modelPool——无池 = 空数组） */
 export interface PoolMemberDTO {
@@ -692,7 +694,7 @@ export interface CarBridge {
   // —— S4-S2：doctor / 模型元数据 / 自定义端点 ——
   doctorRun(workspaceId?: string): Promise<{ rows: DoctorRowDTO[] }>
   modelsMeta(workspaceId?: string): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null; pool: PoolMemberDTO[] }>
-  credentialsSave(payload: { baseUrl: string; model: string; key: string; contextWindow?: number }): Promise<EndpointMetaDTO>
+  credentialsSave(payload: { baseUrl: string; model: string; key: string; contextWindow?: number; adapterId?: 'openai-compat' | 'anthropic' }): Promise<EndpointMetaDTO>
   credentialsMeta(): Promise<EndpointMetaDTO | null>
   credentialsClear(): Promise<unknown>
   // —— S3-S4：审计报告 / 取证导出（审计页） ——

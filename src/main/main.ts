@@ -168,8 +168,12 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.PluginsRemove, (_event, payload: unknown) => callHost(IpcChannel.PluginsRemove, payload))
   ipcMain.handle(IpcChannel.McpList, (_event, payload: unknown) => callHost(IpcChannel.McpList, payload))
   // —— S4-S2：自定义端点凭据（main 侧 safeStorage 独占——Key 解密后推宿主装配，渲染层不触达） ——
-  ipcMain.handle(IpcChannel.CredentialsSave, (_event, payload: { baseUrl: string; model: string; key: string; contextWindow?: number }) => {
-    const meta = saveEndpoint(app.getPath('userData'), { ...payload, contextWindow: payload.contextWindow ?? null })
+  ipcMain.handle(IpcChannel.CredentialsSave, (_event, payload: { baseUrl: string; model: string; key: string; contextWindow?: number; adapterId?: 'openai-compat' | 'anthropic' }) => {
+    // K5-D（V2）：adapterId 枚举校验（fail-visible——非法值拒绝保存，禁静默按缺省落盘）
+    if (payload.adapterId !== undefined && payload.adapterId !== 'openai-compat' && payload.adapterId !== 'anthropic') {
+      throw new Error(`CAR-E-DESKTOP: adapterId 非法（${String(payload.adapterId)}）——合法值 openai-compat | anthropic`)
+    }
+    const meta = saveEndpoint(app.getPath('userData'), { ...payload, adapterId: payload.adapterId ?? 'openai-compat', contextWindow: payload.contextWindow ?? null })
     // Key 内存流转：解密后推宿主装配（credentials:key-push——宿主缓存，不落盘不打印）
     return callHost(IpcChannel.CredentialsKeyPush, { ...meta, key: payload.key }).then(() => meta)
   })

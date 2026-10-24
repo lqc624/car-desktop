@@ -231,7 +231,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
 
   /** 装载模型（configModel 锚点）；装配失败不阻塞会话面，原因必须回到渲染层（S2 修补：禁吞 console） */
   // —— S4-S2：自定义端点（main safeStorage 解密后经 credentials:key-push 内存推送——不落盘不打印） ——
-  let endpoint: { baseUrl: string; model: string; key: string; contextWindow: number | null } | null = null
+  let endpoint: { baseUrl: string; model: string; key: string; contextWindow: number | null; adapterId?: 'openai-compat' | 'anthropic' } | null = null
 
   /** 装载模型（doctor/会话共用）：端点覆盖 > car.config（R-D6）；contextWindow = 元数据表/端点声明（D-C5 无值 null）。
    *  S5（D-S5-1）：routingSink holder 随装配返回——RuntimeCore 先建、句柄 log 后建回填（routing/decide 落链）。 */
@@ -380,6 +380,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
           model,
           key,
           contextWindow: typeof p.contextWindow === 'number' && p.contextWindow > 0 ? p.contextWindow : null,
+          // K5-D（V2）：adapterId 随端点（main 已枚举校验；宿主侧缺省 openai-compat）
+          adapterId: p.adapterId === 'anthropic' ? 'anthropic' : 'openai-compat',
         }
         return { ok: true, active: true }
       }
@@ -414,10 +416,12 @@ export function createHostService(opts: HostServiceOptions): HostService {
             ? [{ label: '工作区配置', ok: false, detail: configError }]
             : []),
           ...(await runDoctor({
-            llm,
+            // K5-D（V2）：端点激活时 adapterId 随端点声明（anthropic 探 GET /v1/models + x-api-key；
+            // 否则 car.config llm.adapterId 原语义）
+            llm: endpoint ? { ...llm, adapterId: endpoint.adapterId ?? 'openai-compat' } : llm,
             endpointKeyPresent: endpoint !== null,
             effectiveBaseUrl: endpoint?.baseUrl ?? llm.baseUrl ?? '',
-            probeKey: endpoint?.key ?? process.env[llm.adapterId === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] ?? null,
+            probeKey: endpoint?.key ?? process.env[(endpoint?.adapterId ?? llm.adapterId) === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] ?? null,
             poolMembers,
           }).then((r) => r.rows)),
         ]
@@ -443,7 +447,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
             }
           } catch { /* 工作区配置不可读 = 空池（元数据面不因池失败而红） */ }
         }
-        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow } : null, pool }
+        return { meta: MODEL_META, endpoint: endpoint ? { baseUrl: endpoint.baseUrl, model: endpoint.model, contextWindow: endpoint.contextWindow, adapterId: endpoint.adapterId ?? 'openai-compat' } : null, pool }
       }
       case IpcChannel.HostProbe: {
         const probe = probeSeam()

@@ -17,6 +17,8 @@ export interface EndpointMeta {
   baseUrl: string
   model: string
   contextWindow: number | null
+  /** K5-D（V2）：适配器族声明（openai-compat | anthropic）；读侧缺省 openai-compat（存量档兼容） */
+  adapterId: 'openai-compat' | 'anthropic'
 }
 export interface EndpointWithKey extends EndpointMeta {
   key: string
@@ -28,12 +30,20 @@ interface Stored extends EndpointMeta {
 
 const file = (userDataDir: string): string => path.join(userDataDir, 'credentials.json')
 
+const normAdapter = (v: unknown): 'openai-compat' | 'anthropic' => (v === 'anthropic' ? 'anthropic' : 'openai-compat')
+
 function readStored(userDataDir: string): Stored | null {
   if (!existsSync(file(userDataDir))) return null
   try {
     const p = JSON.parse(readFileSync(file(userDataDir), 'utf8')) as Partial<Stored>
     if (typeof p.baseUrl !== 'string' || typeof p.model !== 'string' || typeof p.keyEncrypted !== 'string') return null
-    return { baseUrl: p.baseUrl, model: p.model, contextWindow: typeof p.contextWindow === 'number' ? p.contextWindow : null, keyEncrypted: p.keyEncrypted }
+    return {
+      baseUrl: p.baseUrl,
+      model: p.model,
+      contextWindow: typeof p.contextWindow === 'number' ? p.contextWindow : null,
+      adapterId: normAdapter(p.adapterId),
+      keyEncrypted: p.keyEncrypted,
+    }
   } catch {
     return null
   }
@@ -45,18 +55,24 @@ export function saveEndpoint(userDataDir: string, ep: EndpointWithKey): Endpoint
   }
   const keyEncrypted = safeStorage.encryptString(ep.key).toString('base64')
   mkdirSync(userDataDir, { recursive: true })
-  const stored: Stored = { baseUrl: ep.baseUrl, model: ep.model, contextWindow: ep.contextWindow ?? null, keyEncrypted }
+  const stored: Stored = {
+    baseUrl: ep.baseUrl,
+    model: ep.model,
+    contextWindow: ep.contextWindow ?? null,
+    adapterId: normAdapter(ep.adapterId),
+    keyEncrypted,
+  }
   const tmp = file(userDataDir) + '.tmp'
   writeFileSync(tmp, JSON.stringify(stored, null, 2), 'utf8')
   // 原子替换（同卷 rename——fileSecurityStore 同款）
   renameSync(tmp, file(userDataDir))
-  return { baseUrl: ep.baseUrl, model: ep.model, contextWindow: ep.contextWindow ?? null }
+  return { baseUrl: ep.baseUrl, model: ep.model, contextWindow: ep.contextWindow ?? null, adapterId: normAdapter(ep.adapterId) }
 }
 
 /** 端点元数据（无 Key——doctor/装配读取面） */
 export function loadEndpointMeta(userDataDir: string): EndpointMeta | null {
   const s = readStored(userDataDir)
-  return s ? { baseUrl: s.baseUrl, model: s.model, contextWindow: s.contextWindow } : null
+  return s ? { baseUrl: s.baseUrl, model: s.model, contextWindow: s.contextWindow, adapterId: s.adapterId } : null
 }
 
 /** 解密 Key（内存流转——仅供 credentials:key-push 推宿主装配；禁打印禁落盘） */

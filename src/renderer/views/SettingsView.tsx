@@ -15,6 +15,8 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
   const [model, setModel] = useState('')
   const [key, setKey] = useState('')
   const [windowInput, setWindowInput] = useState('')
+  // K5-D（V2）：适配器族（openai-compat | anthropic——anthropic 网关端点路线，缺省 openai-compat）
+  const [adapterId, setAdapterId] = useState<'openai-compat' | 'anthropic'>('openai-compat')
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -57,6 +59,7 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         baseUrl: baseUrl.trim(),
         model: model.trim(),
         key: key.trim(),
+        adapterId,
         // 窗口单位换算：输入框标签是「窗口 k」，宿主 contextWindow 是 token 绝对值（1018 终验红条）
         ...(windowInput ? { contextWindow: Number(windowInput) * 1000 } : {}),
       })
@@ -103,15 +106,20 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         </div>
       ))}
 
-      <h3>自定义模型端点（OpenAI 兼容）</h3>
+      <h3>自定义模型端点</h3>
       {endpoint && (
         <div className="banner ok">
           已配置：<b>{endpoint.model}</b> @ <code className="mono">{endpoint.baseUrl}</code>
-          {endpoint.contextWindow ? ` · 窗口 ${Math.round(endpoint.contextWindow / 1000)}k` : ' · 窗口未声明（ctx 百分比不显示）'}
+          {` · ${endpoint.adapterId === 'anthropic' ? 'Anthropic 形态' : 'OpenAI 兼容'}`}
+          {endpoint.contextWindow ? ` · 窗口 ${Math.round(endpoint.contextWindow / 1000)}k` : ' · 窗口未声明（ctx 百分比不显示，压缩 token 阈值不武装）'}
         </div>
       )}
       <div className="row wrap">
-        <input className="grow mono" placeholder="Base URL（https://… OpenAI 兼容）" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        <select value={adapterId} onChange={(e) => setAdapterId(e.target.value === 'anthropic' ? 'anthropic' : 'openai-compat')} style={{ width: 150 }} title="适配器族：OpenAI 兼容 = /chat/completions；Anthropic = /v1/messages（Claude Code 型网关，baseUrl 不带 /v1）">
+          <option value="openai-compat">OpenAI 兼容</option>
+          <option value="anthropic">Anthropic 形态</option>
+        </select>
+        <input className="grow mono" placeholder={adapterId === 'anthropic' ? 'Base URL（https://… 不带 /v1）' : 'Base URL（https://… OpenAI 兼容）'} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
         <input placeholder="Model ID" value={model} style={{ width: 160 }} onChange={(e) => setModel(e.target.value)} />
         <input placeholder="API Key（safeStorage 加密，不回显）" type="password" value={key} style={{ width: 180 }} onChange={(e) => setKey(e.target.value)} />
         <input placeholder="窗口 k（可选）" value={windowInput} style={{ width: 110 }} onChange={(e) => setWindowInput(e.target.value.replace(/[^0-9]/g, ''))} />
@@ -127,7 +135,7 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
           清除
         </button>
       </div>
-      <p className="dim">优先级 = 自定义端点 &gt; car.config llm（R-D6）· Key 经 safeStorage 加密、解密后仅内存推宿主装配（不落盘、不回显、不打印）· 窗口声明可选——无值时 ctx 百分比不显示（禁估算）。</p>
+      <p className="dim">优先级 = 自定义端点 &gt; car.config llm（R-D6）· Key 经 safeStorage 加密、解密后仅内存推宿主装配（不落盘、不回显、不打印）· Anthropic 形态 = Claude Code 型网关（商汤等）：baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道 · 窗口声明可选——无值时 ctx 百分比不显示、压缩 token 阈值不武装（禁估算）。</p>
 
       <h3>内置模型元数据</h3>
       <table className="mtable">

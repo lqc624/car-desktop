@@ -137,3 +137,59 @@ test('k5-3 显式 thresholdTokens 压过缺省：95000 > usage 90000 不触发�
     explicitLow.svc.dispose()
   }
 })
+
+// ==================== K5-D（V1）：桌面压缩缺省开三态 ====================
+
+test('k5-4 缺省开：car.config 无 compaction 键 → { enabled: true } 装配（窗口×0.78 自动武装）', async () => {
+  const env = await makeEnv({
+    carConfigFull: `export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'test-model' } }`,
+  })
+  try {
+    await sendTurn(env, 'a')
+    await env.svc.dispatch('session:set-model', {
+      workspaceId: env.ws.id, sessionId: env.sess.sessionId, model: 'test-model', contextWindow: 100_000,
+    })
+    // 缺省 protectLastTurns = 4：第 6 个 sendTurn 前 5 turn 已完、保护 4 → T1 可折叠
+    for (const t of ['b', 'c', 'd', 'e']) await sendTurn(env, t)
+    await sendTurn(env, 'f')
+    const evs = eventsOf(env)
+    const compactEv = evs.find((x) => x.kind === 'compact')
+    assert.ok(compactEv, '无 compaction 键 = 缺省开——第 6 个 sendTurn token 命中触发（V1-a；缺省 protectLastTurns=4）')
+    const userF = evs.filter((x) => x.kind === 'user' && x.payload === 'f').at(-1)!
+    assert.ok(compactEv!.seq < userF.seq, '先压缩后 append user')
+  } finally {
+    env.svc.dispose()
+  }
+})
+
+test('k5-5 退关通道：compaction { enabled: false } 显式压过缺省开 → 永不触发', async () => {
+  const env = await makeEnv({
+    carConfigFull: `export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'test-model', compaction: { enabled: false } } }`,
+  })
+  try {
+    await sendTurn(env, 'a')
+    await env.svc.dispatch('session:set-model', {
+      workspaceId: env.ws.id, sessionId: env.sess.sessionId, model: 'test-model', contextWindow: 100_000,
+    })
+    for (const t of ['b', 'c', 'd']) await sendTurn(env, t)
+    assert.ok(!eventsOf(env).some((x) => x.kind === 'compact'), '显式 enabled: false = 全局关（car.config 单一事实源）')
+  } finally {
+    env.svc.dispose()
+  }
+})
+
+test('k5-6 键在场 enabled 缺席 = 内核语义原样（关）——显式配置优先于桌面缺省开', async () => {
+  const env = await makeEnv({
+    carConfigFull: `export default { llm: { baseUrl: 'http://127.0.0.1:9', model: 'test-model', compaction: { thresholdEvents: 9999, protectLastTurns: 1 } } }`,
+  })
+  try {
+    await sendTurn(env, 'a')
+    await env.svc.dispatch('session:set-model', {
+      workspaceId: env.ws.id, sessionId: env.sess.sessionId, model: 'test-model', contextWindow: 100_000,
+    })
+    for (const t of ['b', 'c', 'd']) await sendTurn(env, t)
+    assert.ok(!eventsOf(env).some((x) => x.kind === 'compact'), 'compaction 键在场（enabled 缺席）= 内核 1.13 兼容线关——不被缺省开翻转')
+  } finally {
+    env.svc.dispose()
+  }
+})
