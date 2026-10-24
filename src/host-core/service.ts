@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { loadSessionLog, MemoryStore } from '@lqc123qwe/car-runtime'
+import { loadSessionLog, MemoryStore, pendingSteerTurns } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
   IpcPushTopic,
@@ -23,6 +23,7 @@ import {
 import { probeSeam } from './probe.ts'
 import { WorkspaceRegistry } from './workspaces.ts'
 import { SessionHandle, usageOver, type AuthzResponse } from './session-handle.ts'
+import { SubagentManager, childSessionIds, recoverChildSessions, type ChildModelFnOpts } from './subagent.ts'
 import {
   assertSafeId,
   listSessions,
@@ -35,6 +36,7 @@ import {
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
 import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
+import { listCapabilities, writeCapability, editCapability, deleteCapability, type CapabilityEntry } from './capabilities.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
 import { runDoctor } from './doctor.ts'
@@ -62,6 +64,11 @@ export interface HostServiceOptions {
    * chatStep.ts:129 口径），否则事件流与生产路径不等价。
    */
   modelFnOverride?: (h: SessionHandle) => HostModelFn
+  /**
+   * K2（1.16 子 Agent）：测试注入——覆盖子 Agent 模型回调工厂（生产 = createChatModelFn
+   * 同装配的受限形态；子链 runTurn 仍真跑——行为证明）。缺席且 runtime 不可用 = 编排工具不挂。
+   */
+  childModelFnOverride?: (o: ChildModelFnOpts) => HostModelFn
 }
 
 export type PushMessage = { topic: string; payload: unknown }
@@ -181,6 +188,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
       contextWindow,
       // S6（D-S6-1）：工作区记忆存储注入（per-workspace 懒创建——<workspaceRoot>/.car/memory/）
       memoryStore: getMemoryStore(workspaceRoot),
+      // T-24（PRD C-1）：能力库读取面（<workspaceRoot>/.car/capabilities/ 白盒目录）
+      loadCapabilities: () => listCapabilities(workspaceRoot).entries,
     }
   }
 
@@ -261,6 +270,91 @@ export function createHostService(opts: HostServiceOptions): HostService {
         attempts: d.attempts,
       })
     }
+  }
+
+  /**
+   * K2（1.16 子 Agent）：编排管理器装配（session:create 与 resume 共用——禁两份漂移）。
+   * 子 Agent 模型锚点 = 继承父会话现值（Q-A2 基线；`car.config llm.subagent.model` 覆盖 =
+   * 内核 config schema strict 缺口，登记 1.16.0 加法候选 D-K2-2，发布后接线）。
+   * 模型回调不可装配（runtime null 且无测试覆盖）= 编排工具不挂——spawn 面零暴露。
+   */
+  function attachSubagentsFor(workspaceId: string, root: string, handle: SessionHandle, runtime: HostRuntime | null): void {
+    const makeChildModelFn =
+      opts.childModelFnOverride ??
+      (runtime
+        ? (o: ChildModelFnOpts) =>
+            createChatModelFn({
+              runtime,
+              log: o.log,
+              signal: o.signal,
+              currentTurnId: o.currentTurnId,
+              currentModel: o.currentModel,
+              toolDefs: o.toolDefs,
+            })
+        : null)
+    if (!makeChildModelFn) return
+    handle.attachSubagents(
+      new SubagentManager({
+        parentSessionId: handle.sessionId,
+        workspaceId,
+        workspaceRoot: root,
+        sessionsDir: sessionsDirFor(root),
+        authzTimeoutMs,
+        parentLog: handle.log,
+        parentPolicy: () => handle.policy,
+        parentCurrentTurnId: () => handle.currentTurnId(),
+        parentModel: () => handle.sessionModel,
+        fileSecurity,
+        emitEvent: (sessionId, event) => emit(IpcPushTopic.SessionEvent, { workspaceId, sessionId, event }),
+        emitAuthzPending: (p) => emit(IpcPushTopic.AuthzPending, p),
+        emitAuthzResolved: (p) => emit(IpcPushTopic.AuthzResolved, p),
+        waitAuthzDecision: (_sessionId: string, requestId: string) =>
+          new Promise<AuthzResponse>((resolve) => {
+            authzWaiters.set(requestId, resolve)
+          }),
+        makeChildModelFn,
+        registerChildSession: (sessionId, title) => {
+          const idx = readSessionIndex(root)
+          idx.sessions[sessionId] = idx.sessions[sessionId] ?? { title }
+          writeSessionIndex(root, idx)
+        },
+      }),
+    )
+  }
+
+  /**
+   * 跨运行句柄重建公共路径（T-22 / T-20 结论）：验链（调用方先决）→ 五件套同构
+   * （loadRuntimeFor + loadExtraTools + SessionHandle.resume + wireRoutingSink +
+   * attachRuntimeModel）。session:open（打开即恢复）与 turn:send（惰性兜底）共用——
+   * 禁两份漂移；断链 fail-visible 拒绝续写（先修审计面）。
+   */
+  async function buildResumedHandle(workspaceId: string, sessionId: string, title: string): Promise<SessionHandle> {
+    const root = registry.pathOf(workspaceId)
+    const file = join(sessionsDirFor(root), sessionId + '.jsonl')
+    if (!existsSync(file)) throw new Error(`CAR-E-DESKTOP: 会话不存在（${sessionId}）`)
+    const loaded = loadSessionLog(file)
+    if (loaded.brokenAt !== null) {
+      throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
+    }
+    const { runtime, modelError, contextWindow, routingSink } = await loadRuntimeFor(root)
+    const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
+    const handle = SessionHandle.resume(
+      {
+        sessionId,
+        workspaceId,
+        workspaceRoot: root,
+        configModel: runtime?.llm.model ?? null,
+        modelError,
+        deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
+      },
+      loaded.log,
+    )
+    handle.title = title
+    wireRoutingSink(routingSink, handle)
+    attachRuntimeModel(handle, runtime, root, extraTools)
+    attachSubagentsFor(workspaceId, root, handle, runtime)
+    handles.set(key(workspaceId, sessionId), handle)
+    return handle
   }
 
   async function dispatch(channel: string, payload: unknown): Promise<unknown> {
@@ -374,6 +468,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         // S5（D-S5-1）：routing/decide 落链出口回填（先于任何请求——未回填期无决策丢失面）
         wireRoutingSink(routingSink, handle)
         attachRuntimeModel(handle, runtime, root, extraTools)
+        attachSubagentsFor(workspaceId, root, handle, runtime)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
@@ -401,11 +496,59 @@ export function createHostService(opts: HostServiceOptions): HostService {
             modelError: alive.modelError,
             contextWindow: alive.sessionWindow ?? alive.contextWindow,
             events: [...alive.knownEvents()],
+            recovery: null,
           } satisfies SessionOpenResult
         }
-        // 只读回放（先前运行的会话——D-S2-6）：文件必须存在，无句柄无追加
-        const events = parseSessionEvents(root, sessionId)
+        // T-22（D-S6-7）打开即恢复：链完整且未删除 → open 即建可续写句柄——恢复补记
+        //（recoverInterrupted + pendingSteerTurns 扫描）先于回放返回，首屏即补记后状态；
+        // 恢复动作落 session/recover 叙事 + recovery 报告随返回（禁静默补记）。
+        // 只读回放保留面：断链（VD3 断链查看需求）/ 已删除（索引面权威）/ 文件缺失。
+        assertSafeId('会话', sessionId)
         const idx = readSessionIndex(root)
+        const file = join(sessionsDirFor(root), sessionId + '.jsonl')
+        const deleted = idx.sessions[sessionId]?.deleted === true
+        const fileExists = existsSync(file)
+        let loaded: ReturnType<typeof loadSessionLog> | null = null
+        if (fileExists && !deleted) {
+          const l = loadSessionLog(file)
+          if (l.brokenAt === null) loaded = l
+          else console.error(`[host] session:open 断链（brokenAt seq=${l.brokenAt}）——保持只读回放`)
+        }
+        if (loaded) {
+          const handle = await buildResumedHandle(workspaceId, sessionId, idx.sessions[sessionId]?.title ?? '未命名会话')
+          const pendingSteers = pendingSteerTurns(handle.log).length
+          const rec = handle.recoveryReport
+          // T-K2-4：父 open 恢复 = 父链补记（既有路径）+ 子链按载荷枚举逐一 recover（K1 POC 转正式）；
+          // 断链子链只读跳过（broken 计数明示），不影响父链恢复
+          const childRec = recoverChildSessions(sessionsDirFor(root), sessionId)
+          if (rec || childRec.recovered > 0 || childRec.broken > 0) {
+            handle.appendNarrative('session/recover', {
+              interruptedTurns: rec?.turnsClosed ?? 0,
+              syntheticToolResults: rec?.pairedCalls ?? 0,
+              pendingSteers,
+              ...(childRec.recovered > 0 || childRec.broken > 0 ? { childSessions: { recovered: childRec.recovered, broken: childRec.broken } } : {}),
+            })
+          }
+          return {
+            sessionId,
+            workspaceId,
+            exists: true,
+            eventCount: handle.log.events.length,
+            title: handle.title,
+            model: handle.sessionModel,
+            modelError: handle.modelError,
+            contextWindow: handle.sessionWindow ?? handle.contextWindow,
+            events: [...handle.knownEvents()],
+            recovery: {
+              interruptedTurns: rec?.turnsClosed ?? 0,
+              syntheticToolResults: rec?.pairedCalls ?? 0,
+              pendingSteers,
+              ...(childRec.recovered > 0 || childRec.broken > 0 ? { childSessions: { recovered: childRec.recovered, broken: childRec.broken } } : {}),
+            },
+          } satisfies SessionOpenResult
+        }
+        // 只读回放（D-S2-6 保留面）：文件必须存在，无句柄无追加
+        const events = parseSessionEvents(root, sessionId)
         let model: string | null = null
         let sessionWindow: number | null = null
         for (const e of events) {
@@ -424,6 +567,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           title: idx.sessions[sessionId]?.title ?? '未命名会话',
           model,
           events,
+          recovery: null,
         } satisfies SessionOpenResult
       }
       case IpcChannel.TurnSend: {
@@ -432,37 +576,14 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const text = requireString(p.text, 'text')
         let handle = handles.get(key(workspaceId, sessionId))
         if (!handle) {
-          // 跨运行续写（S3-S4，D-S2-6 退役）：载入面验链完整 → 重建可续写句柄（惰性，首次续写时）。
-          // 断链 fail-visible 拒绝续写（先修审计面）；已删除会话拒绝（索引面权威）。
-          const root = registry.pathOf(workspaceId)
+          // 跨运行续写兜底（T-22 起 session:open 已即建句柄——本分支覆盖未打开直发形态）：
+          // 已删除 fail-visible（索引面权威）；验链/重建走公共路径（与 open 同构，禁漂移）。
           assertSafeId('会话', sessionId)
-          const idx = readSessionIndex(root)
+          const idx = readSessionIndex(registry.pathOf(workspaceId))
           if (idx.sessions[sessionId]?.deleted) {
             throw new Error(`CAR-E-DESKTOP: 会话已删除（${sessionId}）——拒绝续写`)
           }
-          const file = join(sessionsDirFor(root), sessionId + '.jsonl')
-          if (!existsSync(file)) throw new Error(`CAR-E-DESKTOP: 会话不存在（${sessionId}）`)
-          const loaded = loadSessionLog(file)
-          if (loaded.brokenAt !== null) {
-            throw new Error(`CAR-E-DESKTOP: 会话哈希链断裂（brokenAt seq=${loaded.brokenAt}）——拒绝续写（先修审计面）`)
-          }
-          const { runtime, modelError, contextWindow, routingSink } = await loadRuntimeFor(root)
-          const { extraTools, mcpToolUrl } = await loadExtraTools(workspaceId, root)
-          handle = SessionHandle.resume(
-            {
-              sessionId,
-              workspaceId,
-              workspaceRoot: root,
-              configModel: runtime?.llm.model ?? null,
-              modelError,
-              deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
-            },
-            loaded.log,
-          )
-          wireRoutingSink(routingSink, handle)
-          attachRuntimeModel(handle, runtime, root, extraTools)
-          handle.title = idx.sessions[sessionId]?.title ?? '未命名会话'
-          handles.set(key(workspaceId, sessionId), handle)
+          handle = await buildResumedHandle(workspaceId, sessionId, idx.sessions[sessionId]?.title ?? '未命名会话')
         }
         return handle.sendTurn(text, { memoryInject: p.memoryInject === true })
       }
@@ -520,8 +641,12 @@ export function createHostService(opts: HostServiceOptions): HostService {
           handles.delete(key(workspaceId, sessionId))
         }
         // 索引面标 deleted（列表过滤）；JSONL 文件保留不销毁（审计红线：日志不可变）
+        // T-K2-4：删除级联——子链留痕保留（文件不动）+ 索引随父标记 deleted（Q-K2-3 子链计入配额同面）
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = { ...idx.sessions[sessionId], deleted: true }
+        for (const cid of childSessionIds(sessionsDirFor(root), sessionId)) {
+          idx.sessions[cid] = { ...idx.sessions[cid], deleted: true, deletedWithParent: sessionId }
+        }
         writeSessionIndex(root, idx)
         return { ok: true }
       }
@@ -575,6 +700,54 @@ export function createHostService(opts: HostServiceOptions): HostService {
       case IpcChannel.MemoryRollback: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         return getMemoryStore(handle.workspaceRoot).rollback(handle.log, requireString(p.id, 'id'))
+      }
+      // ── T-24（D2-S1 / PRD §2）：能力库条目面（CRUD 落链承载 = 活跃会话——memory CRUD 同款链同源） ──
+      case IpcChannel.CapabilityList:
+        return listCapabilities(registry.pathOf(requireString(p.workspaceId, 'workspaceId')))
+      case IpcChannel.CapabilityWrite: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        const entry = writeCapability(handle.workspaceRoot, p['entry'])
+        handle.appendNarrative('capability/write', { id: entry.id, kind: entry.kind, name: entry.name })
+        return entry satisfies CapabilityEntry
+      }
+      case IpcChannel.CapabilityEdit: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        const id = requireString(p.id, 'id')
+        const entry = editCapability(handle.workspaceRoot, id, p['patch'])
+        handle.appendNarrative('capability/edit', { id, name: entry.name, status: entry.status })
+        return entry satisfies CapabilityEntry
+      }
+      case IpcChannel.CapabilityDelete: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        const id = requireString(p.id, 'id')
+        deleteCapability(handle.workspaceRoot, id)
+        handle.appendNarrative('capability/delete', { id })
+        return { ok: true }
+      }
+      case IpcChannel.CapabilityRefAdd: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        handle.capabilityRefAdd(requireString(p.refId, 'refId'))
+        return { ok: true }
+      }
+      case IpcChannel.CapabilityRefRemove: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        handle.capabilityRefRemove(requireString(p.refId, 'refId'))
+        return { ok: true }
+      }
+      // ── T-25（D2-S2 / PRD §4）：附件面（file/attach 恒落链；选择器属 main 侧能力） ──
+      case IpcChannel.AttachmentPick:
+        throw new Error('CAR-E-DESKTOP: attachment:pick 由 main 侧处理（契约通道误入宿主 dispatch）')
+      case IpcChannel.AttachmentAdd: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        if (!Array.isArray(p.paths) || p.paths.length === 0) {
+          throw new Error('CAR-E-DESKTOP: attachment:add 缺少 paths（string[]）')
+        }
+        return handle.attachmentAdd(p.paths as string[])
+      }
+      case IpcChannel.AttachmentRemove: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        handle.attachmentRemove(requireString(p.path, 'path'))
+        return { ok: true }
       }
       case IpcChannel.FileSecurityGet:
         return fileSecurityStore.get()

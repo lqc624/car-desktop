@@ -21,6 +21,8 @@ const WORKSPACE_ID_RE = /^[A-Za-z0-9_-]+$/
 export interface SessionIndexEntry {
   title?: string
   deleted?: boolean
+  /** T-K2-4：随父删除级联标记（值 = 父会话 id——审计定位「为什么不见了」） */
+  deletedWithParent?: string
 }
 
 export interface SessionIndexFile {
@@ -88,12 +90,23 @@ export function sessionInfo(workspaceRoot: string, workspaceId: string, sessionI
   const p = join(sessionsDirFor(workspaceRoot), sessionId + '.jsonl')
   if (!existsSync(p)) throw new Error(`CAR-E-DESKTOP: 会话不存在（${sessionId}）`)
   const idx = readSessionIndex(workspaceRoot)
-  const eventCount = readFileSync(p, 'utf8').split('\n').filter((l) => l.trim().length > 0).length
+  const lines = readFileSync(p, 'utf8').split('\n').filter((l) => l.trim().length > 0)
+  // K2：子链 parentSessionId（首事件 session-start 载荷——列表面徽标数据源；解析失败不阻塞计数面）
+  let parentSessionId: string | null = null
+  if (lines[0]) {
+    try {
+      const first = JSON.parse(lines[0]) as { kind?: string; payload?: Record<string, unknown> | null }
+      if (first.kind === 'system' && first.payload?.['type'] === 'session-start' && typeof first.payload['parentSessionId'] === 'string') {
+        parentSessionId = first.payload['parentSessionId']
+      }
+    } catch { /* 首行不可解析（异常形态）= 普通会话口径，计数面不阻塞 */ }
+  }
   return {
     sessionId,
     workspaceId,
     createdAt: statSync(p).birthtimeMs,
-    eventCount,
+    eventCount: lines.length,
     title: idx.sessions[sessionId]?.title ?? '未命名会话',
+    ...(parentSessionId ? { parentSessionId } : {}),
   }
 }

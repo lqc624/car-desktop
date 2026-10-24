@@ -16,6 +16,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'elec
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { clearEndpoint, loadEndpointMeta, revealEndpointKey, saveEndpoint } from './credentials.ts'
+import { checkForUpdates, downloadUpdate, initUpdater, installUpdate, openReleases } from './updater.ts'
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 
 const HOST_TIMEOUT_MS = 20_000
@@ -133,6 +134,15 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.MemoryEdit, (_event, payload: unknown) => callHost(IpcChannel.MemoryEdit, payload))
   ipcMain.handle(IpcChannel.MemoryRemove, (_event, payload: unknown) => callHost(IpcChannel.MemoryRemove, payload))
   ipcMain.handle(IpcChannel.MemoryRollback, (_event, payload: unknown) => callHost(IpcChannel.MemoryRollback, payload))
+  // —— T-24/T-25：能力库条目面 + 附件面（宿主通道透传） ——
+  ipcMain.handle(IpcChannel.CapabilityList, (_event, payload: unknown) => callHost(IpcChannel.CapabilityList, payload))
+  ipcMain.handle(IpcChannel.CapabilityWrite, (_event, payload: unknown) => callHost(IpcChannel.CapabilityWrite, payload))
+  ipcMain.handle(IpcChannel.CapabilityEdit, (_event, payload: unknown) => callHost(IpcChannel.CapabilityEdit, payload))
+  ipcMain.handle(IpcChannel.CapabilityDelete, (_event, payload: unknown) => callHost(IpcChannel.CapabilityDelete, payload))
+  ipcMain.handle(IpcChannel.CapabilityRefAdd, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefAdd, payload))
+  ipcMain.handle(IpcChannel.CapabilityRefRemove, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefRemove, payload))
+  ipcMain.handle(IpcChannel.AttachmentAdd, (_event, payload: unknown) => callHost(IpcChannel.AttachmentAdd, payload))
+  ipcMain.handle(IpcChannel.AttachmentRemove, (_event, payload: unknown) => callHost(IpcChannel.AttachmentRemove, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——
   ipcMain.handle(IpcChannel.FileSecurityGet, () => callHost(IpcChannel.FileSecurityGet))
   ipcMain.handle(IpcChannel.FileSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.FileSecuritySet, payload))
@@ -172,6 +182,24 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.DoctorRun, (_event, payload: unknown) => callHost(IpcChannel.DoctorRun, payload))
   // S5：models:meta 载荷透传（workspaceId → 池成员分组数据面——此前无载荷形态丢弃了 workspaceId）
   ipcMain.handle(IpcChannel.ModelsMeta, (_event, payload: unknown) => callHost(IpcChannel.ModelsMeta, payload))
+  // —— T-23：自动更新（main 侧能力——同 workspace:pick 先例，不入宿主 dispatch） ——
+  ipcMain.handle(IpcChannel.UpdateCheck, () => checkForUpdates().then(() => ({ ok: true })))
+  ipcMain.handle(IpcChannel.UpdateDownload, () => downloadUpdate().then(() => ({ ok: true })))
+  ipcMain.handle(IpcChannel.UpdateInstall, () => {
+    installUpdate()
+    return { ok: true }
+  })
+  ipcMain.handle(IpcChannel.UpdateOpenReleases, () => openReleases().then(() => ({ ok: true })))
+  // —— T-25：附件文件选择器（main 侧 dialog 能力——同 workspace:pick 先例，选中后转宿主登记落链） ——
+  ipcMain.handle(IpcChannel.AttachmentPick, async (event): Promise<string[] | null> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const picked = await dialog.showOpenDialog(win!, {
+      title: '选择附件（文本类 ≤200KB 全文注入；其余路径登记，模型经 fs_read 按需读取）',
+      properties: ['openFile', 'multiSelections'],
+    })
+    if (picked.canceled || picked.filePaths.length === 0) return null
+    return picked.filePaths
+  })
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {
@@ -193,6 +221,16 @@ async function createWindow(show: boolean): Promise<BrowserWindow> {
 
 app.whenReady().then(async () => {
   registerIpc()
+  // T-23：自动更新初始化 + 启动检查（CAR_SMOKE 无头冒烟跳过——不触网；dev 形态 updater 短路 disabled）
+  const smoke = process.env.CAR_SMOKE === '1'
+  if (!smoke) {
+    initUpdater((s) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(IpcPushTopic.UpdateStatus, s)
+      }
+    })
+    void checkForUpdates()
+  }
   // 启动即推端点 Key（safeStorage 解密 → 宿主内存——跨重启的自定义端点续用）
   const storedKey = revealEndpointKey(app.getPath('userData'))
   if (storedKey) {
@@ -205,7 +243,6 @@ app.whenReady().then(async () => {
       }
     }
   }
-  const smoke = process.env.CAR_SMOKE === '1'
   const win = await createWindow(!smoke)
   if (smoke) {
     // 无头冒烟（CAR_SMOKE=1，窗口 show:false）：桥在位 + probe 全链

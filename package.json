@@ -56,7 +56,12 @@
       "allowToChangeInstallationDirectory": true,
       "artifactName": "CAR-Desktop-${version}-win-x64-setup.exe"
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "publish": {
+      "provider": "github",
+      "owner": "lqc123qwe",
+      "repo": "car-desktop"
+    }
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
@@ -71,6 +76,7 @@
   },
   "dependencies": {
     "@lqc123qwe/car-runtime": "1.15.2",
+    "electron-updater": "^6.8.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   }

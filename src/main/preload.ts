@@ -72,9 +72,26 @@ const bridge: CarBridge = {
     ipcRenderer.invoke(IpcChannel.MemoryEdit, { workspaceId, sessionId, id, text, ...(tags !== undefined ? { tags } : {}) }),
   memoryRemove: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRemove, { workspaceId, sessionId, id }),
   memoryRollback: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRollback, { workspaceId, sessionId, id }),
+  // —— T-24：能力库条目面（能力库视图 + 引用菜单） ——
+  capabilityList: (workspaceId) => ipcRenderer.invoke(IpcChannel.CapabilityList, { workspaceId }),
+  capabilityWrite: (workspaceId, sessionId, entry) => ipcRenderer.invoke(IpcChannel.CapabilityWrite, { workspaceId, sessionId, entry }),
+  capabilityEdit: (workspaceId, sessionId, id, patch) => ipcRenderer.invoke(IpcChannel.CapabilityEdit, { workspaceId, sessionId, id, patch }),
+  capabilityDelete: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.CapabilityDelete, { workspaceId, sessionId, id }),
+  capabilityRefAdd: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefAdd, { workspaceId, sessionId, refId }),
+  capabilityRefRemove: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefRemove, { workspaceId, sessionId, refId }),
+  // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
+  attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
+  attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),
+  attachmentRemove: (workspaceId, sessionId, path) => ipcRenderer.invoke(IpcChannel.AttachmentRemove, { workspaceId, sessionId, path }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),
+  // —— T-23：自动更新（main 侧能力；状态经 onUpdateStatus 推送） ——
+  checkUpdate: () => ipcRenderer.invoke(IpcChannel.UpdateCheck),
+  downloadUpdate: () => ipcRenderer.invoke(IpcChannel.UpdateDownload),
+  installUpdate: () => ipcRenderer.invoke(IpcChannel.UpdateInstall),
+  openReleases: () => ipcRenderer.invoke(IpcChannel.UpdateOpenReleases),
+  onUpdateStatus: (cb) => subscribe(IpcPushTopic.UpdateStatus, cb),
 }
 
 contextBridge.exposeInMainWorld('car', bridge)

@@ -4,14 +4,18 @@ import type {
   AuthzResolvedPush,
   HostProbeResult,
   ModelMetaDTO,
+  AttachmentRowDTO,
+  CapabilityEntryDTO,
   SessionEventDTO,
   SessionEventPush,
   SessionInfo,
   SessionPolicyDTO,
   SessionUsageResult,
+  UpdateStatusPush,
   WorkspaceInfo,
 } from '../shared/ipc-contract'
 import { AuditView } from './views/AuditView'
+import { CapabilityView } from './views/CapabilityView'
 import { DashView } from './views/DashView'
 import { McpView } from './views/McpView'
 import { MemoryView } from './views/MemoryView'
@@ -64,6 +68,40 @@ interface RoutingEvent {
   selected: string | null
   reason: string
   retries: number
+}
+
+/** T-24：当轮活跃能力引用集（引用态扫描——与宿主 session-handle 同口径：add/remove 链序收敛） */
+function activeCapabilityRefs(events: SessionEventDTO[]): string[] {
+  const state = new Map<string, boolean>()
+  for (const e of events) {
+    if (e.kind !== 'system') continue
+    const m = e.meta as Record<string, unknown> | null
+    if (!m || m['injection'] !== 'capability') continue
+    if (m['op'] !== 'add' && m['op'] !== 'remove') continue
+    state.set(String(m['refId']), m['op'] === 'add')
+  }
+  return [...state.entries()].filter(([, on]) => on).map(([id]) => id)
+}
+
+/** T-25：会话附件态（file/attach + file/attach-remove 链序收敛——与宿主同口径） */
+function activeAttachments(events: SessionEventDTO[]): AttachmentRowDTO[] {
+  const state = new Map<string, AttachmentRowDTO>()
+  for (const e of events) {
+    if (e.kind !== 'system') continue
+    const p = e.payload as Record<string, unknown> | null
+    if (!p) continue
+    if (p['type'] === 'file/attach') {
+      state.set(String(p['path']), {
+        path: String(p['path']),
+        mode: p['mode'] === 'fulltext' ? 'fulltext' : 'path-ref',
+        size: Number(p['size'] ?? 0),
+        mime: String(p['mime'] ?? ''),
+      })
+    } else if (p['type'] === 'file/attach-remove') {
+      state.delete(String(p['path']))
+    }
+  }
+  return [...state.values()]
 }
 
 function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatItem[]; routing: RoutingEvent[] } {
@@ -155,6 +193,14 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
       else if (type === 'session/rename') items.push({ kind: 'line', tone: 'dim', text: `会话重命名 → ${String(p['title'] ?? '?')}` })
       else if (type === 'session/policy') items.push({ kind: 'line', tone: 'dim', text: `会话策略 → ${String(p['policy'] ?? '?')}（session/policy 已落链）` })
       else if (type === 'compact') items.push({ kind: 'line', tone: 'dim', text: `历史已压缩（context/compact 已落链，seq=${String(e.seq)}）` })
+      // K2（1.16 子 Agent）：编排叙事行（复用 system 叙事渲染——零新 IPC）
+      else if (type === 'subagent/spawn') {
+        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 派生 · ${String(p['subagentId'] ?? '?')}（任务：${String(p['task'] ?? '').slice(0, 60)}——subagent/spawn 已落链）` })
+      } else if (type === 'subagent/join') {
+        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 汇合 · ${String(p['subagentId'] ?? '?')}（reason=${String(p['reason'] ?? '?')} · 摘要 ${String(p['summaryChars'] ?? '?')} 字符）` })
+      } else if (type === 'subagent/kill') {
+        items.push({ kind: 'line', tone: 'warn', text: `子 Agent 终止 · ${String(p['subagentId'] ?? '?')}（subagent/kill 已落链）` })
+      }
     }
     // kind usage：turnEnd 摘要已覆盖，不重复渲染
   }
@@ -185,8 +231,11 @@ export function App() {
   const [meta, setMeta] = useState<Record<string, ModelMetaDTO>>({})
   const [poolMembers, setPoolMembers] = useState<Array<{ id: string; baseUrl: string; model: string; adapterId: string }>>([])
   const [defaultModel, setDefaultModelState] = useState<string | null>(() => readDefaultModel())
-  const [pending, setPending] = useState<AuthzPendingPush | null>(null)
-  const [countdown, setCountdown] = useState(0)
+  // R-K2-1：授权 pending 改队列（K2 并发子 Agent——多请求并发在途，单槽会顶掉先到的弹窗，
+  // 用户只见最新一条、其余静默等超时默认拒；队列化后各弹窗独立倒计时、按 requestId 应答）
+  const [pendings, setPendings] = useState<AuthzPendingPush[]>([])
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  const [update, setUpdate] = useState<UpdateStatusPush | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
@@ -197,7 +246,11 @@ export function App() {
   const [showCtx, setShowCtx] = useState(false)
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
-  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory'>('chat')
+  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory' | 'caps'>('chat')
+  // T-24：能力库数据面（引用菜单 / chips / ctx 行）
+  const [caps, setCaps] = useState<CapabilityEntryDTO[]>([])
+  const [showCapMenu, setShowCapMenu] = useState(false)
+  const [capSearch, setCapSearch] = useState('')
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
   const [showPolicy, setShowPolicy] = useState(false)
   const [windowSel, setWindowSel] = useState<number | null>(null) // S4-S3 受控版：null = 跟随元数据/端点
@@ -219,6 +272,21 @@ export function App() {
     [],
   )
 
+  // T-24：能力库数据面刷新（视图 CRUD / 引用菜单共用）
+  const refreshCaps = useCallback(
+    async (wsId: string) => {
+      try {
+        setCaps((await window.car.capabilityList(wsId)).entries)
+      } catch {
+        setCaps([]) // 无工作区/载入失败 = 空清单（视图内 onFail 已可见，菜单面不阻塞）
+      }
+    },
+    [],
+  )
+  // 视图 CRUD 后刷新数据面（稳定引用——防 CapabilityView 副作用因闭包身份变化而循环重载）
+  const capsChanged = useCallback(() => {
+    if (selected) void refreshCaps(selected.id)
+  }, [selected, refreshCaps])
   // ── 初始化 + 推送订阅（一次挂载，按 openRef 过滤当前会话） ──────────────
   useEffect(() => {
     window.car
@@ -247,37 +315,39 @@ export function App() {
     const offPending = window.car.onAuthzPending((p: AuthzPendingPush) => {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
-      setPending(p)
-      setCountdown(Math.max(0, Math.ceil((p.ts + p.timeoutMs - Date.now()) / 1000)))
+      // R-K2-1：队列化（requestId 幂等去重——多子 Agent/父请求并发在途各自成卡）
+      setPendings((prev) => (prev.some((x) => x.requestId === p.requestId) ? prev : [...prev, p]))
     })
     const offResolved = window.car.onAuthzResolved((p: AuthzResolvedPush) => {
-      setPending((cur) => {
-        if (cur?.requestId !== p.requestId) return cur
+      setPendings((prev) => {
+        if (!prev.some((x) => x.requestId === p.requestId)) return prev
         if (p.outcome === 'timeout') setStatus('授权超时——内核默认拒绝（timeout-default-deny）')
         if (p.outcome === 'cancelled') setStatus('授权请求已取消（会话关闭）')
-        return null
+        return prev.filter((x) => x.requestId !== p.requestId)
       })
     })
+    // T-23：自动更新状态机（available/downloaded/error 横幅 fail-visible；disabled = dev 形态不显）
+    const offUpdate = window.car.onUpdateStatus((s: UpdateStatusPush) => setUpdate(s))
     return () => {
       offEvent()
       offPending()
       offResolved()
+      offUpdate()
     }
   }, [fail])
 
-  // 倒计时（展示口径；真值在内核）
+  // 倒计时（展示口径；真值在内核）——R-K2-1：队列态统一 ticker，各弹窗按自身 ts/timeoutMs 现算
   useEffect(() => {
-    if (!pending) return
-    const t = setInterval(() => {
-      setCountdown(Math.max(0, Math.ceil((pending.ts + pending.timeoutMs - Date.now()) / 1000)))
-    }, 250)
+    if (pendings.length === 0) return
+    setNowTick(Date.now())
+    const t = setInterval(() => setNowTick(Date.now()), 500)
     return () => clearInterval(t)
-  }, [pending])
+  }, [pendings.length])
 
   // 自动滚底
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [events, pending])
+  }, [events, pendings.length])
 
   // ── 工作区/会话 ────────────────────────────────────────────────────────
   const pickWorkspace = async () => {
@@ -310,10 +380,11 @@ export function App() {
     setOpenId(null)
     setEvents([])
     setUsage(null)
-    setPending(null)
+    setPendings([])
     setBusy(false)
     try {
       setSessions(await window.car.listSessions(w.id))
+      void refreshCaps(w.id)
       // S5（D-S5-4）：池端点分组数据面（car.config modelPool——随工作区切换刷新）
       const m = await window.car.modelsMeta(w.id)
       setMeta(m.meta)
@@ -329,6 +400,7 @@ export function App() {
     try {
       const r = await window.car.openSession(selected.id, sessionId)
       openRef.current = { wsId: selected.id, sessionId }
+      setView('chat')
       setOpenId(sessionId)
       setEvents(r.events)
       setSessionModel(r.model)
@@ -347,8 +419,14 @@ export function App() {
       const reEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'model/set' && typeof (e.payload as Record<string, unknown>)['reasoning'] === 'string')
       setSessionReasoning(reEvent ? ((reEvent.payload as Record<string, unknown>)['reasoning'] as 'off' | 'low' | 'medium' | 'high') : null)
       setUsage(await window.car.sessionUsage(selected.id, sessionId))
-      setPending(null)
+      setPendings([])
       setBusy(false)
+      // T-22（D-S6-7）：打开即恢复明示（禁静默补记——恢复报告随 open 返回，动作落 session/recover 叙事）
+      if (r.recovery && (r.recovery.interruptedTurns > 0 || r.recovery.pendingSteers > 0)) {
+        setStatus(
+          `打开即恢复：补记 interrupted turn ×${r.recovery.interruptedTurns}（合成 toolResult ×${r.recovery.syntheticToolResults}）——待执行引导 ${r.recovery.pendingSteers} 条（session/recover 已落链）`,
+        )
+      }
       if (r.modelError) setError(`模型未装配（turn 发送将被拒绝）：${r.modelError}`)
     } catch (e) {
       fail(e)
@@ -449,11 +527,11 @@ export function App() {
     }
   }
 
-  const respond = async (decision: 'once' | 'session' | 'deny') => {
-    if (!selected || !openId || !pending) return
+  const respond = async (decision: 'once' | 'session' | 'deny', requestId: string) => {
+    if (!selected || !openId) return
     try {
-      await window.car.respondAuthz(selected.id, openId, pending.requestId, decision)
-      setPending(null)
+      await window.car.respondAuthz(selected.id, openId, requestId, decision)
+      setPendings((prev) => prev.filter((x) => x.requestId !== requestId))
     } catch (e) {
       fail(e)
     }
@@ -536,6 +614,57 @@ export function App() {
   // S6（D-S6-6）：待执行队列（user 事件无对应 turnEnd = 引导排队中）→ 提示条显隐 + ctx-pop 记忆注入行数据
   const pendingCount = items.filter((it) => it.kind === 'msg' && it.role === 'user' && it.pending).length
   const lastInjectionEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+  // T-24：能力引用态（chips + cap-menu ✓ 数据源）+ 最近注入行（ctx-pop D-C3 行位真值）
+  const activeRefs = activeCapabilityRefs(events)
+  const lastCapInjection = [...events]
+    .reverse()
+    .find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'capability' && (e.meta as Record<string, unknown>)['op'] === 'inject')
+  const capsById = new Map(caps.map((c) => [c.id, c]))
+  const filteredCaps = caps.filter((c) => (capSearch.trim() ? (c.name + c.id + (c.tags ?? []).join(' ')).toLowerCase().includes(capSearch.trim().toLowerCase()) : true))
+  // T-25：附件态（chips + ctx 行数据源）+ 登记/撤销/选择器
+  const attachments = activeAttachments(events)
+  const attachFulltextInjected = events
+    .filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'attachment')
+    .reduce((s, e) => s + Number((e.meta as Record<string, unknown>)['chars'] ?? 0), 0)
+  const attachPathRefCount = attachments.filter((a) => a.mode === 'path-ref').length
+  // K2（1.16 子 Agent）：ctx-pop 汇总行数据（活跃 ≈ 已派生未 join/kill；累计 = 链上 spawn 事件数——链即真值）
+  const subagentSpawns = events.filter((e) => e.kind === 'system' && (e.payload as Record<string, unknown> | null)?.['type'] === 'subagent/spawn')
+  const subagentClosed = events.filter((e) => {
+    const t = (e.payload as Record<string, unknown> | null)?.['type']
+    return e.kind === 'system' && (t === 'subagent/join' || t === 'subagent/kill')
+  }).length
+  const subagentActive = Math.max(0, subagentSpawns.length - subagentClosed)
+  const attachFiles = async (): Promise<void> => {
+    if (!selected || !openId) return
+    try {
+      const paths = await window.car.attachmentPick()
+      if (!paths?.length) return
+      const rows = await window.car.attachmentAdd(selected.id, openId, paths)
+      setStatus(
+        `附件已登记（file/attach 落链）：全文注入 ${rows.filter((r) => r.mode === 'fulltext').length} 个 · 路径登记 ${rows.filter((r) => r.mode === 'path-ref').length} 个`,
+      )
+    } catch (e) {
+      fail(e)
+    }
+  }
+  const detachFile = async (path: string): Promise<void> => {
+    if (!selected || !openId) return
+    try {
+      await window.car.attachmentRemove(selected.id, openId, path)
+      setStatus(`附件已撤销（file/attach-remove 补偿事件落链）`)
+    } catch (e) {
+      fail(e)
+    }
+  }
+  const toggleRef = async (refId: string): Promise<void> => {
+    if (!selected || !openId) return
+    try {
+      if (activeRefs.includes(refId)) await window.car.capabilityRefRemove(selected.id, openId, refId)
+      else await window.car.capabilityRefAdd(selected.id, openId, refId)
+    } catch (e) {
+      fail(e)
+    }
+  }
 
   return (
     <div className="app">
@@ -575,6 +704,13 @@ export function App() {
           <span>
             <b>记忆</b>
             <small>白盒 CRUD · 落链可查</small>
+          </span>
+        </button>
+        <button className={`item ${view === 'caps' ? 'sel' : ''}`} onClick={() => setView('caps')}>
+          <span className="ico">◆</span>
+          <span>
+            <b>能力库</b>
+            <small>专家/技能/知识包 · 引用注入</small>
           </span>
         </button>
         <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
@@ -634,7 +770,7 @@ export function App() {
                 <button className="item-main" onClick={() => void openSessionById(s.sessionId)}>
                   <span className="ico">◇</span>
                   <span>
-                    <b>{s.title}</b>
+                    <b>{s.title}{s.parentSessionId ? <span className="subagent-badge" title={`子 Agent（父会话 ${s.parentSessionId}——独立链，授权门经父弹窗）`}>子 Agent</span> : null}</b>
                     <small>
                       {s.sessionId} · {s.eventCount} 事件
                     </small>
@@ -678,6 +814,34 @@ export function App() {
           </div>
         )}
         {status && <div className="status">{status}</div>}
+        {/* T-23：自动更新横幅（三段显式——下载/安装均为用户动作；error = 降级发布页手动下载入口） */}
+        {update && (update.state === 'available' || update.state === 'downloading' || update.state === 'downloaded' || update.state === 'error') && (
+          <div className={`update-banner ${update.state === 'error' ? 'danger' : ''}`} role="status">
+            {update.state === 'available' && (
+              <>
+                <span>发现新版本 v{update.version}</span>
+                <button className="btn" onClick={() => void window.car.downloadUpdate()}>
+                  下载更新
+                </button>
+              </>
+            )}
+            {update.state === 'downloading' && <span>正在下载更新{update.version ? ` v${update.version}` : ''}… {update.percent ?? 0}%</span>}
+            {update.state === 'downloaded' && (
+              <>
+                <span>更新 v{update.version} 已下载——安装后生效</span>
+                <button className="btn primary" onClick={() => void window.car.installUpdate()}>
+                  重启并安装
+                </button>
+              </>
+            )}
+            {update.state === 'error' && <span>更新失败：{update.message ?? '未知错误'}</span>}
+            {(update.state === 'error' || update.state === 'available') && (
+              <button className="btn" onClick={() => void window.car.openReleases()}>
+                打开发布页（手动下载）
+              </button>
+            )}
+          </div>
+        )}
 
         {view === 'plugins' ? (
           <PluginsView selected={selected} />
@@ -693,6 +857,8 @@ export function App() {
           <SecurityView />
         ) : view === 'memory' ? (
           <MemoryView selected={selected} openId={openId} onFail={fail} onStatus={setStatus} />
+        ) : view === 'caps' ? (
+          <CapabilityView selected={selected} openId={openId} onFail={fail} onStatus={setStatus} onChanged={capsChanged} />
         ) : openId && selected ? (
           <section className="chat">
             <div className="chat-toolbar">
@@ -734,7 +900,7 @@ export function App() {
               )}
             </div>
             {showCtx && usage && (
-              <div className="ctx-pop ctx-up">
+              <div className="ctx-pop ctx-up ctx-float">
                 <div className="ctx-title-row"><b>上下文容量</b><span className="mono">{pct != null ? Math.round(pct) + '%' : '—'}</span></div>
                 <div className="ctx-segbar"><i style={{ width: (pct ?? 0) + '%', background: pctColor }} /></div>
                 {usage.segments && (
@@ -753,30 +919,64 @@ export function App() {
                     </b>
                   </div>
                 )}
+                {lastCapInjection && (
+                  <div className="cp-row">
+                    <span>能力引用注入（D-C3 行位真值——当轮活跃引用集渲染）</span>
+                    <b>
+                      {String((lastCapInjection.meta as Record<string, unknown>)['count'] ?? '?')} 条 · {String((lastCapInjection.meta as Record<string, unknown>)['chars'] ?? '?')} 字符
+                    </b>
+                  </div>
+                )}
+                {lastCapInjection && Array.isArray((lastCapInjection.meta as Record<string, unknown>)['warnings']) && (
+                  <div className="cp-row" style={{ color: 'var(--warn, #b97d10)' }}>
+                    {((lastCapInjection.meta as Record<string, unknown>)['warnings'] as unknown[]).map((w, i) => (
+                      <div key={i}>{String(w)}</div>
+                    ))}
+                  </div>
+                )}
+                {(attachFulltextInjected > 0 || attachPathRefCount > 0) && (
+                  <div className="cp-row">
+                    <span>附件注入（D-C3 行位真值——file/attach 落链，D-C6 实测字符计）</span>
+                    <b>
+                      {attachFulltextInjected > 0 ? `全文 ${attachFulltextInjected} 字符` : ''}
+                      {attachFulltextInjected > 0 && attachPathRefCount > 0 ? ' · ' : ''}
+                      {attachPathRefCount > 0 ? `路径登记 ${attachPathRefCount} 个（按需读取）` : ''}
+                    </b>
+                  </div>
+                )}
+                {subagentSpawns.length > 0 && (
+                  <div className="cp-row">
+                    <span>子 Agent（subagent/spawn 链上真值——活跃 ≈ 未 join/kill）</span>
+                    <b>活跃 {subagentActive} · 累计 {subagentSpawns.length}</b>
+                  </div>
+                )}
               </div>
             )}
-            {pending && (
-              <div className="authz">
-                <div className="authz-head">
-                  <b>M3 授权门</b>
-                  <span className={`timer ${countdown <= 10 ? 'hot' : ''}`}>{countdown}s 后超时默认拒绝</span>
+            {pendings.map((p) => {
+              const cd = Math.max(0, Math.ceil((p.ts + p.timeoutMs - nowTick) / 1000))
+              return (
+                <div className="authz" key={p.requestId}>
+                  <div className="authz-head">
+                    <b>M3 授权门</b>
+                    <span className={`timer ${cd <= 10 ? 'hot' : ''}`}>{cd}s 后超时默认拒绝</span>
+                  </div>
+                  <div className="authz-body">
+                    工具 <code>{p.tool}</code> · 目标 <code>{p.resource}</code>（{p.capability}）
+                  </div>
+                  <div className="authz-actions">
+                    <button className="btn primary" onClick={() => void respond('once', p.requestId)}>
+                      批准本次
+                    </button>
+                    <button className="btn" onClick={() => void respond('session', p.requestId)}>
+                      本次会话内始终允许
+                    </button>
+                    <button className="btn danger" onClick={() => void respond('deny', p.requestId)}>
+                      拒绝
+                    </button>
+                  </div>
                 </div>
-                <div className="authz-body">
-                  工具 <code>{pending.tool}</code> · 目标 <code>{pending.resource}</code>（{pending.capability}）
-                </div>
-                <div className="authz-actions">
-                  <button className="btn primary" onClick={() => void respond('once')}>
-                    批准本次
-                  </button>
-                  <button className="btn" onClick={() => void respond('session')}>
-                    本次会话内始终允许
-                  </button>
-                  <button className="btn danger" onClick={() => void respond('deny')}>
-                    拒绝
-                  </button>
-                </div>
-              </div>
-            )}
+              )
+            })}
             <div className="chat-scroll" ref={scrollRef}>
               {items.map((it, i) => {
                 if (it.kind === 'msg') {
@@ -818,6 +1018,30 @@ export function App() {
                 )
               })}
             </div>
+            {/* T-24/T-25：已引用条 + 已附文件（输入区上方——✕ 撤销 = 补偿事件落链） */}
+            {(activeRefs.length > 0 || attachments.length > 0) && (
+              <div className="ref-chips">
+                {activeRefs.map((id) => (
+                  <span key={id} className="ref-chip" title={capsById.get(id)?.spec.slice(0, 120)}>
+                    ◆ {capsById.get(id)?.name ?? id}
+                    {capsById.get(id)?.status === 'maintain' && <small>（维护中）</small>}
+                    {capsById.get(id)?.status === 'retired' && <small>（已退役）</small>}
+                    <button className="ref-x" onClick={() => void toggleRef(id)} title="撤销引用（remove 补偿事件落链）">
+                      ✕
+                    </button>
+                  </span>
+                ))}
+                {attachments.map((a) => (
+                  <span key={a.path} className={`ref-chip att-chip${a.mode === 'path-ref' ? ' att-ref' : ''}`} title={`${a.path}（${a.mime} · ${a.size}B · ${a.mode === 'fulltext' ? '全文注入' : '路径登记，fs_read 按需读取'}）`}>
+                    📎 {a.path.split(/[\\/]/).pop()}
+                    {a.mode === 'path-ref' && <small>（按需读取）</small>}
+                    <button className="ref-x" onClick={() => void detachFile(a.path)} title="撤销附件（file/attach-remove 补偿事件落链）">
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {/* ── S5：输入区右下聚类 [上下文圆环][模型][发送]（原型 v0.5 同构，弹层向上） ── */}
             <div className="chat-input">
               <input
@@ -829,6 +1053,48 @@ export function App() {
                 }}
               />
               <div className="input-cluster">
+                {openId && (
+                  <div className="cluster-item">
+                    <button className="pill" onClick={() => void attachFiles()} title="添加附件（文本类 ≤200KB 全文注入；其余路径登记——fs_read 按需读取走授权门）">
+                      📎 附件{attachments.length > 0 ? ` · ${attachments.length}` : ''}
+                    </button>
+                  </div>
+                )}
+                {openId && (
+                  <div className="cluster-item" style={{ position: 'relative' }}>
+                    <button className="pill" onClick={() => setShowCapMenu((v) => !v)} title="引用能力（专家/技能/知识包——prompt 注入，选中即落链）">
+                      ◆ 引用{activeRefs.length > 0 ? ` · ${activeRefs.length}` : ''}
+                    </button>
+                    {showCapMenu && (
+                      <div className="ctx-pop cap-menu ctx-up">
+                        <input
+                          className="mm-search"
+                          placeholder="搜索能力条目…"
+                          value={capSearch}
+                          autoFocus
+                          onChange={(e) => setCapSearch(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') setShowCapMenu(false)
+                          }}
+                        />
+                        {filteredCaps.length === 0 && <div className="empty">无条目（能力库视图可新建）</div>}
+                        {filteredCaps.map((c) => (
+                          <button key={c.id} className="mm-pick" onClick={() => void toggleRef(c.id)}>
+                            <span className="mm-check">{activeRefs.includes(c.id) ? '✓' : ''}</span>
+                            <span className="mm-name">
+                              {c.name}
+                              {c.status !== 'active' && <small className={`cap-status cap-status-${c.status}`}>（{c.status === 'maintain' ? '维护中' : '已退役'}）</small>}
+                            </span>
+                            <small className="dim">{c.kind}</small>
+                          </button>
+                        ))}
+                        <div className="mm-sec" style={{ borderTop: '1px solid var(--line, #2a2f3a)', marginTop: 6, paddingTop: 8 }}>
+                          引用 = prompt 注入（不装载代码）· 撤销 = 补偿事件落链
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {openId && (
                   <div className="cluster-item">
                     <button

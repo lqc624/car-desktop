@@ -17,6 +17,7 @@
  *  - 授权审计事件形态 = 内核 #commit：kind:'turnEnd' + turnId:'authz:*'（渲染层按
  *    turnId 前缀区分，不当真 turn 收口渲染）。
  */
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import {
   runTurn,
   SessionFileStore,
@@ -35,12 +36,51 @@ import type { AuthzPendingPush, AuthzResolvedPush, SessionEventDTO, SessionUsage
 import { parseEventLine } from './model.ts'
 import { builtinTools, fileActionOf } from './tools.ts'
 import { mergeToolSources } from './toolSources.ts'
+import type { CapabilityEntry } from './capabilities.ts'
 import type { FileSecurityEngine } from './fileSecurity.ts'
 import type { BackupStore } from './backupStore.ts'
 import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
+import type { SubagentManager } from './subagent.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
+
+// ── T-25（PRD C-3）：附件双形态分类（文本全文 ≤200KB / 路径登记） ──
+
+export const ATTACHMENT_FULLTEXT_MAX = 200 * 1024
+
+const TEXT_EXTS = new Set([
+  '.txt', '.md', '.markdown', '.json', '.csv', '.tsv', '.yml', '.yaml', '.xml', '.html', '.htm', '.css',
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go', '.rs', '.java', '.c', '.h', '.cpp', '.hpp',
+  '.sh', '.bat', '.ps1', '.sql', '.ini', '.cfg', '.conf', '.toml', '.log', '.env.example',
+])
+
+export interface AttachmentRow {
+  path: string
+  mode: 'fulltext' | 'path-ref'
+  size: number
+  mime: string
+}
+
+function extOf(p: string): string {
+  const i = p.lastIndexOf('.')
+  return i >= 0 ? p.slice(i).toLowerCase() : ''
+}
+
+function mimeOf(p: string): string {
+  const ext = extOf(p)
+  const map: Record<string, string> = {
+    '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown', '.json': 'application/json',
+    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values', '.yml': 'text/yaml', '.yaml': 'text/yaml',
+    '.xml': 'text/xml', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+    '.js': 'text/javascript', '.mjs': 'text/javascript', '.cjs': 'text/javascript', '.ts': 'text/typescript',
+    '.tsx': 'text/typescript', '.jsx': 'text/javascript', '.py': 'text/x-python', '.go': 'text/x-go',
+    '.rs': 'text/x-rust', '.java': 'text/x-java', '.sql': 'text/x-sql', '.sh': 'text/x-sh',
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.zip': 'application/zip',
+  }
+  return map[ext] ?? (TEXT_EXTS.has(ext) ? 'text/plain' : 'application/octet-stream')
+}
 
 export interface SessionHandleDeps {
   workspaceId: string
@@ -71,6 +111,8 @@ export interface SessionHandleDeps {
   memoryStore?: MemoryStore
   /** S6（D-S6-2）：记忆注入字符预算（缺省 8000——字符近似门控，超限 fail-visible） */
   memoryBudgetChars?: number
+  /** T-24（PRD C-1）：能力库读取面（service 注入 workspaceRoot 闭包；缺省 = 引用面不可用） */
+  loadCapabilities?: () => CapabilityEntry[]
 }
 
 interface HandleInit {
@@ -105,6 +147,8 @@ export class SessionHandle {
   sessionReasoning: 'off' | 'low' | 'medium' | 'high' | null = null
   /** S5（D-S5-2）：压缩策略（sendTurn 自动挂载点判定入参） */
   readonly compactionCfg: CompactionConfig | undefined
+  /** T-22（D-S6-7）打开即恢复：resume 时恢复层补记报告（全零 = null——clean resume 无恢复动作） */
+  recoveryReport: { turnsClosed: number; pairedCalls: number } | null = null
 
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
@@ -117,6 +161,7 @@ export class SessionHandle {
   private turnSeq = 0
   private currentTurnIdValue = ''
   private readonly deps: SessionHandleDeps
+  private subagents: SubagentManager | null = null
 
   private constructor(init: HandleInit, opts: { log?: SessionLog; turnSeq?: number } = {}) {
     this.sessionId = init.sessionId
@@ -173,6 +218,11 @@ export class SessionHandle {
     }
     const h = new SessionHandle(init, { log, turnSeq: maxTurn })
     const report = recoverInterrupted(h.log)
+    // T-22：补记报告出面（service 层 open 路径据此落 session/recover 叙事 + 渲染层明示——禁静默补记）
+    h.recoveryReport =
+      report.turnsClosed > 0 || report.pairedCalls > 0
+        ? { turnsClosed: report.turnsClosed, pairedCalls: report.pairedCalls }
+        : null
     if (report.turnsClosed > 0 || report.pairedCalls > 0) {
       console.error(`[host] resume 恢复层补记：interrupted turn ×${report.turnsClosed}、合成 toolResult ×${report.pairedCalls}`)
     }
@@ -182,6 +232,15 @@ export class SessionHandle {
   /** 生产装配（service 调用）：chatStep 模型回调或测试覆盖 */
   attachModelFn(fn: HostModelFn): void {
     this.modelFn = fn
+  }
+
+  /**
+   * K2（1.16 子 Agent）：编排管理器接线——三工具入父会话工具注册表（本 turn 起模型可见）。
+   * 级联挂点 = abortTurn（杀父 → 全部活跃子链 abort）与 close（收口即级联）。
+   */
+  attachSubagents(m: SubagentManager): void {
+    this.subagents = m
+    this.tools.push(...m.tools())
   }
 
   currentTurnId(): string {
@@ -258,8 +317,13 @@ export class SessionHandle {
     // localStorage，默认开）；超预算 = 内核 fail-visible 异常同步抛出（渲染层红条——禁静默截断）。
     // **置于 busy=true 之前**：throw 时 turn 未开、busy 未置（否则预算红条后用户再发会被
     // busy 分流吞进引导队列——S6M-4 实证的死锁形态）。
+    // T-24（C-5）：能力引用注入先行——返回实际字符数，记忆面按合并预算的剩余额度装载。
+    const capabilityChars = this.injectCapabilityRefs()
+    // T-25（C-3/C-5）：附件全文注入次之（fulltext 态未注入者）——路径登记形态不注入（fs_read 按需读）。
+    const attachmentChars = this.injectAttachments((this.deps.memoryBudgetChars ?? 8000) - capabilityChars)
     if (opts.memoryInject && this.deps.memoryStore && !this.chainHasMemoryInjection()) {
-      const inj = loadMemoryForInjection(this.deps.memoryStore, { budgetChars: this.deps.memoryBudgetChars ?? 8000 })
+      const budget = this.deps.memoryBudgetChars ?? 8000
+      const inj = loadMemoryForInjection(this.deps.memoryStore, { budgetChars: budget - capabilityChars - attachmentChars })
       if (inj.count > 0) {
         this.log.append('user', 'system', 'system', inj.rendered, { injection: 'memory', count: inj.count, chars: inj.totalChars })
       }
@@ -287,6 +351,177 @@ export class SessionHandle {
   /** 链上是否已有记忆注入行（meta.injection==='memory' 的 system 事件） */
   chainHasMemoryInjection(): boolean {
     return this.log.events.some((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+  }
+
+  // ── T-24（PRD C-2/C-5）：能力引用面（引用=prompt 注入，EventKind 零新增） ──
+
+  /**
+   * 当轮活跃引用集（引用态扫描）：kind=system + meta.injection==='capability' 的 add/remove
+   * 事件按链序收敛——同 refId 后者覆盖前者（撤销 = 补偿事件，链不可变）。
+   */
+  private activeCapabilityRefs(): string[] {
+    const state = new Map<string, boolean>()
+    for (const e of this.log.events) {
+      if (e.kind !== 'system') continue
+      const meta = e.meta as Record<string, unknown> | null
+      if (!meta || meta['injection'] !== 'capability') continue
+      if (meta['op'] !== 'add' && meta['op'] !== 'remove') continue
+      state.set(String(meta['refId']), meta['op'] === 'add')
+    }
+    return [...state.entries()].filter(([, on]) => on).map(([id]) => id)
+  }
+
+  /** 引用条目（选中即落链 add；重复引用幂等） */
+  capabilityRefAdd(id: string): void {
+    if (this.activeCapabilityRefs().includes(id)) return
+    const entry = this.deps.loadCapabilities?.().find((e) => e.id === id)
+    if (!entry) throw new Error(`CAR-E-DESKTOP: 能力条目不存在（${id}）`)
+    this.log.append('user', 'system', 'system', entry.name, { injection: 'capability', refId: id, op: 'add' })
+  }
+
+  /** 撤销引用（remove 补偿事件落链——下一 turn 注入集不再含该条目） */
+  capabilityRefRemove(id: string): void {
+    if (!this.activeCapabilityRefs().includes(id)) {
+      throw new Error(`CAR-E-DESKTOP: 引用不存在或已撤销（${id}）`)
+    }
+    this.log.append('user', 'system', 'system', id, { injection: 'capability', refId: id, op: 'remove' })
+  }
+
+  /**
+   * turn 装配注入（sendTurn 挂载点）：活跃引用集非空且与上一注入集不同 → 渲染 spec 文本
+   * append system ctx 行（meta.op='inject'）；维护中/已退役条目 meta.warnings 明示（禁静默注入）。
+   * 返回注入字符数（与记忆注入合并预算 C-5——记忆面按剩余预算装载，超限 fail-visible 不静默截断）。
+   */
+  private injectCapabilityRefs(): number {
+    if (!this.deps.loadCapabilities) return 0
+    const activeIds = this.activeCapabilityRefs()
+    if (!activeIds.length) return 0
+    const last = [...this.log.events]
+      .reverse()
+      .find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'capability' && (e.meta as Record<string, unknown>)['op'] === 'inject')
+    if (last && JSON.stringify((last.meta as Record<string, unknown>)['refs']) === JSON.stringify(activeIds)) return 0
+    const entries = this.deps.loadCapabilities()
+    const parts: string[] = []
+    const warnings: string[] = []
+    for (const id of activeIds) {
+      const entry = entries.find((e) => e.id === id)
+      if (!entry) {
+        warnings.push(`引用条目不可得（${id}）——本轮跳过（条目已删除或文件损坏）`)
+        continue
+      }
+      const tag = entry.status === 'maintain' ? '【维护中】' : entry.status === 'retired' ? '【已退役】' : ''
+      if (tag) warnings.push(`引用条目「${entry.name}」${tag}——注入明示`)
+      parts.push(`## ${entry.name}（${entry.kind}${tag}）\n\n${entry.spec}`)
+    }
+    const rendered = parts.join('\n\n---\n\n')
+    const chars = rendered.length
+    const budget = this.deps.memoryBudgetChars ?? 8000
+    if (chars > budget) {
+      throw new Error(
+        `CAR-E-MEM-BUDGET: 能力引用注入超合并预算（${chars} > ${budget} 字符——记忆+引用+附件共享上下文预算，fail-visible 禁静默截断）`,
+      )
+    }
+    this.log.append('user', 'system', 'system', rendered, {
+      injection: 'capability',
+      op: 'inject',
+      refs: activeIds,
+      count: parts.length,
+      chars,
+      ...(warnings.length ? { warnings } : {}),
+    })
+    if (warnings.length) console.error('[host] 能力引用注入告警：', warnings.join('; '))
+    return chars
+  }
+
+  // ── T-25（PRD C-3）：附件面（file/attach 恒落链——文本全文注入 / 路径登记双形态） ──
+
+  /**
+   * 附件登记：fileSecurity 引擎判定（与 fs_read 同口径——工作区外 fallback-outside / deny 硬拒
+   * 落链）；文本类且 ≤200KB = fulltext（turn 装配全文注入），其余 = path-ref（模型经 fs_read
+   * 按需读取，走授权门/规则面——默认安全心智）。file/attach 叙事恒落链（append-only）。
+   */
+  attachmentAdd(paths: string[]): AttachmentRow[] {
+    const out: AttachmentRow[] = []
+    for (const p of paths) {
+      if (this.fileSecurity) {
+        const d = this.fileSecurity.decide('read', p, this.workspaceRoot)
+        if (d.tier === 'deny' || d.tier === 'fallback-outside') {
+          throw new Error(
+            `CAR-E-DESKTOP: 附件路径被安全规则拒绝（${p}——${d.tier === 'deny' ? '命中拒绝规则' : '工作区外路径'}；与 fs_read 同口径硬拒落链）`,
+          )
+        }
+      }
+      const st = statSync(p) // 不存在 = fail-visible（含 ENOENT 全文）
+      const mime = mimeOf(p)
+      const mode: AttachmentRow['mode'] = TEXT_EXTS.has(extOf(p)) && st.size <= ATTACHMENT_FULLTEXT_MAX ? 'fulltext' : 'path-ref'
+      this.appendNarrative('file/attach', { path: p, size: st.size, mime, mode })
+      out.push({ path: p, mode, size: st.size, mime })
+    }
+    return out
+  }
+
+  /** 撤销附件（file/attach-remove 补偿事件——未注入的不再注入；已注入行链上保留，零改写） */
+  attachmentRemove(path: string): void {
+    if (!this.activeAttachments().has(path)) {
+      throw new Error(`CAR-E-DESKTOP: 附件不存在或已撤销（${path}）`)
+    }
+    this.appendNarrative('file/attach-remove', { path })
+  }
+
+  /** 会话附件态（file/attach + file/attach-remove 链序收敛——路径 → 登记行） */
+  private activeAttachments(): Map<string, AttachmentRow> {
+    const state = new Map<string, AttachmentRow>()
+    for (const e of this.log.events) {
+      if (e.kind !== 'system') continue
+      const p = e.payload as Record<string, unknown> | null
+      if (!p || p['type'] !== 'file/attach') continue
+      state.set(String(p['path']), { path: String(p['path']), mode: p['mode'] === 'fulltext' ? 'fulltext' : 'path-ref', size: Number(p['size'] ?? 0), mime: String(p['mime'] ?? 'application/octet-stream') })
+    }
+    for (const e of this.log.events) {
+      if (e.kind !== 'system') continue
+      const p = e.payload as Record<string, unknown> | null
+      if (!p || p['type'] !== 'file/attach-remove') continue
+      state.delete(String(p['path']))
+    }
+    return state
+  }
+
+  /**
+   * turn 装配注入：fulltext 态且未注入（链上无同路径 injection:'attachment' 行）→ 全文 append
+   * system ctx 行。返回注入字符数（C-5 合并预算——超剩余额度 fail-visible，禁静默截断）。
+   */
+  private injectAttachments(budgetChars: number): number {
+    const active = this.activeAttachments()
+    if (![...active.values()].some((a) => a.mode === 'fulltext')) return 0
+    const injected = new Set(
+      this.log.events
+        .filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'attachment')
+        .map((e) => String((e.meta as Record<string, unknown>)['path'])),
+    )
+    let total = 0
+    for (const a of active.values()) {
+      if (a.mode !== 'fulltext' || injected.has(a.path)) continue
+      let content: string
+      try {
+        content = readFileSync(a.path, 'utf8')
+      } catch (err) {
+        throw new Error(`CAR-E-DESKTOP: 附件读取失败（${a.path}）——${err instanceof Error ? err.message : err}（fail-visible 禁静默跳过）`)
+      }
+      const chars = content.length
+      if (total + chars > budgetChars) {
+        throw new Error(
+          `CAR-E-MEM-BUDGET: 附件注入超合并预算（${total + chars} > ${budgetChars} 字符——记忆+引用+附件共享上下文预算，fail-visible 禁静默截断）`,
+        )
+      }
+      this.log.append('user', 'system', 'system', content, {
+        injection: 'attachment',
+        path: a.path,
+        mime: a.mime,
+        chars,
+      })
+      total += chars
+    }
+    return total
   }
 
   /** 单 turn 执行（turnId 对应的 user 事件由调用方保证已落链——普通 turn 与引导消费共用） */
@@ -321,14 +556,22 @@ export class SessionHandle {
    * 引导队列 FIFO 消费（D-S6-3）：pendingSteerTurns 按 seq 序逐条 runTurn；每条消费前检查
    * abort.aborted（停止 = 中断当前 turn + 停止续跑——pending 留链，下次 sendTurn 收口后统一
    * 消费保持 FIFO 顺序）；busy 由调用方维持 true（消费中再发消息 = 继续排队，语义正确）。
+   * v0.3 终验修补（R-v03-1）：消费 run 必须 busy=true 门控（与 sendTurn 同口径）——否则轮询门
+   * `!this.busy` 恒真，25ms tick 内未收口的引导被反复重发（模型错误 30s 重试窗 ≈ 上千并发
+   * 重复 run，各自 error 收口 → 审计链刷数百条 turnEnd）；另设已尝试守卫：头部引导本轮
+   * drain 已尝试仍 pending（run 拒绝未收口等异常形态）→ 停止续跑留待下次 sendTurn，禁无限循环。
    */
   private async drainPending(): Promise<void> {
+    const attempted = new Set<string>()
     for (;;) {
       if (this.abort.aborted) return
       const pending = pendingSteerTurns(this.log)
       if (!pending.length) return
       const next = pending[0]!
+      if (attempted.has(next.turnId)) return // 头部引导已尝试仍未收口 = 异常形态——停止续跑（fail-visible 留链）
+      attempted.add(next.turnId)
       this.currentTurnIdValue = next.turnId
+      this.busy = true
       this.runTurnFor(next.turnId)
       // runTurnFor 是 void 触发——等待收口：轮询 busy 翻转（收口后 then 里 busy=false + 触发下一轮 drain）
       await new Promise<void>((resolve) => {
@@ -346,6 +589,8 @@ export class SessionHandle {
 
   abortTurn(): void {
     this.abort.aborted = true
+    // T-K2-4：杀父级联——全部活跃子链 abort（内核以 aborted 收口）+ 在途子链人审即时取消
+    this.subagents?.abortAll()
   }
 
   /**
@@ -528,6 +773,8 @@ export class SessionHandle {
     }
     this.waiters.clear()
     this.abort.aborted = true
+    // T-K2-4：级联收口 = abort 全部子链 + 子链 store 关闭（与父 store 关闭同点）
+    this.subagents?.closeAll()
     this.store.close()
   }
 

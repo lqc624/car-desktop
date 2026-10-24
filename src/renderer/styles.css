@@ -233,6 +233,8 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* T-24 验证修补：ctx-pop 绝对定位需定位上下文（此前锚定视口 → 面板被顶出屏幕不可见） */
+  position: relative;
 }
 .chat-toolbar {
   display: flex;
@@ -570,6 +572,8 @@ body {
 }
 .ctx-ring:hover { background: var(--bg); }
 .ctx-up { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30; display: flex; flex-direction: column; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; min-width: 320px; box-shadow: 0 12px 32px rgba(20, 20, 40, 0.16); font-size: 12px; color: var(--text-2); }
+/* 上下文面板浮动位（锚 .chat 右下——输入区上方弹出） */
+.ctx-float { left: auto; right: 16px; bottom: 64px; max-height: 56vh; overflow-y: auto; min-width: 380px; }
 .model-menu { right: 0; left: auto; min-width: 340px; max-height: 60vh; overflow-y: auto; }
 .mm-search { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; margin-bottom: 4px; }
 .mm-default { font-size: 11px; color: var(--text-2); padding: 2px 0 6px; }
@@ -595,6 +599,37 @@ body {
 .mm-row { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 0 4px; }
 .routing-banner { font-size: 12px; border-radius: 8px; padding: 5px 10px; background: rgba(185, 125, 16, 0.12); color: #8a5f0d; border: 1px solid rgba(185, 125, 16, 0.4); }
 .routing-banner.danger { background: rgba(210, 73, 73, 0.12); color: #a33030; border-color: rgba(210, 73, 73, 0.45); }
+
+/* T-23：自动更新横幅（fail-visible——available/downloaded/error 显按钮，禁静默升级/静默失败） */
+.update-banner { display: flex; align-items: center; gap: 10px; font-size: 12px; border-radius: 8px; padding: 6px 12px; margin: 0 0 8px; background: rgba(94, 106, 210, 0.1); color: #4a54a8; border: 1px solid rgba(94, 106, 210, 0.4); }
+.update-banner.danger { background: rgba(210, 73, 73, 0.12); color: #a33030; border-color: rgba(210, 73, 73, 0.45); }
+.update-banner .btn { flex-shrink: 0; }
+
+/* ── T-24：能力库（D-C7 关闭——React 原生三栏；引用 chips + cap-menu） ── */
+.cap-view { display: grid; grid-template-columns: 200px 280px 1fr; gap: 12px; height: calc(100vh - 90px); }
+.cap-tree, .cap-list { border: 1px solid var(--line, #2a2f3a); border-radius: 10px; padding: 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.cap-detail { border: 1px solid var(--line, #2a2f3a); border-radius: 10px; padding: 12px; overflow-y: auto; }
+.cap-title { display: flex; align-items: center; justify-content: space-between; font-weight: 700; padding: 4px 6px 10px; }
+.cap-title-row { display: flex; align-items: center; gap: 8px; font-size: 15px; margin-bottom: 4px; }
+.cap-note { font-size: 11px; color: var(--dim, #8a8f98); padding: 10px 6px; line-height: 1.5; }
+.cap-status { font-size: 11px; border-radius: 4px; padding: 1px 5px; }
+.cap-status-maintain { background: rgba(185, 125, 16, 0.15); color: #b97d10; }
+.cap-status-retired { background: rgba(138, 138, 142, 0.18); color: #8a8f98; }
+.cap-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.cap-tag { font-size: 11px; border: 1px solid var(--line, #2a2f3a); border-radius: 999px; padding: 1px 8px; }
+.cap-spec { white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line, #2a2f3a); border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.6; max-height: 46vh; overflow-y: auto; margin: 10px 0; font-family: inherit; }
+.cap-form { display: flex; flex-direction: column; gap: 8px; }
+.cap-form input, .cap-form textarea, .cap-form select { background: var(--bg, #14171c); border: 1px solid var(--line, #2a2f3a); border-radius: 8px; padding: 7px 10px; color: inherit; font-family: inherit; font-size: 13px; }
+.cap-form-row { display: flex; align-items: center; gap: 8px; }
+.cap-form-row input, .cap-form-row select { flex: 1; }
+.ref-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 8px; }
+.ref-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; border: 1px solid rgba(94, 106, 210, 0.45); background: rgba(94, 106, 210, 0.1); border-radius: 999px; padding: 2px 4px 2px 9px; }
+.ref-chip small { color: var(--warn, #b97d10); }
+.ref-x { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 11px; padding: 1px 5px; border-radius: 999px; }
+.ref-x:hover { background: rgba(210, 73, 73, 0.2); }
+.cap-menu { max-height: 320px; overflow-y: auto; }
+.att-chip { border-color: rgba(94, 106, 210, 0.3); background: transparent; }
+.att-ref { border-style: dashed; }
 
 /* S5：★ 默认模型切换 + 模型选中行（按钮嵌套） */
 .mm-item { display: flex; align-items: center; gap: 2px; border-radius: 6px; padding: 2px 4px; }
@@ -628,6 +663,19 @@ body {
   background: color-mix(in srgb, var(--warn, #b97d10) 18%, transparent);
   color: var(--warn, #b97d10);
   border: 1px solid color-mix(in srgb, var(--warn, #b97d10) 40%, transparent);
+  vertical-align: middle;
+}
+/* K2（1.16 子 Agent）：会话列表「子 Agent」徽标（平铺形态——Q-K2-1） */
+.subagent-badge {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #5e6ad2) 16%, transparent);
+  color: var(--accent, #5e6ad2);
+  border: 1px solid color-mix(in srgb, var(--accent, #5e6ad2) 40%, transparent);
   vertical-align: middle;
 }
 .mem-new {

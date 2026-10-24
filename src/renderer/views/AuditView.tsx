@@ -68,7 +68,7 @@ export function AuditView({ selected, sessions }: { selected: WorkspaceInfo | nu
               <option value="">选择会话…</option>
               {sessions.map((s) => (
                 <option key={s.sessionId} value={s.sessionId}>
-                  {s.title}（{s.sessionId}）
+                  {s.parentSessionId ? '〔子 Agent〕' : ''}{s.title}（{s.sessionId}）
                 </option>
               ))}
             </select>

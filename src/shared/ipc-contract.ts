@@ -54,6 +54,25 @@ export const IpcChannel = {
   MemoryRemove: 'memory:remove',
   /** 回滚记忆（需活跃会话；内核 undo 栈单步回退——返回 null = 已回退到删除态） */
   MemoryRollback: 'memory:rollback',
+  // —— T-24（D2-S1）：能力库条目面（PRD C-1 本地目录 .car/capabilities/；CRUD 落链承载 = 活跃会话） ——
+  /** 能力条目列表（只读——无会话也可查看；updatedAt 降序 + 损坏条目告警） */
+  CapabilityList: 'capability:list',
+  /** 新建条目（id 即文件名；重复 = 显式拒绝） */
+  CapabilityWrite: 'capability:write',
+  /** 编辑条目（patch 合并；spec 超限 fail-visible） */
+  CapabilityEdit: 'capability:edit',
+  CapabilityDelete: 'capability:delete',
+  /** 引用条目（选中即落链 add——meta.injection:'capability'，EventKind 零新增） */
+  CapabilityRefAdd: 'capability:ref-add',
+  /** 撤销引用（remove 补偿事件落链） */
+  CapabilityRefRemove: 'capability:ref-remove',
+  // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
+  /** 系统文件选择器（多选；用户取消 = null） */
+  AttachmentPick: 'attachment:pick',
+  /** 附件登记（file/attach 恒落链；工作区外/拒绝规则路径硬拒） */
+  AttachmentAdd: 'attachment:add',
+  /** 撤销附件（file/attach-remove 补偿事件） */
+  AttachmentRemove: 'attachment:remove',
   // —— S3：文件安全设置面（SEC_SETTINGS；host 持久化 + 校验，渲染层接线 S3-S6） ——
   /** 读当前规则表（出厂预设 8 条 / 用户规则） */
   FileSecurityGet: 'fileSecurity:get',
@@ -101,6 +120,15 @@ export const IpcChannel = {
   /** 端点元数据（baseUrl/model/contextWindow——不含 Key） */
   CredentialsMeta: 'credentials:meta',
   CredentialsClear: 'credentials:clear',
+  // —— T-23（D-V03-4）：自动更新（main 侧能力——GitHub Releases 渠道，不入宿主 dispatch） ——
+  /** 手动检查更新（dev/未打包形态 = disabled 状态推送，不触网） */
+  UpdateCheck: 'update:check',
+  /** 下载更新包（available 态后调用；进度经 UpdateStatus 推送） */
+  UpdateDownload: 'update:download',
+  /** 下载完成后退出并安装（仅 downloaded 态可调） */
+  UpdateInstall: 'update:install',
+  /** 打开发布页（fail-visible 降级手动下载入口——更新失败禁静默） */
+  UpdateOpenReleases: 'update:open-releases',
 } as const
 
 export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
@@ -113,6 +141,8 @@ export const IpcPushTopic = {
   AuthzPending: 'push:authz-pending',
   /** 授权门已决（用户响应 / 内核超时 / 会话关闭取消——横幅生命周期锚点） */
   AuthzResolved: 'push:authz-resolved',
+  /** T-23：自动更新状态机推送（available/downloading/downloaded/error——fail-visible 横幅数据源） */
+  UpdateStatus: 'push:update-status',
 } as const
 
 export type IpcPushTopicName = (typeof IpcPushTopic)[keyof typeof IpcPushTopic]
@@ -149,6 +179,8 @@ export interface SessionInfo {
   eventCount: number
   /** 展示标题 = 最近一次 session/rename 事件；无 = 「未命名会话」 */
   title: string
+  /** K2（1.16 子 Agent）：子链的父会话 id（session-start 载荷；普通会话 = null——列表面「子 Agent」徽标数据源） */
+  parentSessionId?: string | null
   /** 上下文窗口（tokens）——模型元数据表/端点声明；无值 = null（渲染层不显示百分比，D-C5） */
   contextWindow?: number | null
   /**
@@ -212,6 +244,21 @@ export interface AuthzResolvedPush {
   decidedBy: 'user' | 'policy' | 'timeout' | 'host'
 }
 
+/**
+ * T-23：自动更新状态推送（electron-updater 事件 → 渲染层横幅；error 必显——
+ * D-V03-4 更新失败 fail-visible，降级手动下载入口 update:open-releases）
+ */
+export interface UpdateStatusPush {
+  state: 'disabled' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  /** 目标版本（available/downloading/downloaded/not-available） */
+  version?: string
+  /** 下载进度 0-100（downloading） */
+  percent?: number
+  /** 错误摘要（error 态——全文展示禁吞） */
+  message?: string
+  ts: number
+}
+
 export interface SessionOpenResult {
   sessionId: string
   workspaceId: string
@@ -226,6 +273,18 @@ export interface SessionOpenResult {
   contextWindow?: number | null
   /** 全量回放（R-4：一次批量；此后增量经 IpcPushTopic.SessionEvent） */
   events: SessionEventDTO[]
+  /**
+   * T-22（D-S6-7）打开即恢复报告（null = 无恢复动作——alive 句柄 / 只读回放 / 干净链）。
+   * interruptedTurns = 补记 turnEnd=interrupted 数；syntheticToolResults = 未配对 toolCall
+   * 合成 toolResult 数；pendingSteers = 打开时待执行引导数（排队未跑——徽标数据源）。
+   */
+  recovery?: {
+    interruptedTurns: number
+    syntheticToolResults: number
+    pendingSteers: number
+    /** T-K2-4（1.16 K2）：子链恢复报告（仅在发生恢复/断链跳过时携带） */
+    childSessions?: { recovered: number; broken: number }
+  } | null
 }
 
 export interface TurnSendResult {
@@ -252,6 +311,55 @@ export interface MemoryOpRequest {
   id?: string
   text?: string
   tags?: string[]
+}
+
+// ── T-24：能力库条目（PRD §2 schema v0.3 收窄——不做平台运营字段） ──
+
+export type CapabilityKindDTO = 'expert' | 'skill' | 'kb'
+export type CapabilityStatusDTO = 'active' | 'maintain' | 'retired'
+
+export interface CapabilityEntryDTO {
+  id: string
+  kind: CapabilityKindDTO
+  name: string
+  version?: string
+  author?: string
+  tags?: string[]
+  /** 规范正文（注入物）——≤ 20,000 字符（超限 fail-visible） */
+  spec: string
+  status: CapabilityStatusDTO
+  createdAt: number
+  updatedAt: number
+}
+
+/** 能力条目请求载荷（write 全量 / edit patch） */
+export interface CapabilityEntryInput {
+  id: string
+  kind: CapabilityKindDTO
+  name: string
+  version?: string
+  author?: string
+  tags?: string[]
+  spec: string
+  status?: CapabilityStatusDTO
+}
+
+export interface CapabilityEditPatch {
+  name?: string
+  kind?: CapabilityKindDTO
+  spec?: string
+  status?: CapabilityStatusDTO
+  version?: string
+  author?: string
+  tags?: string[]
+}
+
+/** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
+export interface AttachmentRowDTO {
+  path: string
+  mode: 'fulltext' | 'path-ref'
+  size: number
+  mime: string
 }
 
 /** 会话用量聚合（usage 事件真实值求和；无 usage 的 turn 计入分母不估算——D-S2-4） */
@@ -485,6 +593,15 @@ export interface IpcRequestMap {
   [IpcChannel.MemoryEdit]: MemoryOpRequest
   [IpcChannel.MemoryRemove]: MemoryOpRequest
   [IpcChannel.MemoryRollback]: MemoryOpRequest
+  [IpcChannel.CapabilityList]: { workspaceId: string }
+  [IpcChannel.CapabilityWrite]: { workspaceId: string; sessionId: string; entry: CapabilityEntryInput }
+  [IpcChannel.CapabilityEdit]: { workspaceId: string; sessionId: string; id: string; patch: CapabilityEditPatch }
+  [IpcChannel.CapabilityDelete]: { workspaceId: string; sessionId: string; id: string }
+  [IpcChannel.CapabilityRefAdd]: { workspaceId: string; sessionId: string; refId: string }
+  [IpcChannel.CapabilityRefRemove]: { workspaceId: string; sessionId: string; refId: string }
+  [IpcChannel.AttachmentPick]: undefined
+  [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
+  [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
@@ -505,6 +622,10 @@ export interface IpcRequestMap {
   [IpcChannel.CredentialsSave]: { baseUrl: string; model: string; key: string; contextWindow?: number }
   [IpcChannel.CredentialsMeta]: undefined
   [IpcChannel.CredentialsClear]: undefined
+  [IpcChannel.UpdateCheck]: undefined
+  [IpcChannel.UpdateDownload]: undefined
+  [IpcChannel.UpdateInstall]: undefined
+  [IpcChannel.UpdateOpenReleases]: undefined
 }
 
 // ── 渲染层可见 API 面（preload 经 contextBridge 暴露为 window.car） ────────
@@ -538,6 +659,22 @@ export interface CarBridge {
   memoryRemove(workspaceId: string, sessionId: string, id: string): Promise<void>
   /** 回滚（undo 栈单步；返回 null = 已回退到删除态） */
   memoryRollback(workspaceId: string, sessionId: string, id: string): Promise<MemoryEntryDTO | null>
+  // —— T-24：能力库条目面（能力库视图 + 引用菜单） ——
+  /** 条目列表（只读；损坏条目经 warnings 显性化） */
+  capabilityList(workspaceId: string): Promise<{ entries: CapabilityEntryDTO[]; warnings: string[] }>
+  /** 新建条目（需活跃会话——CRUD 落链承载） */
+  capabilityWrite(workspaceId: string, sessionId: string, entry: CapabilityEntryInput): Promise<CapabilityEntryDTO>
+  capabilityEdit(workspaceId: string, sessionId: string, id: string, patch: CapabilityEditPatch): Promise<CapabilityEntryDTO>
+  capabilityDelete(workspaceId: string, sessionId: string, id: string): Promise<void>
+  /** 引用/撤销（选中即落链；撤销 = 补偿事件） */
+  capabilityRefAdd(workspaceId: string, sessionId: string, refId: string): Promise<void>
+  capabilityRefRemove(workspaceId: string, sessionId: string, refId: string): Promise<void>
+  // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
+  /** 系统文件选择器（多选；用户取消 = null） */
+  attachmentPick(): Promise<string[] | null>
+  /** 附件登记（工作区外/拒绝规则路径 fail-visible） */
+  attachmentAdd(workspaceId: string, sessionId: string, paths: string[]): Promise<AttachmentRowDTO[]>
+  attachmentRemove(workspaceId: string, sessionId: string, path: string): Promise<void>
   // —— S3：文件安全设置面（安全中心页） ——
   fileSecurityGet(): Promise<FileSecurityState>
   fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>
@@ -567,4 +704,10 @@ export interface CarBridge {
   onSessionEvent(cb: (p: SessionEventPush) => void): () => void
   onAuthzPending(cb: (p: AuthzPendingPush) => void): () => void
   onAuthzResolved(cb: (p: AuthzResolvedPush) => void): () => void
+  // —— T-23：自动更新（main 侧能力；状态经 onUpdateStatus 推送） ——
+  checkUpdate(): Promise<void>
+  downloadUpdate(): Promise<void>
+  installUpdate(): Promise<void>
+  openReleases(): Promise<void>
+  onUpdateStatus(cb: (p: UpdateStatusPush) => void): () => void
 }
