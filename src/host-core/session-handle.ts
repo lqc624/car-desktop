@@ -288,6 +288,23 @@ export class SessionHandle {
     return { seq: ev.seq, compactedUpTo: p.compactedUpTo, compactedEvents: p.compactedEvents }
   }
 
+  /**
+   * K5-C（V4）：token 维度阈值缺省装配（内核 1.18.0 D-51 消费面）。
+   * enabled 仍由 car.config llm.compaction 显式开启（内核 1.13 兼容线——桌面不改缺省开关）；
+   * 开启且用户未显式给 thresholdTokens 时，缺省 = 窗口 × 0.78（对齐 ctx-pop 黄线口径：
+   * >78% warn / >92% danger——压缩取黄线先动）。窗口真值 = model/set 会话窗口 ?? 端点声明窗口
+   * （service 同口径）；两者皆无 = 不装 token 维度（禁估算，modelMeta 缺口面同 D-C5）。
+   * 用户显式 thresholdTokens 压过缺省（car.config 单一事实源）。
+   */
+  private armedCompactionCfg(): CompactionConfig | undefined {
+    const cfg = this.compactionCfg
+    if (!cfg || cfg.enabled !== true) return undefined
+    if (cfg.thresholdTokens !== undefined) return cfg
+    const window = this.sessionWindow ?? this.contextWindow
+    if (!window) return cfg
+    return { ...cfg, thresholdTokens: Math.floor(window * 0.78) }
+  }
+
   /** 已知事件全集（本会话生于本进程，内存即全量；usage/回放共用） */
   knownEvents(): readonly SessionEventDTO[] {
     return this.log.events as unknown as readonly SessionEventDTO[]
@@ -332,11 +349,12 @@ export class SessionHandle {
     this.abort.aborted = false
     // S5（D-S5-2）：自动压缩挂载点——先压缩后 append user（保护段 = 首个 system + 最近 N turn，
     // 内核 planCompaction 语义；N 来自配置；shouldCompact 缺省关 = 1.13 行为零变化）。
-    // 自动触发 = best-effort：shouldCompact（事件计数）命中但保护段覆盖全部 turn（无可折叠区间）时
+    // 自动触发 = best-effort：shouldCompact 命中但保护段覆盖全部 turn（无可折叠区间）时
     // 跳过本回合压缩——非降级面（用户显式 session:compact 仍 fail-visible 传播 NORANGE）。
-    if (this.compactionCfg && shouldCompact(this.log, this.compactionCfg)) {
+    const armed = this.armedCompactionCfg()
+    if (armed && shouldCompact(this.log, armed)) {
       try {
-        applyCompaction(this.log, { turnId: 'compaction', protectLastTurns: this.compactionCfg.protectLastTurns ?? 4 })
+        applyCompaction(this.log, { turnId: 'compaction', protectLastTurns: armed.protectLastTurns ?? 4 })
       } catch (err) {
         console.error('[host] 自动压缩跳过（无可折叠区间）：', err instanceof Error ? err.message : err)
       }
