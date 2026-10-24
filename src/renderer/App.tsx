@@ -219,6 +219,21 @@ function writeDefaultModel(m: string | null): void {
   } catch { /* 存储不可用 = 端侧偏好降级，不阻塞 */ }
 }
 
+// K5-E：自定义模型登记（端侧偏好，不落链；应用 = 会话级 model/set 落链可解释——同 ★ 默认口径）
+const CUSTOM_MODELS_KEY = 'car-desktop.customModels'
+interface CustomModel { id: string; contextWindow: number | null }
+function readCustomModels(): CustomModel[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(CUSTOM_MODELS_KEY) ?? '[]')
+    if (!Array.isArray(raw)) return []
+    return raw.filter((e): e is CustomModel =>
+      typeof e === 'object' && e !== null && typeof (e as CustomModel).id === 'string' && (e as CustomModel).id.trim().length > 0)
+  } catch { return [] }
+}
+function writeCustomModels(list: CustomModel[]): void {
+  try { localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(list)) } catch { /* 端侧偏好降级，不阻塞 */ }
+}
+
 export function App() {
   const [probe, setProbe] = useState<HostProbeResult | null>(null)
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
@@ -233,6 +248,11 @@ export function App() {
   // K5-D-R2：自定义端点面（models:meta endpoint——模型菜单「自定义端点」组 + 窗口声明随选带入）
   const [endpointMeta, setEndpointMeta] = useState<{ baseUrl: string; model: string; contextWindow: number | null; adapterId: string } | null>(null)
   const [defaultModel, setDefaultModelState] = useState<string | null>(() => readDefaultModel())
+  // K5-E：自定义模型（端侧偏好）+ 菜单内联编辑态
+  const [customModels, setCustomModels] = useState<CustomModel[]>(() => readCustomModels())
+  const [customEditId, setCustomEditId] = useState<string | null>(null)
+  const [customEditIdVal, setCustomEditIdVal] = useState('')
+  const [customEditWinVal, setCustomEditWinVal] = useState('')
   // R-K2-1：授权 pending 改队列（K2 并发子 Agent——多请求并发在途，单槽会顶掉先到的弹窗，
   // 用户只见最新一条、其余静默等超时默认拒；队列化后各弹窗独立倒计时、按 requestId 应答）
   const [pendings, setPendings] = useState<AuthzPendingPush[]>([])
@@ -543,17 +563,67 @@ export function App() {
 
   const [sessionReasoning, setSessionReasoning] = useState<'off' | 'low' | 'medium' | 'high' | null>(null)
 
-  const switchModel = async (m: string) => {
+  const switchModel = async (m: string, winOverride?: number | null) => {
     if (!selected || !openId || !m.trim()) return
+    // K5-E：winOverride 显式传入（条目声明窗口）优先；未传 = 手选窗口声明（windowSel）
+    const win = winOverride !== undefined ? winOverride : windowSel
     try {
-      await window.car.setSessionModel(selected.id, openId, m.trim(), windowSel ?? undefined, sessionReasoning ?? undefined)
+      await window.car.setSessionModel(selected.id, openId, m.trim(), win ?? undefined, sessionReasoning ?? undefined)
       setSessionModel(m.trim())
-      if (windowSel) setContextWindow(windowSel)
+      if (win) setContextWindow(win)
       setShowModelMenu(false)
       setModelSearch('')
     } catch (e) {
       fail(e)
     }
+  }
+
+  // ── K5-E：自定义模型增改删（端侧偏好 localStorage；应用走 switchModel → model/set 落链） ──
+
+  const addCustomModel = async (id: string) => {
+    if (!id.trim()) return
+    const next = [...customModels, { id: id.trim(), contextWindow: null }]
+    setCustomModels(next)
+    writeCustomModels(next)
+    setModelSearch('')
+    await switchModel(id.trim(), null)
+  }
+
+  const saveCustomEdit = async () => {
+    const oldId = customEditId
+    if (!oldId) return
+    const id = customEditIdVal.trim()
+    if (!id) { setCustomEditId(null); return }
+    if (customModels.some((m) => m.id === id && m.id !== oldId)) {
+      fail(new Error(`自定义模型 ${id} 已存在（与端点/池/内置重名的条目在菜单中会被先到者覆盖）`))
+      return
+    }
+    const winK = Number(customEditWinVal)
+    const contextWindow = customEditWinVal.trim() && Number.isFinite(winK) && winK > 0 ? winK * 1000 : null
+    const next = customModels.map((m) => (m.id === oldId ? { id, contextWindow } : m))
+    setCustomModels(next)
+    writeCustomModels(next)
+    setCustomEditId(null)
+    setCustomEditIdVal('')
+    setCustomEditWinVal('')
+    // 编辑的是当前会话在用模型 → 跟随一次 model/set（重命名/窗口声明即时生效，落链可解释）
+    if (sessionModel === oldId && selected && openId) {
+      try {
+        await window.car.setSessionModel(selected.id, openId, id, contextWindow ?? undefined, sessionReasoning ?? undefined)
+        setSessionModel(id)
+        setContextWindow(contextWindow)
+      } catch (e) {
+        fail(e)
+      }
+    }
+  }
+
+  const removeCustomModel = (id: string) => {
+    const next = customModels.filter((m) => m.id !== id)
+    setCustomModels(next)
+    writeCustomModels(next)
+    if (defaultModel === id) setDefaultModel(null)
+    if (customEditId === id) setCustomEditId(null)
   }
 
   const switchReasoning = async (e: 'off' | 'low' | 'medium' | 'high') => {
@@ -607,13 +677,19 @@ export function App() {
     thinking: m.thinking,
   }))
   const poolOptions: ModelOption[] = poolMembers.map((m) => ({ id: m.model, group: `池端点 ${m.id}`, contextWindow: null, thinking: null }))
+  // K5-E：自定义模型组（端侧偏好登记——同网关槽位/任意模型 ID 可手动增改）
+  const customOptions: ModelOption[] = customModels.map((m) => ({ id: m.id, group: '自定义模型', contextWindow: m.contextWindow, thinking: null }))
   const seenModels = new Set<string>()
-  const allOptions = [...endpointOptions, ...poolOptions, ...builtinOptions].filter((o) => {
+  const allOptions = [...endpointOptions, ...customOptions, ...poolOptions, ...builtinOptions].filter((o) => {
     if (seenModels.has(o.id)) return false
     seenModels.add(o.id)
     return modelSearch.trim() ? o.id.toLowerCase().includes(modelSearch.trim().toLowerCase()) : true
   })
-  // K5-D-R1：★ 默认有效性判定——不在当前选项（端点/池/内置）的旧默认（如换端点/删池后的遗留）
+  // K5-E：搜索无精确匹配 = 可添加为自定义模型（回车/点行皆可）
+  const addableModel = modelSearch.trim() && !allOptions.some((o) => o.id.toLowerCase() === modelSearch.trim().toLowerCase())
+    ? modelSearch.trim()
+    : null
+  // K5-D-R1：★ 默认有效性判定——不在当前选项（端点/自定义/池/内置）的旧默认（如换端点/删池后的遗留）
   // 不再自动应用（此前 S5 测试遗留的 defaultModel 会覆盖端点锚点模型成乱值）
   const defaultModelValid = defaultModel !== null && allOptions.some((o) => o.id === defaultModel)
   const groups = [...new Set(allOptions.map((o) => o.group))]
@@ -1143,41 +1219,90 @@ export function App() {
                     <div className="ctx-pop model-menu ctx-up">
                       <input
                         className="mm-search"
-                        placeholder="搜索模型…"
+                        placeholder="搜索模型…（无匹配 = 回车添加为自定义模型）"
                         value={modelSearch}
                         autoFocus
                         onChange={(e) => setModelSearch(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' && allOptions.length > 0) void switchModel(allOptions[0]!.id)
+                          if (e.key === 'Enter') {
+                            if (addableModel) void addCustomModel(addableModel)
+                            else if (allOptions.length > 0) void switchModel(allOptions[0]!.id, windowSel ?? allOptions[0]!.contextWindow ?? undefined)
+                          }
                           if (e.key === 'Escape') setShowModelMenu(false)
                         }}
                       />
+                      {addableModel && (
+                        <div className="mm-item">
+                          <button className="mm-pick" onClick={() => void addCustomModel(addableModel)} title="登记为自定义模型（端侧偏好）并切换到它——之后可用 ✎ 补充窗口声明">
+                            <span className="mm-check">＋</span>
+                            <span className="mm-name">添加自定义模型「{addableModel}」</span>
+                            <small className="dim">回车亦可</small>
+                          </button>
+                        </div>
+                      )}
                       {defaultModel && <div className="mm-default">★ 默认：{defaultModel}{defaultModelValid ? '' : '（不在当前模型选项——未应用，点 ☆ 取消或换选有效模型设默认）'}（端侧偏好，不落链）</div>}
                       {groups.map((g) => (
                         <div key={g} className="mm-group">
-                          <div className="mm-sec">{g}</div>
+                          <div className="mm-sec">
+                            {g}
+                            {g === '自定义模型' && <small className="dim"> · ✎ 改 ID/窗口 · ✕ 删（端侧偏好，不落链）</small>}
+                          </div>
                           {allOptions
                             .filter((o) => o.group === g)
                             .map((o) => (
                               <div key={o.id} className={`mm-item${sessionModel === o.id ? ' sel' : ''}`}>
-                                <button
-                                  className="mm-star"
-                                  title="设为默认模型（端侧偏好，不落审计链）"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setDefaultModel(defaultModel === o.id ? null : o.id)
-                                  }}
-                                >
-                                  {defaultModel === o.id ? '★' : '☆'}
-                                </button>
-                                <button className="mm-pick" onClick={() => void switchModel(o.id)}>
-                                  <span className="mm-check">{sessionModel === o.id ? '✓' : ''}</span>
-                                  <span className="mm-name">{o.id}</span>
-                                  <small className="dim">
-                                    {o.contextWindow ? Math.round(o.contextWindow / 1000) + 'k' : ''}
-                                    {o.thinking === 'model-level' ? ' · 思考绑定模型' : o.thinking === 'none' ? ' · 非思考档' : ''}
-                                  </small>
-                                </button>
+                                {g === '自定义模型' && customEditId === o.id ? (
+                                  // K5-E 内联编辑：模型 ID + 窗口 k（保存 = 端侧偏好更新；若为当前会话模型则跟随 model/set）
+                                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '2px 6px', width: '100%' }}>
+                                    <input className="mm-search" style={{ flex: 1, minWidth: 0 }} value={customEditIdVal} autoFocus
+                                      onChange={(e) => setCustomEditIdVal(e.target.value)}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') void saveCustomEdit(); if (e.key === 'Escape') setCustomEditId(null) }}
+                                      placeholder="模型 ID" />
+                                    <input className="mm-search" style={{ width: 64 }} value={customEditWinVal}
+                                      onChange={(e) => setCustomEditWinVal(e.target.value.replace(/[^0-9]/g, ''))}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') void saveCustomEdit(); if (e.key === 'Escape') setCustomEditId(null) }}
+                                      placeholder="窗口k" title="上下文窗口声明（k 为单位；空 = 不声明）" />
+                                    <button className="btn" onClick={() => void saveCustomEdit()} title="保存">存</button>
+                                    <button className="btn" onClick={() => setCustomEditId(null)} title="取消">消</button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <button
+                                      className="mm-star"
+                                      title="设为默认模型（端侧偏好，不落审计链）"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setDefaultModel(defaultModel === o.id ? null : o.id)
+                                      }}
+                                    >
+                                      {defaultModel === o.id ? '★' : '☆'}
+                                    </button>
+                                    <button className="mm-pick" onClick={() => void switchModel(o.id, windowSel ?? o.contextWindow ?? undefined)} title={o.contextWindow ? `选中即声明窗口 ${Math.round(o.contextWindow / 1000)}k（ctx 百分比 + 压缩 token 阈值真值）` : undefined}>
+                                      <span className="mm-check">{sessionModel === o.id ? '✓' : ''}</span>
+                                      <span className="mm-name">{o.id}</span>
+                                      <small className="dim">
+                                        {o.contextWindow ? Math.round(o.contextWindow / 1000) + 'k' : ''}
+                                        {o.thinking === 'model-level' ? ' · 思考绑定模型' : o.thinking === 'none' ? ' · 非思考档' : ''}
+                                      </small>
+                                    </button>
+                                    {g === '自定义模型' && (
+                                      <>
+                                        <button className="mm-star" title="编辑（ID / 窗口声明）"
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            setCustomEditId(o.id)
+                                            setCustomEditIdVal(o.id)
+                                            setCustomEditWinVal(o.contextWindow ? String(Math.round(o.contextWindow / 1000)) : '')
+                                          }}>✎</button>
+                                        <button className="mm-star" title="删除自定义模型"
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            removeCustomModel(o.id)
+                                          }}>✕</button>
+                                      </>
+                                    )}
+                                  </>
+                                )}
                               </div>
                             ))}
                         </div>
