@@ -230,6 +230,8 @@ export function App() {
   const [sessionModel, setSessionModel] = useState<string | null>(null)
   const [meta, setMeta] = useState<Record<string, ModelMetaDTO>>({})
   const [poolMembers, setPoolMembers] = useState<Array<{ id: string; baseUrl: string; model: string; adapterId: string }>>([])
+  // K5-D-R2：自定义端点面（models:meta endpoint——模型菜单「自定义端点」组 + 窗口声明随选带入）
+  const [endpointMeta, setEndpointMeta] = useState<{ baseUrl: string; model: string; contextWindow: number | null; adapterId: string } | null>(null)
   const [defaultModel, setDefaultModelState] = useState<string | null>(() => readDefaultModel())
   // R-K2-1：授权 pending 改队列（K2 并发子 Agent——多请求并发在途，单槽会顶掉先到的弹窗，
   // 用户只见最新一条、其余静默等超时默认拒；队列化后各弹窗独立倒计时、按 requestId 应答）
@@ -301,7 +303,7 @@ export function App() {
     // S5（D-S5-4）：模型菜单数据面（内置元数据表——池端点随工作区选择刷新）
     window.car
       .modelsMeta()
-      .then((r) => { setMeta(r.meta); setPoolMembers(r.pool) })
+      .then((r) => { setMeta(r.meta); setPoolMembers(r.pool); setEndpointMeta(r.endpoint) })
       .catch(() => setMeta({}))
     const offEvent = window.car.onSessionEvent((p: SessionEventPush) => {
       const cur = openRef.current
@@ -389,6 +391,7 @@ export function App() {
       const m = await window.car.modelsMeta(w.id)
       setMeta(m.meta)
       setPoolMembers(m.pool)
+      setEndpointMeta(m.endpoint)
     } catch (e) {
       fail(e)
     }
@@ -448,7 +451,8 @@ export function App() {
       // 新建即打开（S5：会话绑定模型恢复语义 + ★ 默认模型应用面）
       await openSessionById(info.sessionId)
       // S5（D-S5-4）：★ 默认模型 → 新会话应用（偏好本身不落链；应用 = 会话级 model/set 落链可解释）
-      const target = defaultModel
+      // K5-D-R1：默认值必须仍在当前有效选项内（端点/池/内置）——过期遗留默认不再覆盖装配锚点
+      const target = defaultModelValid ? defaultModel : null
       if (target && !info.modelError) {
         try {
           await window.car.setSessionModel(selected.id, info.sessionId, target, undefined, sessionReasoning ?? undefined)
@@ -594,6 +598,8 @@ export function App() {
   const lastRouting = routing.at(-1) ?? null
   const showRoutingBanner = lastRouting != null && (lastRouting.reason === 'fallback' || lastRouting.reason === 'exhausted')
   // S5（D-S5-4）：模型菜单数据面 = 内置元数据表 + 池端点，搜索过滤
+  // K5-D-R2：端点模型进菜单（「自定义端点」组——选中即带窗口声明，sessionWindow 武装 token 阈值）
+  const endpointOptions: ModelOption[] = endpointMeta ? [{ id: endpointMeta.model, group: '自定义端点', contextWindow: endpointMeta.contextWindow, thinking: null }] : []
   const builtinOptions: ModelOption[] = Object.entries(meta).map(([id, m]) => ({
     id,
     group: '内置模型',
@@ -602,11 +608,14 @@ export function App() {
   }))
   const poolOptions: ModelOption[] = poolMembers.map((m) => ({ id: m.model, group: `池端点 ${m.id}`, contextWindow: null, thinking: null }))
   const seenModels = new Set<string>()
-  const allOptions = [...poolOptions, ...builtinOptions].filter((o) => {
+  const allOptions = [...endpointOptions, ...poolOptions, ...builtinOptions].filter((o) => {
     if (seenModels.has(o.id)) return false
     seenModels.add(o.id)
     return modelSearch.trim() ? o.id.toLowerCase().includes(modelSearch.trim().toLowerCase()) : true
   })
+  // K5-D-R1：★ 默认有效性判定——不在当前选项（端点/池/内置）的旧默认（如换端点/删池后的遗留）
+  // 不再自动应用（此前 S5 测试遗留的 defaultModel 会覆盖端点锚点模型成乱值）
+  const defaultModelValid = defaultModel !== null && allOptions.some((o) => o.id === defaultModel)
   const groups = [...new Set(allOptions.map((o) => o.group))]
   const lastUsed = (usage?.lastInput ?? 0) + (usage?.lastOutput ?? 0)
   const pct = contextWindow ? Math.min(100, (lastUsed / contextWindow) * 100) : null
@@ -1143,7 +1152,7 @@ export function App() {
                           if (e.key === 'Escape') setShowModelMenu(false)
                         }}
                       />
-                      {defaultModel && <div className="mm-default">★ 默认：{defaultModel}（端侧偏好，不落链）</div>}
+                      {defaultModel && <div className="mm-default">★ 默认：{defaultModel}{defaultModelValid ? '' : '（不在当前模型选项——未应用，点 ☆ 取消或换选有效模型设默认）'}（端侧偏好，不落链）</div>}
                       {groups.map((g) => (
                         <div key={g} className="mm-group">
                           <div className="mm-sec">{g}</div>
