@@ -45,13 +45,28 @@ export function MemoryView({
     }
   }, [selected, onFail])
 
+  // T-34（v0.3 终验 D7）：list 乱序守卫——切工作区时慢响应后到覆盖新表（偶现空表）；
+  // effect 内联拉取 + cancelled 闭包丢弃 stale 响应，依赖收敛 [selected]（onFail 不稳定不再触发重跑）
   useEffect(() => {
     setEntries(null)
     setCreating(false)
     setEditingId(null)
     setTombstones([])
-    if (selected) void load()
-  }, [selected, load])
+    if (!selected) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await window.car.memoryList(selected.id)
+        if (!cancelled) setEntries(r)
+      } catch (e) {
+        if (!cancelled) onFail(e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected])
 
   const create = async (): Promise<void> => {
     if (!selected || !openId || !newText.trim()) return

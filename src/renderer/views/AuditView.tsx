@@ -10,7 +10,7 @@ import type { AuditExportResult, AuditReport, SessionInfo, WorkspaceInfo } from 
 const ts = (n: number): string => new Date(n).toLocaleTimeString('sv-SE')
 const preview = (v: unknown): string => JSON.stringify(v ?? null).slice(0, 96)
 
-export function AuditView({ selected, sessions }: { selected: WorkspaceInfo | null; sessions: SessionInfo[] }) {
+export function AuditView({ selected, sessions, focusSid, onFocused }: { selected: WorkspaceInfo | null; sessions: SessionInfo[]; focusSid?: string | null; onFocused?: () => void }) {
   const [sid, setSid] = useState<string | null>(null)
   const [report, setReport] = useState<AuditReport | null>(null)
   const [exported, setExported] = useState<AuditExportResult | null>(null)
@@ -24,6 +24,14 @@ export function AuditView({ selected, sessions }: { selected: WorkspaceInfo | nu
     setExported(null)
     setError(null)
   }, [selected?.id])
+
+  // v0.4（T-29）：子链审计跳转——chat 叙事行「查看子链」携带 subagentId 预选并自动拉取
+  // （子链文件 = {sessionsDir}/{subagentId}.jsonl，与普通链同通道载入）
+  useEffect(() => {
+    if (!focusSid) return
+    setSid(focusSid)
+    onFocused?.()
+  }, [focusSid, onFocused])
 
   const load = useCallback(async () => {
     if (!selected || !sid) return
@@ -39,6 +47,11 @@ export function AuditView({ selected, sessions }: { selected: WorkspaceInfo | nu
       setLoading(false)
     }
   }, [selected, sid])
+
+  // v0.4（T-29）：sid 就位即自动拉取（跳转链路免二次点击；按钮保留为手动刷新）
+  useEffect(() => {
+    if (sid) void load()
+  }, [load])
 
   const doExport = useCallback(async () => {
     if (!selected || !sid) return

@@ -135,7 +135,7 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         <input placeholder="API Key（已存可留空——沿用）" type="password" value={key} style={{ width: 170 }} onChange={(e) => setKey(e.target.value)} />
       </div>
       <div style={{ margin: '8px 0' }}>
-        <div className="dim" style={{ marginBottom: 4 }}>模型列表（首行为装配锚点——新建会话的默认模型；窗口 k 可选，声明后选中即武装 ctx 百分比与压缩阈值）</div>
+        <div className="dim" style={{ marginBottom: 4 }}>模型列表（首行为装配锚点——新建会话的默认模型；窗口 k 可选，声明后选中即武装 ctx 百分比与压缩阈值 floor(k×0.78)——滑窗口径网关建议声明网关口径等效窗口，见 doctor「压缩武装」行）</div>
         {models.map((m, i) => (
           <div key={i} className="row wrap" style={{ marginBottom: 4 }}>
             <input className="mono" placeholder={`模型 ID${i === 0 ? '（锚点）' : ''}`} value={m.id} style={{ width: 240 }} onChange={(e) => setModels(models.map((x, j) => (j === i ? { ...x, id: e.target.value } : x)))} />

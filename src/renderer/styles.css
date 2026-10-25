@@ -737,3 +737,17 @@ body {
 .mem-pill.off {
   opacity: 0.55;
 }
+
+/* v0.4（T-29/T-30）：子链跳转按钮 + 子 Agent 状态区（最小档） */
+.line .link-btn { margin-left: 8px; font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid rgba(94, 106, 210, 0.45); background: transparent; color: var(--accent, #5e6ad2); cursor: pointer; }
+.line .link-btn:hover { background: rgba(94, 106, 210, 0.12); }
+.subagent-panel { margin: 4px 14px; border: 1px solid rgba(127, 127, 127, 0.25); border-radius: 10px; padding: 8px 10px; font-size: 12px; background: rgba(127, 127, 127, 0.05); }
+.subagent-panel .sp-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.subagent-panel .sp-row { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-top: 1px dashed rgba(127, 127, 127, 0.18); }
+.subagent-panel .sp-row:first-of-type { border-top: none; }
+.subagent-panel .sp-state { font-size: 11px; border-radius: 999px; padding: 1px 8px; }
+.subagent-panel .sp-state.active { color: var(--ok, #2e9e5b); border: 1px solid rgba(46, 158, 91, 0.5); }
+.subagent-panel .sp-state.joined { color: var(--dim, #888); border: 1px solid rgba(127, 127, 127, 0.4); }
+.subagent-panel .sp-state.killed { color: var(--warn, #b97d10); border: 1px solid rgba(185, 125, 16, 0.5); }
+.subagent-panel .sp-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-panel .link-btn { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid rgba(94, 106, 210, 0.45); background: transparent; color: var(--accent, #5e6ad2); cursor: pointer; }

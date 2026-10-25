@@ -22,6 +22,7 @@ import { MemoryView } from './views/MemoryView'
 import { PluginsView } from './views/PluginsView'
 import { SecurityView } from './views/SecurityView'
 import { SettingsView } from './views/SettingsView'
+import { subagentRowsFrom } from './subagent-rows'
 
 /**
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
@@ -43,7 +44,7 @@ interface ToolCard {
 type ChatItem =
   | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean }
   | { kind: 'tool'; card: ToolCard }
-  | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string }
+  | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string; subagentLink?: string }
 
 const fmtTok = (n: number | null): string =>
   n == null ? '—' : n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n)
@@ -194,12 +195,13 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
       else if (type === 'session/policy') items.push({ kind: 'line', tone: 'dim', text: `会话策略 → ${String(p['policy'] ?? '?')}（session/policy 已落链）` })
       else if (type === 'compact') items.push({ kind: 'line', tone: 'dim', text: `历史已压缩（context/compact 已落链，seq=${String(e.seq)}）` })
       // K2（1.16 子 Agent）：编排叙事行（复用 system 叙事渲染——零新 IPC）
+      // v0.4（T-29）：subagentLink = 子链审计跳转（子链文件 = {sessionsDir}/{subagentId}.jsonl，审计页可开）
       else if (type === 'subagent/spawn') {
-        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 派生 · ${String(p['subagentId'] ?? '?')}（任务：${String(p['task'] ?? '').slice(0, 60)}——subagent/spawn 已落链）` })
+        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 派生 · ${String(p['subagentId'] ?? '?')}（任务：${String(p['task'] ?? '').slice(0, 60)}——subagent/spawn 已落链）`, subagentLink: String(p['subagentId'] ?? '') || undefined })
       } else if (type === 'subagent/join') {
-        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 汇合 · ${String(p['subagentId'] ?? '?')}（reason=${String(p['reason'] ?? '?')} · 摘要 ${String(p['summaryChars'] ?? '?')} 字符）` })
+        items.push({ kind: 'line', tone: 'ok', text: `子 Agent 汇合 · ${String(p['subagentId'] ?? '?')}（reason=${String(p['reason'] ?? '?')} · 摘要 ${String(p['summaryChars'] ?? '?')} 字符——子链 assistant 流即全文）`, subagentLink: String(p['subagentId'] ?? '') || undefined })
       } else if (type === 'subagent/kill') {
-        items.push({ kind: 'line', tone: 'warn', text: `子 Agent 终止 · ${String(p['subagentId'] ?? '?')}（subagent/kill 已落链）` })
+        items.push({ kind: 'line', tone: 'warn', text: `子 Agent 终止 · ${String(p['subagentId'] ?? '?')}（subagent/kill 已落链）`, subagentLink: String(p['subagentId'] ?? '') || undefined })
       }
     }
     // kind usage：turnEnd 摘要已覆盖，不重复渲染
@@ -254,6 +256,8 @@ export function App() {
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
   const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory' | 'caps'>('chat')
+  // v0.4（T-29）：子链审计跳转目标——叙事行「查看子链」→ 审计页预选该子链
+  const [auditFocus, setAuditFocus] = useState<string | null>(null)
   // T-24：能力库数据面（引用菜单 / chips / ctx 行）
   const [caps, setCaps] = useState<CapabilityEntryDTO[]>([])
   const [showCapMenu, setShowCapMenu] = useState(false)
@@ -264,6 +268,8 @@ export function App() {
   const [contextWindow, setContextWindow] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const openRef = useRef<{ wsId: string; sessionId: string } | null>(null)
+  // T-33（v0.3 终验 D2）：恢复横幅已显会话集（进程内幂等——重开不复显）
+  const recoveryShownRef = useRef<Set<string>>(new Set())
 
   const fail = useCallback((e: unknown) => setError(e instanceof Error ? e.message : String(e)), [])
 
@@ -319,6 +325,8 @@ export function App() {
       if (p.event.kind === 'turnEnd' && !p.event.turnId.startsWith('authz:')) {
         setBusy(false)
         void window.car.sessionUsage(cur.wsId, cur.sessionId).then(setUsage).catch(fail)
+        // T-33（v0.3 终验 D2）：turn 收口即刷会话列表——eventCount 不再 stale
+        void window.car.listSessions(cur.wsId).then(setSessions).catch(() => {})
       }
     })
     const offPending = window.car.onAuthzPending((p: AuthzPendingPush) => {
@@ -432,10 +440,14 @@ export function App() {
       setPendings([])
       setBusy(false)
       // T-22（D-S6-7）：打开即恢复明示（禁静默补记——恢复报告随 open 返回，动作落 session/recover 叙事）
+      // T-33（v0.3 终验 D2）：恢复横幅仅本进程首次打开显示——重开同会话幂等回显不重复打扰（链真值不变）
       if (r.recovery && (r.recovery.interruptedTurns > 0 || r.recovery.pendingSteers > 0)) {
-        setStatus(
-          `打开即恢复：补记 interrupted turn ×${r.recovery.interruptedTurns}（合成 toolResult ×${r.recovery.syntheticToolResults}）——待执行引导 ${r.recovery.pendingSteers} 条（session/recover 已落链）`,
-        )
+        if (!recoveryShownRef.current.has(sessionId)) {
+          recoveryShownRef.current.add(sessionId)
+          setStatus(
+            `打开即恢复：补记 interrupted turn ×${r.recovery.interruptedTurns}（合成 toolResult ×${r.recovery.syntheticToolResults}）——待执行引导 ${r.recovery.pendingSteers} 条（session/recover 已落链）`,
+          )
+        }
       }
       if (r.modelError) setError(`模型未装配（turn 发送将被拒绝）：${r.modelError}`)
     } catch (e) {
@@ -652,6 +664,8 @@ export function App() {
     return e.kind === 'system' && (t === 'subagent/join' || t === 'subagent/kill')
   }).length
   const subagentActive = Math.max(0, subagentSpawns.length - subagentClosed)
+  // v0.4（T-30 最小档）：子 Agent 状态区行数据——纯函数派生（subagent-rows.ts，链即真值）
+  const subagentRows = subagentRowsFrom(events)
   const attachFiles = async (): Promise<void> => {
     if (!selected || !openId) return
     try {
@@ -868,7 +882,7 @@ export function App() {
         ) : view === 'settings' ? (
           <SettingsView selected={selected} onEndpointChanged={() => setStatus('自定义端点已更新——新会话生效')} />
         ) : view === 'audit' ? (
-          <AuditView selected={selected} sessions={sessions} />
+          <AuditView selected={selected} sessions={sessions} focusSid={auditFocus} onFocused={() => setAuditFocus(null)} />
         ) : view === 'dash' ? (
           <DashView selected={selected} />
         ) : view === 'security' ? (
@@ -995,6 +1009,24 @@ export function App() {
                 </div>
               )
             })}
+            {/* v0.4（T-30 最小档）：子 Agent 状态区——活跃/已收口 + 护栏口径 + 授权等待计数（pending 弹窗独立可见） */}
+            {subagentRows.length > 0 && (
+              <div className="subagent-panel">
+                <div className="sp-head">
+                  <b>子 Agent</b>
+                  <span className="dim">活跃 {subagentRows.filter((r) => r.state === 'active').length} · 累计 {subagentRows.length}{pendings.length > 0 ? ` · 授权等待 ${pendings.length}` : ''}（护栏 CONC≤3 · CUM≤10）</span>
+                </div>
+                {subagentRows.map((r) => (
+                  <div key={r.id} className={`sp-row ${r.state}`}>
+                    <span className={`sp-state ${r.state}`}>{r.state === 'active' ? '运行中' : r.state === 'joined' ? '已汇合' : '已终止'}</span>
+                    <code>{r.id.length > 20 ? r.id.slice(0, 20) + '…' : r.id}</code>
+                    <span className="sp-task">{r.task.slice(0, 40) || '(无任务描述)'}</span>
+                    {r.joinReason && <span className="dim">reason={r.joinReason}</span>}
+                    <button className="link-btn" onClick={() => { setAuditFocus(r.id); setView('audit') }}>子链 ↗</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="chat-scroll" ref={scrollRef}>
               {items.map((it, i) => {
                 if (it.kind === 'msg') {
@@ -1032,6 +1064,9 @@ export function App() {
                 return (
                   <div key={i} className={`line ${it.tone}`}>
                     {it.text}
+                    {it.subagentLink && (
+                      <button className="link-btn" onClick={() => { setAuditFocus(it.subagentLink!); setView('audit') }}>查看子链 ↗</button>
+                    )}
                   </div>
                 )
               })}

@@ -433,6 +433,19 @@ export function createHostService(opts: HostServiceOptions): HostService {
             probeKey: endpoint?.key ?? process.env[(endpoint?.adapterId ?? llm.adapterId) === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] ?? null,
             poolMembers,
           }).then((r) => r.rows)),
+          // v0.4（T-31 / R-K7-1）：压缩武装真值行——桌面装配口径（无 compaction 键 = 缺省开 K5-D；
+          // 键在场 = 内核语义）；窗口真值 = 端点锚点声明（会话内 model/set 可覆盖，doctor 只显端点面）。
+          // 滑窗口径网关（商汤 usage ≈ 真实 40%）提示声明网关口径窗口——禁估算红线：内核不做系数修正。
+          (() => {
+            const compCfg = (llm as { compaction?: { enabled?: boolean; thresholdTokens?: number } }).compaction
+            const compEnabled = compCfg === undefined ? true : compCfg.enabled === true
+            const anchorWin = endpoint?.models?.[0]?.contextWindow ?? null
+            if (compCfg?.thresholdTokens != null) return { label: '压缩武装', ok: true, detail: `thresholdTokens=${compCfg.thresholdTokens}（car.config 显式——单一事实源压过缺省）` }
+            if (!compEnabled) return { label: '压缩武装', ok: true, detail: '关闭（llm.compaction.enabled=false）' }
+            return anchorWin
+              ? { label: '压缩武装', ok: true, detail: `token 阈值 ${Math.floor(anchorWin * 0.78)}（端点声明 ${Math.round(anchorWin / 1000)}k × 0.78；滑窗口径网关建议声明网关口径等效窗口）` }
+              : { label: '压缩武装', ok: false, detail: '未武装（锚点模型无窗口声明——禁估算；端点面板补窗口 k 或 car.config 显式 thresholdTokens）' }
+          })(),
         ]
         return { rows }
       }
