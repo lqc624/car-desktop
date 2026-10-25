@@ -1,7 +1,7 @@
 {
   "name": "car-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "CAR Desktop - 桌面壳消费内核 seam（立项书：car-docs/30-桌面v1/桌面端立项书.md）",
   "license": "MIT",
   "type": "module",
