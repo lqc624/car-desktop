@@ -49,12 +49,15 @@ const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v)
 
 /** usage 事实抽取（usage 事件 + turn 级工具关联 + turnEnd 计数——一次遍历） */
 export function factsFromEvents(
-  events: ReadonlyArray<{ kind: string; turnId: string; ts: number; payload: unknown }>,
+  events: ReadonlyArray<{ kind: string; turnId: string; ts: number; payload: unknown; meta?: Record<string, unknown> | null }>,
   sessionId: string,
-): { facts: UsageFact[]; toolsByTurn: Map<string, string[]>; turnEndCount: number } {
+): { facts: UsageFact[]; toolsByTurn: Map<string, string[]>; turnEndCount: number; usageMissingTurns: number } {
   const facts: UsageFact[] = []
   const toolsByTurn = new Map<string, string[]>()
   let turnEndCount = 0
+  // 1.18.2（R-K7-2）：内核 turnEnd.usageMissing 尾键——turn 有模型输出但 provider 未回执
+  // usage（商汤网关实测 ~20%）。「无 usage」由此细分：网关真缺失 vs 无模型请求 turn。
+  let usageMissingTurns = 0
   for (const e of events) {
     if (e.kind === 'usage' && !e.turnId.startsWith('authz:')) {
       const p = (e.payload ?? {}) as Record<string, unknown>
@@ -80,9 +83,12 @@ export function factsFromEvents(
       }
       continue
     }
-    if (e.kind === 'turnEnd' && !e.turnId.startsWith('authz:')) turnEndCount++
+    if (e.kind === 'turnEnd' && !e.turnId.startsWith('authz:')) {
+      turnEndCount++
+      if (e.meta?.['usageMissing'] === true) usageMissingTurns++
+    }
   }
-  return { facts, toolsByTurn, turnEndCount }
+  return { facts, toolsByTurn, turnEndCount, usageMissingTurns }
 }
 
 const dayOf = (ts: number): string => {
@@ -131,6 +137,8 @@ export interface MeteringSummary {
     /** 有 usage 的 turn / turn 总数；无 turn = null */
     usageCoverage: number | null
     turnsWithoutUsage: number
+    /** 网关未回执 usage 的 turn（内核 turnEnd.usageMissing 尾键——1.18.2 R-K7-2）；≤ turnsWithoutUsage，差值 = 无模型请求的 turn */
+    usageMissingTurns: number
   }
   dailyBars: DayBar[]
   byModel: ModelRow[]
@@ -150,6 +158,7 @@ export function summarizeFacts(
   turnEndCount: number,
   provider: PriceProvider,
   now: number,
+  usageMissingTurns = 0,
 ): MeteringSummary {
   const ratesCache = new Map<string, PriceRates | null>()
   const ratesFor = (model: string | null): PriceRates | null => {
@@ -254,6 +263,7 @@ export function summarizeFacts(
       cacheHitRate: totalInput + totalCacheRead > 0 ? totalCacheRead / (totalInput + totalCacheRead) : null,
       usageCoverage: turnEndCount > 0 ? turnsWithUsage / turnEndCount : null,
       turnsWithoutUsage: Math.max(0, turnEndCount - turnsWithUsage),
+      usageMissingTurns,
     },
     dailyBars,
     byModel,
@@ -273,6 +283,7 @@ export function workspaceMeteringSummary(workspaceRoot: string, provider: PriceP
   const facts: UsageFact[] = []
   const toolsByTurn = new Map<string, string[]>()
   let turnEndCount = 0
+  let usageMissingTurns = 0
   const warnings: string[] = []
   let files: string[] = []
   try {
@@ -292,9 +303,10 @@ export function workspaceMeteringSummary(workspaceRoot: string, provider: PriceP
         toolsByTurn.set(turnId, merged)
       }
       turnEndCount += r.turnEndCount
+      usageMissingTurns += r.usageMissingTurns
     } catch (err) {
       warnings.push(`会话 ${sessionId} 解析失败跳过：${err instanceof Error ? err.message : err}`)
     }
   }
-  return { ...summarizeFacts(facts, toolsByTurn, turnEndCount, provider, now), warnings }
+  return { ...summarizeFacts(facts, toolsByTurn, turnEndCount, provider, now, usageMissingTurns), warnings }
 }

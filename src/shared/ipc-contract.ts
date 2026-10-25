@@ -570,6 +570,8 @@ export interface MeteringSummary {
     cacheHitRate: number | null
     usageCoverage: number | null
     turnsWithoutUsage: number
+    /** 网关未回执 usage 的 turn（内核 turnEnd.usageMissing 尾键——1.18.2 R-K7-2）；≤ turnsWithoutUsage，差值 = 无模型请求 turn */
+    usageMissingTurns: number
   }
   dailyBars: MeteringDayBar[]
   byModel: MeteringModelRow[]

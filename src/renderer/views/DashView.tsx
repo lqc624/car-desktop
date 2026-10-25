@@ -88,7 +88,14 @@ export function DashView({ selected }: { selected: WorkspaceInfo | null }) {
             <div className="stat">
               <div className="k">usage 覆盖率</div>
               <div className="v">{pct(summary.cards.usageCoverage)}</div>
-              <div className="d">缺失 {summary.cards.turnsWithoutUsage} turn（provider 未回，不估算）</div>
+              <div className="d">
+                缺失 {summary.cards.turnsWithoutUsage} turn
+                {summary.cards.usageMissingTurns > 0 || summary.cards.turnsWithoutUsage > 0 ? (
+                  <>（网关未回执 {summary.cards.usageMissingTurns} · 无模型请求 {Math.max(0, summary.cards.turnsWithoutUsage - summary.cards.usageMissingTurns)}，不估算）</>
+                ) : (
+                  <>（不估算）</>
+                )}
+              </div>
             </div>
           </div>
 

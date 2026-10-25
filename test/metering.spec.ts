@@ -22,8 +22,8 @@ function tmpDir(label: string): string {
 
 // ==================== 纯函数单测 ====================
 
-function ev(kind: string, turnId: string, ts: number, payload: unknown): { kind: string; turnId: string; ts: number; payload: unknown } {
-  return { kind, turnId, ts, payload }
+function ev(kind: string, turnId: string, ts: number, payload: unknown, meta?: Record<string, unknown>): { kind: string; turnId: string; ts: number; payload: unknown; meta?: Record<string, unknown> } {
+  return meta === undefined ? { kind, turnId, ts, payload } : { kind, turnId, ts, payload, meta }
 }
 const usage = (turnId: string, ts: number, model: string, input: number, output: number, cacheRead = 0): { kind: string; turnId: string; ts: number; payload: unknown } =>
   ev('usage', turnId, ts, { model, adapterId: 'openai-compat', input, output, cacheRead, cacheCreation: 0, providerRaw: {} })
@@ -45,8 +45,27 @@ test('factsFromEvents：usage 事实抽取 + authz:* 审计事件不计 + turn �
   const r = factsFromEvents(events, 'S1')
   assert.equal(r.facts.length, 2, 'authz:* usage 不计入')
   assert.equal(r.turnEndCount, 3, 'authz:* turnEnd 不计入；T3 计入分母')
+  assert.equal(r.usageMissingTurns, 0, '旧格式链（无 usageMissing 尾键）零计数——1.18.1 及以前会话兼容')
   assert.deepEqual(r.toolsByTurn.get('T1'), ['fs_write'])
   assert.deepEqual(r.toolsByTurn.get('T2'), ['fs_read', 'fs_read'].filter((v, i, a) => a.indexOf(v) === i), '同 turn 重复工具去重')
+})
+
+test('factsFromEvents + summarizeFacts：turnEnd.usageMissing 尾键细分（1.18.2 R-K7-2）——网关未回执计数', () => {
+  const events = [
+    ev('usage', 'T1', 1, { model: 'm', adapterId: 'anthropic', input: 100, output: 5, cacheRead: 0, cacheCreation: 0, providerRaw: {} }),
+    ev('turnEnd', 'T1', 2, null),
+    // 网关未回执形态：有模型输出但 usage 整条缺席 → 内核 1.18.2 落 usageMissing 尾键
+    ev('assistant', 'T2', 3, 'ok'),
+    ev('turnEnd', 'T2', 4, null, { reason: 'completed', usageMissing: true }),
+    // 无模型请求的 turn（如授权收口）：无尾键 → 不计网关缺失
+    ev('turnEnd', 'T3', 5, null, { reason: 'blocked' }),
+  ]
+  const r = factsFromEvents(events, 'S1')
+  assert.equal(r.turnEndCount, 3)
+  assert.equal(r.usageMissingTurns, 1, '仅 usageMissing 尾键的 turn 计数（T2）')
+  const s = summarizeFacts(r.facts, r.toolsByTurn, r.turnEndCount, nullPriceProvider(), 0, r.usageMissingTurns)
+  assert.equal(s.cards.turnsWithoutUsage, 2, 'T2+T3 均无 usage（缺失分母）')
+  assert.equal(s.cards.usageMissingTurns, 1, '网关未回执 1 / 无模型请求 1 细分在卡面')
 })
 
 test('summarizeFacts：按模型聚合现算金额 + 今日卡 + 命中率 + 覆盖率（表价目注入）', () => {
