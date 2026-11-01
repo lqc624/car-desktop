@@ -751,3 +751,17 @@ body {
 .subagent-panel .sp-state.killed { color: var(--warn, #b97d10); border: 1px solid rgba(185, 125, 16, 0.5); }
 .subagent-panel .sp-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-panel .link-btn { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid rgba(94, 106, 210, 0.45); background: transparent; color: var(--accent, #5e6ad2); cursor: pointer; }
+
+/* 1.19.0：流式增量气泡（生成中实时上屏——光标呼吸 + 气泡临时态弱化描边） */
+.msg.streaming .bubble { border-style: dashed; }
+.stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: var(--accent, #5e6ad2);
+  border-radius: 2px;
+  animation: stream-blink 0.9s steps(2, start) infinite;
+}
+@keyframes stream-blink { to { visibility: hidden; } }

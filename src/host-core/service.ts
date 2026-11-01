@@ -224,6 +224,16 @@ export function createHostService(opts: HostServiceOptions): HostService {
           toolDefs: mergeToolSources(builtinTools(root, fileSecurity), extraTools),
           // S5（D-S5-3）：会话级思考档位实时读（model/set 即时生效）
           currentReasoning: () => handle.sessionReasoning,
+          // 1.19.0：流式增量推送面（渲染提示——不落链，事实本体在 JSONL；assistant 事件到达即收口）
+          onDelta: (d) =>
+            emit(IpcPushTopic.SessionDelta, {
+              workspaceId: handle.workspaceId,
+              sessionId: handle.sessionId,
+              turnId: d.turnId,
+              ...(d.textDelta !== undefined ? { textDelta: d.textDelta } : {}),
+              ...(d.toolName !== undefined ? { toolName: d.toolName } : {}),
+              ts: Date.now(),
+            }),
         }),
       )
     }
@@ -293,6 +303,20 @@ export function createHostService(opts: HostServiceOptions): HostService {
               currentTurnId: o.currentTurnId,
               currentModel: o.currentModel,
               toolDefs: o.toolDefs,
+              // 1.19.0：子链流式增量（sessionId = 子链 id——推送归组；父视图过滤不消费，审计/后续面可用）
+              ...(o.sessionId
+                ? {
+                    onDelta: (d: { turnId: string; textDelta?: string; toolName?: string }) =>
+                      emit(IpcPushTopic.SessionDelta, {
+                        workspaceId,
+                        sessionId: o.sessionId,
+                        turnId: d.turnId,
+                        ...(d.textDelta !== undefined ? { textDelta: d.textDelta } : {}),
+                        ...(d.toolName !== undefined ? { toolName: d.toolName } : {}),
+                        ts: Date.now(),
+                      }),
+                  }
+                : {}),
             })
         : null)
     if (!makeChildModelFn) return

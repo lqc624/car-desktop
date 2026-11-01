@@ -151,14 +151,22 @@ export function createChatModelFn(opts: {
   toolDefs: HostToolDef[]
   /** S5（D-S5-3）：会话级思考档位（off/缺席 = 不下发该字段，字节面零痕迹） */
   currentReasoning?: () => 'off' | 'low' | 'medium' | 'high' | null
+  /**
+   * 1.19.0：流式增量出口（内核 chatStep onDelta 透传——textDelta 已过 StreamRedactor）。
+   * turnId = 本请求装配时锚定值（与 chatStep turnId 同源，句柄现值漂移免疫）。
+   * 缺省 = 不回调（零行为变化）；宿主侧组装 SessionDeltaPush 推送面（不落链——事实本体在 JSONL）。
+   */
+  onDelta?: (d: { turnId: string; textDelta?: string; toolName?: string }) => void
 }): HostModelFn {
   return () => {
     // 会话级思考档位——每次请求实时读（model/set 即时生效）
     const r = opts.currentReasoning?.() ?? null
+    // 1.19.0：turnId 请求级锚定（onDelta 与 chatStep 同源——推送归组不串 turn）
+    const turnId = opts.currentTurnId()
     return chatStep({
       core: opts.runtime.core,
       log: opts.log,
-      turnId: opts.currentTurnId(),
+      turnId,
       model: opts.currentModel(),
       tools: opts.toolDefs.map((t) => ({
         name: t.name,
@@ -170,6 +178,8 @@ export function createChatModelFn(opts: {
       ...(opts.runtime.llm.adapterId ? { adapterId: opts.runtime.llm.adapterId } : {}),
       // S5（D-S5-3）：reasoning 透传（off/缺席 = 字节面零痕迹）
       ...(r && r !== 'off' ? { reasoning: { effort: r } } : {}),
+      // 1.19.0：流式增量透传（turnId 请求级锚定；缺省不传——chatStep 零行为变化）
+      ...(opts.onDelta ? { onDelta: (d: { textDelta?: string; toolName?: string }) => opts.onDelta!({ ...d, turnId }) } : {}),
       signal: opts.signal,
     })
   }

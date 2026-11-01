@@ -59,6 +59,8 @@ export interface ChildModelFnOpts {
   currentTurnId: () => string
   currentModel: () => string
   toolDefs: HostToolDef[]
+  /** 1.19.0：子链会话 id（流式增量推送归组用——缺省 = 不推增量） */
+  sessionId?: string
 }
 
 export interface SubagentManagerDeps {
@@ -235,6 +237,7 @@ export class SubagentManager {
       currentTurnId: () => 'T1',
       currentModel: () => child.model,
       toolDefs: this.whitelistDefs,
+      sessionId: subagentId,
     })
     const tools = new Map(this.whitelistDefs.map((t) => [t.name, t]))
     child.done = runTurn({

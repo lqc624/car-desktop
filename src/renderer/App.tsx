@@ -6,6 +6,7 @@ import type {
   ModelMetaDTO,
   AttachmentRowDTO,
   CapabilityEntryDTO,
+  SessionDeltaPush,
   SessionEventDTO,
   SessionEventPush,
   SessionInfo,
@@ -26,11 +27,26 @@ import { subagentRowsFrom } from './subagent-rows'
 
 /**
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
- * 落链事件；授权 120s 倒计时仅展示口径，超时判定真值在内核——D-S2-5）。
+ * 落链事件；1.19.0 起生成中的临时增量除外——内核脱敏后的流式渲染提示，assistant
+ * 事件到达即收口清零，收敛后仍以落链事件为唯一事实源）。授权 120s 倒计时仅展示口径，
+ * 超时判定真值在内核——D-S2-5）。
  * 错误呈现纪律：任何 Promise 拒绝落红条全文展示（fail-visible，禁静默吞错）。
  * S5：布局对齐原型 v0.5——左栏三段式（导航/列表/底部）+ 输入区右下聚类
  * [上下文圆环][模型][发送] + 模型菜单（搜索/分组/✓/★默认）+ 模型池状态与降级横幅（fail-visible）。
  */
+
+/** 1.19.0：流式增量缓冲（按 turn 归组——assistant/turnEnd 事件到达即清零该 turn） */
+interface StreamBuf {
+  turnId: string
+  text: string
+  toolName: string | null
+}
+
+/** 流式增量归并（纯函数——按 turnId 换道重建，textDelta 追加，toolName 首见钉住） */
+function applyStreamDelta(prev: StreamBuf | null, p: SessionDeltaPush): StreamBuf {
+  const base = prev && prev.turnId === p.turnId ? prev : { turnId: p.turnId, text: '', toolName: null }
+  return { turnId: base.turnId, text: base.text + (p.textDelta ?? ''), toolName: p.toolName ?? base.toolName }
+}
 
 interface ToolCard {
   callId: string
@@ -246,6 +262,8 @@ export function App() {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [update, setUpdate] = useState<UpdateStatusPush | null>(null)
   const [busy, setBusy] = useState(false)
+  // 1.19.0：流式增量缓冲（发送后不空等——生成中实时上屏；assistant/turnEnd 事件收口清零）
+  const [stream, setStream] = useState<StreamBuf | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [input, setInput] = useState('')
@@ -322,12 +340,24 @@ export function App() {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
       setEvents((prev) => [...prev, p.event])
+      if (p.event.kind === 'assistant') {
+        // 1.19.0：全文事件到达 = 流式缓冲收口（增量之和 ≡ 落链全文，屏幕无第二事实源）
+        setStream((s) => (s && s.turnId === p.event.turnId ? null : s))
+      }
       if (p.event.kind === 'turnEnd' && !p.event.turnId.startsWith('authz:')) {
+        // 1.19.0：turn 收口（含 aborted/error）清残留增量——中断态不留下半截临时文本
+        setStream((s) => (s && s.turnId === p.event.turnId ? null : s))
         setBusy(false)
         void window.car.sessionUsage(cur.wsId, cur.sessionId).then(setUsage).catch(fail)
         // T-33（v0.3 终验 D2）：turn 收口即刷会话列表——eventCount 不再 stale
         void window.car.listSessions(cur.wsId).then(setSessions).catch(() => {})
       }
+    })
+    // 1.19.0：流式增量订阅（渲染提示面——按当前打开会话过滤；子链增量随 sessionId 过滤自然丢弃）
+    const offDelta = window.car.onSessionDelta((p: SessionDeltaPush) => {
+      const cur = openRef.current
+      if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
+      setStream((prev) => applyStreamDelta(prev, p))
     })
     const offPending = window.car.onAuthzPending((p: AuthzPendingPush) => {
       const cur = openRef.current
@@ -347,6 +377,7 @@ export function App() {
     const offUpdate = window.car.onUpdateStatus((s: UpdateStatusPush) => setUpdate(s))
     return () => {
       offEvent()
+      offDelta()
       offPending()
       offResolved()
       offUpdate()
@@ -364,7 +395,7 @@ export function App() {
   // 自动滚底
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [events, pendings.length])
+  }, [events, pendings.length, stream])
 
   // ── 工作区/会话 ────────────────────────────────────────────────────────
   const pickWorkspace = async () => {
@@ -396,6 +427,7 @@ export function App() {
     setSelected(w)
     setOpenId(null)
     setEvents([])
+    setStream(null) // 1.19.0：换工作区清流式缓冲（跨会话临时态禁串）
     setUsage(null)
     setPendings([])
     setBusy(false)
@@ -421,6 +453,7 @@ export function App() {
       setView('chat')
       setOpenId(sessionId)
       setEvents(r.events)
+      setStream(null) // 1.19.0：换会话清流式缓冲（回放/重开会话不带上一会话临时态）
       setSessionModel(r.model)
       setContextWindow(r.contextWindow ?? null)
       // 会话策略 = 链上最近一次 session/policy，无则回退安全中心默认值
@@ -504,6 +537,7 @@ export function App() {
       if (openId === sessionId) {
         setOpenId(null)
         setEvents([])
+        setStream(null)
       }
       await refreshSessions(selected.id)
       setStatus('会话已删除（delete 留痕，JSONL 保留）')
@@ -1070,6 +1104,22 @@ export function App() {
                   </div>
                 )
               })}
+              {/* 1.19.0：流式增量气泡（生成中实时上屏——内核脱敏放行段；assistant 事件到达即被事件全文取代） */}
+              {stream && (stream.text || stream.toolName) && (
+                <div className="msg agent streaming">
+                  <div className="who">CR</div>
+                  <div className="bubble">
+                    {stream.text ? (
+                      <>
+                        {stream.text}
+                        <span className="stream-cursor" aria-hidden />
+                      </>
+                    ) : (
+                      <span className="dim">正在调用工具 <code>{stream.toolName}</code>…（参数流式生成中）</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             {/* T-24/T-25：已引用条 + 已附文件（输入区上方——✕ 撤销 = 补偿事件落链） */}
             {(activeRefs.length > 0 || attachments.length > 0) && (

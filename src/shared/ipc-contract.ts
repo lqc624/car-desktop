@@ -137,6 +137,13 @@ export type IpcChannelName = (typeof IpcChannel)[keyof typeof IpcChannel]
 export const IpcPushTopic = {
   /** 会话事件流（与 JSONL 落盘行同源同序——D-S2-1） */
   SessionEvent: 'push:session-event',
+  /**
+   * 会话流式增量（1.19.0 渲染提示面——内核 chatStep onDelta 透传）：发送后不空等的
+   * 实时执行呈现。纯渲染提示：不落链不持久（事实本体仍是 JSONL 落盘行），textDelta
+   * 已过内核 StreamRedactor（流式遮蔽）；assistant 事件到达即收口清零（增量之和
+   * ≡ 落链全文，屏幕无第二事实源）。
+   */
+  SessionDelta: 'push:session-delta',
   /** 授权门等待用户决策（120s 倒计时展示口径；超时判定真值在内核——D-S2-5） */
   AuthzPending: 'push:authz-pending',
   /** 授权门已决（用户响应 / 内核超时 / 会话关闭取消——横幅生命周期锚点） */
@@ -216,6 +223,20 @@ export interface SessionEventPush {
   workspaceId: string
   sessionId: string
   event: SessionEventDTO
+}
+
+/**
+ * 流式增量推送载荷（1.19.0）：turnId 对齐 SessionEventDTO.turnId（渲染层按 turn 归组、
+ * assistant/turnEnd 事件到达即清零该 turn 的增量缓冲）。textDelta = 内核脱敏后放行段；
+ * toolName = 工具名首次可知（一次）；二者至多其一非空。
+ */
+export interface SessionDeltaPush {
+  workspaceId: string
+  sessionId: string
+  turnId: string
+  textDelta?: string
+  toolName?: string
+  ts: number
 }
 
 /** 授权门等待决策（渲染层倒计时展示；超时判定真值在内核 decideByUser——D-S2-5） */
@@ -711,6 +732,8 @@ export interface CarBridge {
   meteringSummary(workspaceId: string): Promise<MeteringSummary>
   // —— 推送订阅（返回退订函数；preload 内持 ipcRenderer，渲染层零逃逸） ——
   onSessionEvent(cb: (p: SessionEventPush) => void): () => void
+  /** 流式增量订阅（1.19.0——发送后不空等的实时执行呈现；不落链，assistant 事件到达即收口） */
+  onSessionDelta(cb: (p: SessionDeltaPush) => void): () => void
   onAuthzPending(cb: (p: AuthzPendingPush) => void): () => void
   onAuthzResolved(cb: (p: AuthzResolvedPush) => void): () => void
   // —— T-23：自动更新（main 侧能力；状态经 onUpdateStatus 推送） ——

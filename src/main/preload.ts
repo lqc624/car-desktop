@@ -84,6 +84,8 @@ const bridge: CarBridge = {
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),
   attachmentRemove: (workspaceId, sessionId, path) => ipcRenderer.invoke(IpcChannel.AttachmentRemove, { workspaceId, sessionId, path }),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
+  // 1.19.0：流式增量（渲染提示面——不落链，assistant 事件到达即收口清零）
+  onSessionDelta: (cb) => subscribe(IpcPushTopic.SessionDelta, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),
   // —— T-23：自动更新（main 侧能力；状态经 onUpdateStatus 推送） ——
