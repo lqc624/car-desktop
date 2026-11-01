@@ -66,10 +66,11 @@ async function setup(label: string, scripts: string[][]): Promise<Env> {
   const userData = tmpDir(label + '-ud')
   const root = tmpDir(label + '-ws')
   writeFileSync(join(root, 'car.config.ts'), `export default { llm: { baseUrl: '${baseUrl}', model: 'stream-model' } }\n`, 'utf8')
-  // 凭据 env 兜底（loadHostRuntime 契约：CAR_ALLOW_ENV_CREDENTIALS=1——进程内封闭，测试后还原）
+  // 凭据 env 兜底（loadHostRuntime 契约：CAR_ALLOW_ENV_CREDENTIALS=1——进程内封闭，测试后还原）；
+  // 值为假靶料（凭据在位探测只需非空串）——secrets-scan:allow（测试 fixture，非真实凭据）
   const prevKey = process.env.OPENAI_API_KEY
   const prevAllow = process.env.CAR_ALLOW_ENV_CREDENTIALS
-  process.env.OPENAI_API_KEY = 'sk-test-stream-delta'
+  process.env.OPENAI_API_KEY = 'sk-test-stream-delta' // secrets-scan:allow（测试 fixture 假靶料，非真实凭据）
   process.env.CAR_ALLOW_ENV_CREDENTIALS = '1'
   const svc = createHostService({ userDataDir: userData, authzTimeoutMs: 120_000 })
   const pushes: PushMessage[] = []
