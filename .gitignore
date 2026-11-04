@@ -8,3 +8,4 @@ release-1018/
 release-*/
 .verify-s5/
 .verify-s6/
+.verify-sbg/

@@ -242,10 +242,25 @@ function clearLegacyCustomModels(): void {
   try { localStorage.removeItem('car-desktop.customModels') } catch { /* 存储不可用 = 无遗留可清 */ }
 }
 
+/** v0.3-R1：工作区分组展开态（端侧偏好，不落链）——null = 从未设置（默认全展开） */
+const EXPANDED_WS_KEY = 'car-desktop.expandedWs'
+function readExpandedWs(): string[] | null {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(EXPANDED_WS_KEY) ?? 'null')
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : null
+  } catch { return null }
+}
+function writeExpandedWs(ids: string[]): void {
+  try { localStorage.setItem(EXPANDED_WS_KEY, JSON.stringify(ids)) } catch { /* 存储不可用 = 端侧偏好降级，不阻塞 */ }
+}
+
 export function App() {
   const [probe, setProbe] = useState<HostProbeResult | null>(null)
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
-  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  // v0.3-R1：会话按工作区分桶（侧栏工作区为分组头，展开后各自嵌套展示——跨工作区并行可见）
+  const [sessionsByWs, setSessionsByWs] = useState<Record<string, SessionInfo[]>>({})
+  // v0.3-R1：工作区分组展开态（端侧偏好持久化——null = 从未设置，默认全展开）
+  const [expandedWs, setExpandedWs] = useState<string[] | null>(() => readExpandedWs())
   const [selected, setSelected] = useState<WorkspaceInfo | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
   const [events, setEvents] = useState<SessionEventDTO[]>([])
@@ -298,7 +313,8 @@ export function App() {
 
   const refreshSessions = useCallback(
     async (wsId: string) => {
-      setSessions(await window.car.listSessions(wsId))
+      const list = await window.car.listSessions(wsId)
+      setSessionsByWs((prev) => ({ ...prev, [wsId]: list }))
     },
     [],
   )
@@ -325,9 +341,21 @@ export function App() {
       .then(setProbe)
       .catch(fail)
     // 启动加载已注册工作区（userData/workspaces.json——重启后侧栏不再为空）
+    // v0.3-R1：首次（无端侧偏好）默认全展开；按工作区并行预载会话清单（展开即可见，N 个工作区量小）
     window.car
       .listWorkspaces()
-      .then(setWorkspaces)
+      .then(async (ws) => {
+        setWorkspaces(ws)
+        // 首次（无端侧偏好）且已有工作区时默认全展开——空清单不写偏好（避免把「加载空窗期」的 [] 污染成用户显式全收缩）
+        if (ws.length > 0 && readExpandedWs() == null) {
+          setExpandedWs(ws.map((w) => w.id))
+          writeExpandedWs(ws.map((w) => w.id))
+        }
+        const entries = await Promise.all(
+          ws.map(async (w) => [w.id, await window.car.listSessions(w.id).catch(() => [] as SessionInfo[])] as const),
+        )
+        setSessionsByWs(Object.fromEntries(entries))
+      })
       .catch(fail)
     // K5-F：清理 K5-E 遗留自由模型清单键（模型已归属端点——设置面板维护）
     clearLegacyCustomModels()
@@ -350,7 +378,10 @@ export function App() {
         setBusy(false)
         void window.car.sessionUsage(cur.wsId, cur.sessionId).then(setUsage).catch(fail)
         // T-33（v0.3 终验 D2）：turn 收口即刷会话列表——eventCount 不再 stale
-        void window.car.listSessions(cur.wsId).then(setSessions).catch(() => {})
+        void window.car
+          .listSessions(cur.wsId)
+          .then((list) => setSessionsByWs((prev) => ({ ...prev, [cur.wsId]: list })))
+          .catch(() => {})
       }
     })
     // 1.19.0：流式增量订阅（渲染提示面——按当前打开会话过滤；子链增量随 sessionId 过滤自然丢弃）
@@ -405,6 +436,10 @@ export function App() {
       if (!w) return
       const all = await window.car.listWorkspaces()
       setWorkspaces(all)
+      // v0.3-R1：新注册即展开（否则选中后在收起组里看不到会话）
+      const next = [...new Set([...(expandedWs ?? all.map((x) => x.id)), w.id])]
+      setExpandedWs(next)
+      writeExpandedWs(next)
       await selectWorkspace(all.find((x) => x.id === w.id) ?? w)
     } catch (e) {
       fail(e)
@@ -417,6 +452,10 @@ export function App() {
       const w = await window.car.registerWorkspaceByPath(manualPath.trim())
       setManualPath('')
       setWorkspaces(await window.car.listWorkspaces())
+      const all = await window.car.listWorkspaces()
+      const next = [...new Set([...(expandedWs ?? all.map((x) => x.id)), w.id])]
+      setExpandedWs(next)
+      writeExpandedWs(next)
       await selectWorkspace(w)
     } catch (e) {
       fail(e)
@@ -432,7 +471,8 @@ export function App() {
     setPendings([])
     setBusy(false)
     try {
-      setSessions(await window.car.listSessions(w.id))
+      const list = await window.car.listSessions(w.id)
+      setSessionsByWs((prev) => ({ ...prev, [w.id]: list }))
       void refreshCaps(w.id)
       // S5（D-S5-4）：池端点分组数据面（car.config modelPool——随工作区切换刷新）
       const m = await window.car.modelsMeta(w.id)
@@ -444,12 +484,30 @@ export function App() {
     }
   }
 
-  const openSessionById = async (sessionId: string) => {
-    if (!selected) return
+  // v0.3-R1：工作区分组展开/收缩——收缩是纯展示态（不打断当前会话/选中）；
+  // 展开 = 补拉该工作区会话数据 + 未选中时选中（载入模型面/能力库）
+  const updateExpanded = (ids: string[]): void => {
+    setExpandedWs(ids)
+    writeExpandedWs(ids)
+  }
+  const toggleWs = async (w: WorkspaceInfo) => {
+    const base = expandedWs ?? workspaces.map((x) => x.id)
+    if (base.includes(w.id)) {
+      updateExpanded(base.filter((x) => x !== w.id))
+    } else {
+      updateExpanded([...base, w.id])
+      if (!sessionsByWs[w.id]) void refreshSessions(w.id).catch(fail)
+      if (selected?.id !== w.id) await selectWorkspace(w)
+    }
+  }
+
+  const openSessionById = async (ws: WorkspaceInfo, sessionId: string) => {
     setError(null)
     try {
-      const r = await window.car.openSession(selected.id, sessionId)
-      openRef.current = { wsId: selected.id, sessionId }
+      // v0.3-R1：会话可从任意展开的工作区分组点开——跨工作区先切换选中（数据/模型面随组载入）
+      if (selected?.id !== ws.id) await selectWorkspace(ws)
+      const r = await window.car.openSession(ws.id, sessionId)
+      openRef.current = { wsId: ws.id, sessionId }
       setView('chat')
       setOpenId(sessionId)
       setEvents(r.events)
@@ -469,7 +527,7 @@ export function App() {
       // S5（D-S5-3）：会话级思考档位 = 链上最近一次 model/set 的 reasoning 键
       const reEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'model/set' && typeof (e.payload as Record<string, unknown>)['reasoning'] === 'string')
       setSessionReasoning(reEvent ? ((reEvent.payload as Record<string, unknown>)['reasoning'] as 'off' | 'low' | 'medium' | 'high') : null)
-      setUsage(await window.car.sessionUsage(selected.id, sessionId))
+      setUsage(await window.car.sessionUsage(ws.id, sessionId))
       setPendings([])
       setBusy(false)
       // T-22（D-S6-7）：打开即恢复明示（禁静默补记——恢复报告随 open 返回，动作落 session/recover 叙事）
@@ -488,26 +546,25 @@ export function App() {
     }
   }
 
-  const newSession = async () => {
-    if (!selected) return
+  const newSession = async (ws: WorkspaceInfo) => {
     setError(null)
     try {
-      const info = await window.car.createSession(selected.id)
-      await refreshSessions(selected.id)
+      const info = await window.car.createSession(ws.id)
+      await refreshSessions(ws.id)
       setContextWindow(info.contextWindow ?? null)
       if (info.modelError) {
         setError(`会话已创建，但模型未装配（turn 发送将被拒绝）：${info.modelError}`)
       } else {
         setStatus('已新建会话（session-start 已落链）')
       }
-      // 新建即打开（S5：会话绑定模型恢复语义 + ★ 默认模型应用面）
-      await openSessionById(info.sessionId)
+      // 新建即打开（S5：会话绑定模型恢复语义 + ★ 默认模型应用面；非选中工作区先随组切换）
+      await openSessionById(ws, info.sessionId)
       // S5（D-S5-4）：★ 默认模型 → 新会话应用（偏好本身不落链；应用 = 会话级 model/set 落链可解释）
       // K5-D-R1：默认值必须仍在当前有效选项内（端点/池/内置）——过期遗留默认不再覆盖装配锚点
       const target = defaultModelValid ? defaultModel : null
       if (target && !info.modelError) {
         try {
-          await window.car.setSessionModel(selected.id, info.sessionId, target, undefined, sessionReasoning ?? undefined)
+          await window.car.setSessionModel(ws.id, info.sessionId, target, undefined, sessionReasoning ?? undefined)
           setSessionModel(target)
         } catch { /* 默认模型不可用 = 保留装配锚点，不阻塞 */ }
       }
@@ -516,30 +573,28 @@ export function App() {
     }
   }
 
-  const commitRename = async (sessionId: string) => {
-    if (!selected) return
+  const commitRename = async (ws: WorkspaceInfo, sessionId: string) => {
     setEditingId(null)
     const title = editTitle.trim()
     if (!title) return
     try {
-      await window.car.renameSession(selected.id, sessionId, title)
-      await refreshSessions(selected.id)
+      await window.car.renameSession(ws.id, sessionId, title)
+      await refreshSessions(ws.id)
     } catch (e) {
       fail(e)
     }
   }
 
-  const removeSession = async (sessionId: string) => {
-    if (!selected) return
+  const removeSession = async (ws: WorkspaceInfo, sessionId: string) => {
     setError(null)
     try {
-      await window.car.deleteSession(selected.id, sessionId)
+      await window.car.deleteSession(ws.id, sessionId)
       if (openId === sessionId) {
         setOpenId(null)
         setEvents([])
         setStream(null)
       }
-      await refreshSessions(selected.id)
+      await refreshSessions(ws.id)
       setStatus('会话已删除（delete 留痕，JSONL 保留）')
     } catch (e) {
       fail(e)
@@ -648,6 +703,9 @@ export function App() {
   }
 
   // ── 渲染 ──────────────────────────────────────────────────────────────
+  // v0.3-R1：派生——选中工作区的会话（审计页等视图数据源）+ 展开集合
+  const sessions = selected ? (sessionsByWs[selected.id] ?? []) : []
+  const expandedSet = new Set(expandedWs ?? workspaces.map((w) => w.id))
   const { items, routing } = buildChatItems(events, busy)
   // S5（D-S5-1）：最近的池降级/耗尽事件 → 顶部横幅（fail-visible，禁静默换模型）
   const lastRouting = routing.at(-1) ?? null
@@ -781,24 +839,90 @@ export function App() {
         </button>
         <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
 
-        {/* ── 段二：工作区/会话列表 ───────────────────────── */}
+        {/* ── 段二：工作区分组（v0.3-R1：点击展开/收缩，会话嵌套展示在各组下） ── */}
         <div className="sec">
           工作区
           <button className="mini" onClick={() => void pickWorkspace()}>
             ＋ 注册
           </button>
         </div>
-        <div className="list">
+        <div className="list grow">
           {workspaces.length === 0 && <div className="empty">尚未注册工作区</div>}
-          {workspaces.map((w) => (
-            <button key={w.id} className={`item ${selected?.id === w.id ? 'sel' : ''}`} onClick={() => void selectWorkspace(w)} title={w.path}>
-              <span className="ico">◆</span>
-              <span>
-                <b>{w.name}</b>
-                <small>{w.configPath ? 'config 已装载' : '无 car.config'}</small>
-              </span>
-            </button>
-          ))}
+          {workspaces.map((w) => {
+            const wsSessions = sessionsByWs[w.id] ?? []
+            const isOpen = expandedSet.has(w.id)
+            return (
+              <div key={w.id} className="ws-group">
+                <div className={`item ws-head ${selected?.id === w.id ? 'sel' : ''}`} title={w.path}>
+                  <button
+                    className={`ws-chev${isOpen ? ' open' : ''}`}
+                    title={isOpen ? '收起会话' : '展开会话'}
+                    onClick={() => void toggleWs(w)}
+                  >
+                    ▶
+                  </button>
+                  <button className="item-main" onClick={() => void toggleWs(w)}>
+                    <span className="ico">◆</span>
+                    <span>
+                      <b>{w.name}</b>
+                      <small>{w.configPath ? 'config 已装载' : '无 car.config'} · {wsSessions.length} 会话</small>
+                    </span>
+                  </button>
+                  <span className="ws-ops">
+                    <button className="mini" title="在此工作区新建会话" onClick={() => void newSession(w)}>
+                      ＋
+                    </button>
+                  </span>
+                </div>
+                {isOpen && (
+                  <div className="ws-sessions">
+                    {wsSessions.length === 0 && <div className="empty">此工作区暂无会话</div>}
+                    {wsSessions.map((s) => (
+                      <div key={s.sessionId} className={`item sess ${openId === s.sessionId ? 'sel' : ''}`}>
+                        {editingId === s.sessionId ? (
+                          <input
+                            className="rename"
+                            value={editTitle}
+                            autoFocus
+                            onChange={(e) => setEditTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void commitRename(w, s.sessionId)
+                              if (e.key === 'Escape') setEditingId(null)
+                            }}
+                          />
+                        ) : (
+                          <button className="item-main" onClick={() => void openSessionById(w, s.sessionId)}>
+                            <span className="ico">◇</span>
+                            <span>
+                              <b>{s.title}{s.parentSessionId ? <span className="subagent-badge" title={`子 Agent（父会话 ${s.parentSessionId}——独立链，授权门经父弹窗）`}>子 Agent</span> : null}</b>
+                              <small>
+                                {s.sessionId} · {s.eventCount} 事件
+                              </small>
+                            </span>
+                          </button>
+                        )}
+                        <span className="sess-ops">
+                          <button
+                            className="mini"
+                            title="重命名"
+                            onClick={() => {
+                              setEditingId(s.sessionId)
+                              setEditTitle(s.title)
+                            }}
+                          >
+                            ✎
+                          </button>
+                          <button className="mini danger" title="删除（留痕，JSONL 保留）" onClick={() => void removeSession(w, s.sessionId)}>
+                            ✕
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
         <div className="manual">
           <input
@@ -809,57 +933,6 @@ export function App() {
               if (e.key === 'Enter' && manualPath.trim()) void addByPath()
             }}
           />
-        </div>
-        <div className="sec">
-          会话
-          <button className="mini" disabled={!selected} onClick={() => void newSession()}>
-            ＋ 新建
-          </button>
-        </div>
-        <div className="list grow">
-          {!selected && <div className="empty">先选择工作区</div>}
-          {selected && sessions.length === 0 && <div className="empty">此工作区暂无会话</div>}
-          {sessions.map((s) => (
-            <div key={s.sessionId} className={`item sess ${openId === s.sessionId ? 'sel' : ''}`}>
-              {editingId === s.sessionId ? (
-                <input
-                  className="rename"
-                  value={editTitle}
-                  autoFocus
-                  onChange={(e) => setEditTitle(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void commitRename(s.sessionId)
-                    if (e.key === 'Escape') setEditingId(null)
-                  }}
-                />
-              ) : (
-                <button className="item-main" onClick={() => void openSessionById(s.sessionId)}>
-                  <span className="ico">◇</span>
-                  <span>
-                    <b>{s.title}{s.parentSessionId ? <span className="subagent-badge" title={`子 Agent（父会话 ${s.parentSessionId}——独立链，授权门经父弹窗）`}>子 Agent</span> : null}</b>
-                    <small>
-                      {s.sessionId} · {s.eventCount} 事件
-                    </small>
-                  </span>
-                </button>
-              )}
-              <span className="sess-ops">
-                <button
-                  className="mini"
-                  title="重命名"
-                  onClick={() => {
-                    setEditingId(s.sessionId)
-                    setEditTitle(s.title)
-                  }}
-                >
-                  ✎
-                </button>
-                <button className="mini danger" title="删除（留痕，JSONL 保留）" onClick={() => void removeSession(s.sessionId)}>
-                  ✕
-                </button>
-              </span>
-            </div>
-          ))}
         </div>
 
         {/* ── 段三：底部 ─────────────────────────────────── */}

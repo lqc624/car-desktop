@@ -506,6 +506,54 @@ body {
   font-family: inherit;
 }
 
+/* ===== v0.3-R1：侧栏工作区分组（点击展开/收缩，会话嵌套展示） ===== */
+.ws-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ws-head {
+  padding-right: 4px;
+}
+.ws-chev {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-3);
+  font-size: 9px;
+  line-height: 16px;
+  text-align: center;
+  padding: 0;
+  border-radius: 4px;
+  transition: transform 0.15s ease;
+}
+.ws-chev:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+.ws-chev.open {
+  transform: rotate(90deg);
+}
+.ws-ops {
+  display: none;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.ws-head:hover .ws-ops {
+  display: flex;
+}
+.ws-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 10px;
+  margin-left: 13px;
+  border-left: 1px solid var(--border);
+}
+
 /* ===== S3：导航 + 治理视图（审计/仪表盘/安全中心） ===== */
 .nav { display: flex; flex-direction: column; gap: 2px; padding: 0 6px 6px; }
 .nav .item { width: 100%; border: none; background: none; text-align: left; cursor: pointer; display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; color: inherit; }

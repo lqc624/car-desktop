@@ -7,130 +7,118 @@
  *  - 元数据（baseUrl/model/contextWindow）非密、同文件明文（doctor/装配读取面）；
  *  - 解密 Key 只在内存流转：main 读出 → credentials:key-push 推宿主（装配注入）——
  *    渲染层/宿主/日志均不持明文（值不打印红线）；
- *  - v0.1 = 单端点槽位（保存即覆盖；多端点登记随 v0.2 多端点切换批）。
+ *  - K6-ME（多端点）：v0.1 单端点槽位 → 多端点列表（一应用多 URL 各配各的模型）。
+ *    存储形态 v2 = { version:2, endpoints: [{id, baseUrl, adapterId, models, keyEncrypted}], activeId }。
+ *    **save 即激活**（沿用「保存并使用」语义）；宿主装配仍是单 active 端点（key-push 推谁谁生效）。
+ *    存量单对象档（v1）读侧惰性迁移为单端点列表；{cleared:true} 墓碑 = 空列表。
+ *    纯决策逻辑（归一/upsert/删除迁移/切换）在 credentials-store.ts——node:test 可测。
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { safeStorage } from 'electron'
-
-/** K5-F：端点模型条目（一个 URL 多个模型——Claude Code 式；首条 = 装配锚点模型） */
-export interface EndpointModelEntry {
-  id: string
-  contextWindow: number | null
-}
-
-export interface EndpointMeta {
-  baseUrl: string
-  /** K5-D（V2）：适配器族声明（openai-compat | anthropic）；读侧缺省 openai-compat（存量档兼容） */
-  adapterId: 'openai-compat' | 'anthropic'
-  /** K5-F：模型列表（≥1 条；首条 = 锚点）。存量单模型档（model/contextWindow 键）读侧折叠为单条列表 */
-  models: EndpointModelEntry[]
-}
-/** 保存入参（宽形态：models 的 contextWindow 可选——归一在 saveEndpoint 内完成） */
-export interface EndpointWithKey extends Omit<EndpointMeta, 'models'> {
-  /** K5-F：Key 可缺席 = 沿用已存加密 Key（仅更新模型列表/元数据——改模型不重输 Key） */
-  key?: string
-  models: Array<{ id: string; contextWindow?: number | null }>
-}
-
-interface Stored extends EndpointMeta {
-  keyEncrypted: string
-}
+import {
+  activateInStore,
+  normModels,
+  parseStoreFile,
+  removeFromStore,
+  toMeta,
+  upsertEndpoint,
+  type EndpointMetaWithId,
+  type EndpointWithKey,
+  type StoreFile,
+} from './credentials-store.ts'
 
 const file = (userDataDir: string): string => path.join(userDataDir, 'credentials.json')
 
-const normAdapter = (v: unknown): 'openai-compat' | 'anthropic' => (v === 'anthropic' ? 'anthropic' : 'openai-compat')
-
-/** 模型条目归一：字符串数组 / {id,contextWindow} 数组 / 旧单模型键 → 条目列表（去空去重保序） */
-function normModels(raw: unknown, legacyModel: unknown, legacyWindow: unknown): EndpointModelEntry[] {
-  const out: EndpointModelEntry[] = []
-  const push = (id: unknown, win: unknown) => {
-    if (typeof id !== 'string' || !id.trim()) return
-    if (out.some((m) => m.id === id.trim())) return
-    out.push({ id: id.trim(), contextWindow: typeof win === 'number' && win > 0 ? win : null })
-  }
-  if (Array.isArray(raw)) {
-    for (const e of raw) {
-      if (typeof e === 'string') push(e, undefined)
-      else if (e && typeof e === 'object') push((e as EndpointModelEntry).id, (e as EndpointModelEntry).contextWindow)
-    }
-  }
-  // 存量单模型档（K5-D 及以前形态）：model/contextWindow 顶层键 → 追加为条目
-  if (typeof legacyModel === 'string' && legacyModel.trim()) push(legacyModel, legacyWindow)
-  return out
-}
-
-function readStored(userDataDir: string): Stored | null {
-  if (!existsSync(file(userDataDir))) return null
+/** 读文件 + 归一（读路径零写盘——首次写操作才落 v2 形态） */
+function readStore(userDataDir: string): StoreFile {
+  if (!existsSync(file(userDataDir))) return { version: 2, endpoints: [], activeId: null }
   try {
-    const p = JSON.parse(readFileSync(file(userDataDir), 'utf8')) as Partial<Stored> & { model?: unknown; contextWindow?: unknown }
-    if (typeof p.baseUrl !== 'string' || typeof p.keyEncrypted !== 'string') return null
-    const models = normModels(p.models, p.model, p.contextWindow)
-    if (!models.length) return null
-    return {
-      baseUrl: p.baseUrl,
-      adapterId: normAdapter(p.adapterId),
-      models,
-      keyEncrypted: p.keyEncrypted,
-    }
+    return parseStoreFile(JSON.parse(readFileSync(file(userDataDir), 'utf8')))
   } catch {
-    return null
+    return { version: 2, endpoints: [], activeId: null }
   }
 }
 
-export function saveEndpoint(userDataDir: string, ep: EndpointWithKey, opts: { revealExistingKey?: () => string | null } = {}): EndpointMeta {
+/** 原子写（tmp + 同卷 rename——fileSecurityStore 同款） */
+function writeStore(userDataDir: string, store: StoreFile): void {
+  mkdirSync(userDataDir, { recursive: true })
+  const tmp = file(userDataDir) + '.tmp'
+  writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8')
+  renameSync(tmp, file(userDataDir))
+}
+
+export function saveEndpoint(userDataDir: string, ep: EndpointWithKey): EndpointMetaWithId {
   const models = normModels(ep.models, undefined, undefined)
   if (!models.length) {
     throw new Error('CAR-E-DESKTOP: 自定义端点至少需要一个模型（模型列表为空——Claude Code 式一 URL 多模型）')
   }
-  // Key 缺席 = 沿用已存加密 Key（模型列表更新不重输 Key）；无存量且无新 Key = fail-visible
+  const store = readStore(userDataDir)
+  // Key 决策：新 Key 加密落槽；无新 Key 沿用该槽存量（新增槽无存量 = fail-visible）
   let keyEncrypted: string
   if (typeof ep.key === 'string' && ep.key.trim()) {
     if (!safeStorage.isEncryptionAvailable()) {
       throw new Error('CAR-E-DESKTOP: safeStorage 不可用（OS keychain 缺席）——拒绝明文落盘（N-D1）；自定义端点保存失败')
     }
     keyEncrypted = safeStorage.encryptString(ep.key.trim()).toString('base64')
+  } else if (ep.endpointId) {
+    const target = store.endpoints.find((e) => e.id === ep.endpointId)
+    if (!target) throw new Error('CAR-E-DESKTOP: 端点槽不存在（已被删除？）——请刷新设置页重试')
+    keyEncrypted = target.keyEncrypted
   } else {
-    const existing = readStored(userDataDir)
-    if (!existing) {
-      throw new Error('CAR-E-DESKTOP: 首次保存端点必须提供 API Key（之后更新模型列表可留空沿用）')
-    }
-    keyEncrypted = existing.keyEncrypted
+    throw new Error('CAR-E-DESKTOP: 新增端点必须提供 API Key（更新已有端点可留空沿用该端点的 Key）')
   }
-  mkdirSync(userDataDir, { recursive: true })
-  const stored: Stored = {
-    baseUrl: ep.baseUrl,
-    adapterId: normAdapter(ep.adapterId),
-    models,
+  const { store: next, saved } = upsertEndpoint(
+    store,
+    { baseUrl: ep.baseUrl, adapterId: ep.adapterId, ...(ep.endpointId ? { endpointId: ep.endpointId } : {}), models },
     keyEncrypted,
-  }
-  const tmp = file(userDataDir) + '.tmp'
-  writeFileSync(tmp, JSON.stringify(stored, null, 2), 'utf8')
-  // 原子替换（同卷 rename——fileSecurityStore 同款）
-  renameSync(tmp, file(userDataDir))
-  return { baseUrl: ep.baseUrl, adapterId: normAdapter(ep.adapterId), models }
+  )
+  writeStore(userDataDir, next)
+  return toMeta(saved)
 }
 
-/** 端点元数据（无 Key——doctor/装配读取面） */
-export function loadEndpointMeta(userDataDir: string): EndpointMeta | null {
-  const s = readStored(userDataDir)
-  return s ? { baseUrl: s.baseUrl, adapterId: s.adapterId, models: s.models } : null
+/** 端点列表（无 Key——设置页列表面；activeId = 当前装配目标） */
+export function listEndpoints(userDataDir: string): { endpoints: EndpointMetaWithId[]; activeId: string | null } {
+  const store = readStore(userDataDir)
+  return { endpoints: store.endpoints.map(toMeta), activeId: store.activeId }
 }
 
-/** 解密 Key（内存流转——仅供 credentials:key-push 推宿主装配；禁打印禁落盘） */
-export function revealEndpointKey(userDataDir: string): string | null {
-  const s = readStored(userDataDir)
-  if (!s) return null
+/** active 端点元数据（无 Key——doctor/装配读取面；兼容 v0.x 单端点语义） */
+export function loadEndpointMeta(userDataDir: string): EndpointMetaWithId | null {
+  const store = readStore(userDataDir)
+  const active = store.endpoints.find((e) => e.id === store.activeId)
+  return active ? toMeta(active) : null
+}
+
+/** 解密 Key（内存流转——仅供 credentials:key-push 推宿主装配；禁打印禁落盘）。id 缺省 = active 槽 */
+export function revealEndpointKey(userDataDir: string, endpointId?: string): string | null {
+  const store = readStore(userDataDir)
+  const target = endpointId ? store.endpoints.find((e) => e.id === endpointId) : store.endpoints.find((e) => e.id === store.activeId)
+  if (!target) return null
   try {
-    return safeStorage.decryptString(Buffer.from(s.keyEncrypted, 'base64'))
+    return safeStorage.decryptString(Buffer.from(target.keyEncrypted, 'base64'))
   } catch {
     return null // 解密失败（换机/系统凭据变更）——视为未配置，引导重新保存
   }
 }
 
+/** 删除端点槽；删 active 时 activeId 自动迁移到剩余第一项（无剩余 = null）。返回删除是否发生 */
+export function removeEndpoint(userDataDir: string, endpointId: string): boolean {
+  const { store: next, removed } = removeFromStore(readStore(userDataDir), endpointId)
+  if (removed) writeStore(userDataDir, next)
+  return removed
+}
+
+/** 切换 active 端点（装配目标跟随——main 侧推该槽 key-push）。返回切后的 active meta */
+export function activateEndpoint(userDataDir: string, endpointId: string): EndpointMetaWithId {
+  const { store: next, active } = activateInStore(readStore(userDataDir), endpointId)
+  writeStore(userDataDir, next)
+  return toMeta(active)
+}
+
+/** 清空全部端点（装配回退 car.config llm） */
 export function clearEndpoint(userDataDir: string): void {
   if (existsSync(file(userDataDir))) {
-    mkdirSync(userDataDir, { recursive: true })
-    writeFileSync(file(userDataDir), JSON.stringify({ cleared: true }, null, 2), 'utf8')
+    writeStore(userDataDir, { version: 2, endpoints: [], activeId: null })
   }
 }

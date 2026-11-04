@@ -120,6 +120,12 @@ export const IpcChannel = {
   /** 端点元数据（baseUrl/model/contextWindow——不含 Key） */
   CredentialsMeta: 'credentials:meta',
   CredentialsClear: 'credentials:clear',
+  /** K6-ME（多端点）：端点列表（含各槽 id——设置页列表编辑面；不含 Key） */
+  CredentialsList: 'credentials:list',
+  /** K6-ME（多端点）：删除端点槽；删 active 时装配回退剩余第一项/清空 */
+  CredentialsRemove: 'credentials:remove',
+  /** K6-ME（多端点）：切换 active 端点（main 推该槽 key-push——新会话生效） */
+  CredentialsActivate: 'credentials:activate',
   // —— T-23（D-V03-4）：自动更新（main 侧能力——GitHub Releases 渠道，不入宿主 dispatch） ——
   /** 手动检查更新（dev/未打包形态 = disabled 状态推送，不触网） */
   UpdateCheck: 'update:check',
@@ -505,11 +511,22 @@ export interface EndpointModelDTO {
   contextWindow: number | null
 }
 export interface EndpointMetaDTO {
+  /** K6-ME：端点槽 id（宿主 models:meta 内存态不带 id——可选） */
+  id?: string
   baseUrl: string
   /** K5-D（V2）：适配器族声明；缺省 openai-compat（存量语义——anthropic 网关有了端点路线） */
   adapterId: 'openai-compat' | 'anthropic'
   /** K5-F：模型列表（≥1；首条 = 锚点）。旧端点面（单 model/contextWindow）读侧折叠为单条列表 */
   models: EndpointModelDTO[]
+}
+/** K6-ME：端点列表项（存储槽必有 id——与宿主 models:meta 内存态的无 id 形态区分） */
+export interface EndpointListItemDTO extends EndpointMetaDTO {
+  id: string
+}
+/** K6-ME：端点列表（设置页多端点编辑面——activeId 指向当前装配目标槽） */
+export interface EndpointListDTO {
+  endpoints: EndpointListItemDTO[]
+  activeId: string | null
 }
 /** S5（D-S5-4）：模型菜单池端点项（car.config modelPool——无池 = 空数组） */
 export interface PoolMemberDTO {
@@ -648,10 +665,13 @@ export interface IpcRequestMap {
   [IpcChannel.McpList]: { workspaceId: string }
   [IpcChannel.DoctorRun]: { workspaceId?: string }
   [IpcChannel.ModelsMeta]: { workspaceId?: string }
-  [IpcChannel.CredentialsKeyPush]: { baseUrl: string; model: string; key: string; contextWindow?: number } | { clear: true }
-  [IpcChannel.CredentialsSave]: { baseUrl: string; model: string; key: string; contextWindow?: number }
+  [IpcChannel.CredentialsKeyPush]: { baseUrl: string; model?: string; key: string; contextWindow?: number } | { clear: true }
+  [IpcChannel.CredentialsSave]: { endpointId?: string; baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }
   [IpcChannel.CredentialsMeta]: undefined
   [IpcChannel.CredentialsClear]: undefined
+  [IpcChannel.CredentialsList]: undefined
+  [IpcChannel.CredentialsRemove]: { id: string }
+  [IpcChannel.CredentialsActivate]: { id: string }
   [IpcChannel.UpdateCheck]: undefined
   [IpcChannel.UpdateDownload]: undefined
   [IpcChannel.UpdateInstall]: undefined
@@ -722,9 +742,15 @@ export interface CarBridge {
   // —— S4-S2：doctor / 模型元数据 / 自定义端点 ——
   doctorRun(workspaceId?: string): Promise<{ rows: DoctorRowDTO[] }>
   modelsMeta(workspaceId?: string): Promise<{ meta: Record<string, ModelMetaDTO>; endpoint: EndpointMetaDTO | null; pool: PoolMemberDTO[] }>
-  credentialsSave(payload: { baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }): Promise<EndpointMetaDTO>
+  credentialsSave(payload: { endpointId?: string; baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }): Promise<EndpointMetaDTO>
   credentialsMeta(): Promise<EndpointMetaDTO | null>
   credentialsClear(): Promise<unknown>
+  /** K6-ME（多端点）：列表（各槽 id/baseUrl/adapter/models——不含 Key）+ activeId */
+  credentialsList(): Promise<EndpointListDTO>
+  /** K6-ME（多端点）：删除槽；删 active 时装配跟随剩余第一项或清空 */
+  credentialsRemove(id: string): Promise<{ ok: boolean; activeId: string | null }>
+  /** K6-ME（多端点）：切换 active（main 推该槽 key-push——新会话生效）；返回切后 active meta */
+  credentialsActivate(id: string): Promise<EndpointMetaDTO>
   // —— S3-S4：审计报告 / 取证导出（审计页） ——
   auditReport(workspaceId: string, sessionId: string): Promise<AuditReport>
   auditExport(workspaceId: string, sessionId: string): Promise<AuditExportResult>

@@ -55,6 +55,10 @@ const bridge: CarBridge = {
   credentialsSave: (payload) => ipcRenderer.invoke(IpcChannel.CredentialsSave, payload),
   credentialsMeta: () => ipcRenderer.invoke(IpcChannel.CredentialsMeta),
   credentialsClear: () => ipcRenderer.invoke(IpcChannel.CredentialsClear),
+  // —— K6-ME（多端点）：列表 / 删槽 / 切换 active ——
+  credentialsList: () => ipcRenderer.invoke(IpcChannel.CredentialsList),
+  credentialsRemove: (id) => ipcRenderer.invoke(IpcChannel.CredentialsRemove, { id }),
+  credentialsActivate: (id) => ipcRenderer.invoke(IpcChannel.CredentialsActivate, { id }),
   setSessionModel: (workspaceId, sessionId, model, contextWindow, reasoningEffort) =>
     ipcRenderer.invoke(IpcChannel.SessionSetModel, {
       workspaceId,

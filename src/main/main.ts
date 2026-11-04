@@ -15,11 +15,14 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'electron'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
-import { clearEndpoint, loadEndpointMeta, revealEndpointKey, saveEndpoint } from './credentials.ts'
+import { activateEndpoint, clearEndpoint, listEndpoints, loadEndpointMeta, removeEndpoint, revealEndpointKey, saveEndpoint } from './credentials.ts'
 import { checkForUpdates, downloadUpdate, initUpdater, installUpdate, openReleases } from './updater.ts'
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 
 const HOST_TIMEOUT_MS = 20_000
+
+// 验收缝：CAR_USER_DATA_OVERRIDE = 隔离 userData（终验/多实例并行——正式形态不设置走默认档）
+if (process.env.CAR_USER_DATA_OVERRIDE) app.setPath('userData', process.env.CAR_USER_DATA_OVERRIDE)
 
 let hostProc: ReturnType<typeof utilityProcess.fork> | null = null
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
@@ -170,19 +173,21 @@ function registerIpc(): void {
   // —— S4-S2：自定义端点凭据（main 侧 safeStorage 独占——Key 解密后推宿主装配，渲染层不触达） ——
   ipcMain.handle(
     IpcChannel.CredentialsSave,
-    (_event, payload: { baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }) => {
+    (_event, payload: { endpointId?: string; baseUrl: string; key?: string; adapterId?: 'openai-compat' | 'anthropic'; models: Array<{ id: string; contextWindow?: number }> }) => {
       // K5-D（V2）：adapterId 枚举校验（fail-visible——非法值拒绝保存，禁静默按缺省落盘）
       if (payload.adapterId !== undefined && payload.adapterId !== 'openai-compat' && payload.adapterId !== 'anthropic') {
         throw new Error(`CAR-E-DESKTOP: adapterId 非法（${String(payload.adapterId)}）——合法值 openai-compat | anthropic`)
       }
+      // K6-ME：endpointId 有 = 更新该槽（Key 可留空沿用该槽存量）；无 = 新增槽（Key 必填）。save 即激活。
       const meta = saveEndpoint(app.getPath('userData'), {
         baseUrl: payload.baseUrl,
         adapterId: payload.adapterId ?? 'openai-compat',
         models: payload.models,
+        ...(payload.endpointId ? { endpointId: payload.endpointId } : {}),
         ...(payload.key ? { key: payload.key } : {}),
       })
-      // Key 内存流转：新 Key 或解密存量（K5-F 更新模型列表不重输 Key）后推宿主装配——不落盘不打印
-      const key = payload.key?.trim() || revealEndpointKey(app.getPath('userData'))
+      // Key 内存流转：新 Key 或解密该槽存量（K5-F 更新模型列表不重输 Key）后推宿主装配——不落盘不打印
+      const key = payload.key?.trim() || revealEndpointKey(app.getPath('userData'), meta.id)
       if (!key) throw new Error('CAR-E-DESKTOP: 端点 Key 缺席（存量解密失败？）——请重新输入 API Key 保存')
       return callHost(IpcChannel.CredentialsKeyPush, { ...meta, key }).then(() => meta)
     },
@@ -191,6 +196,27 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.CredentialsClear, () => {
     clearEndpoint(app.getPath('userData'))
     return callHost(IpcChannel.CredentialsKeyPush, { clear: true })
+  })
+  // —— K6-ME（多端点）：列表 / 删槽 / 切换 active（装配目标跟随——key-push 推谁谁生效） ——
+  ipcMain.handle(IpcChannel.CredentialsList, () => listEndpoints(app.getPath('userData')))
+  ipcMain.handle(IpcChannel.CredentialsRemove, (_event, payload: { id: string }) => {
+    const removed = removeEndpoint(app.getPath('userData'), payload.id)
+    // activeId 自动迁移：删的是 active → 推新 active 槽装配（或全空回退 clear）
+    const list = listEndpoints(app.getPath('userData'))
+    if (list.activeId) {
+      const key = revealEndpointKey(app.getPath('userData'), list.activeId)
+      const active = list.endpoints.find((e) => e.id === list.activeId)
+      if (key && active) return callHost(IpcChannel.CredentialsKeyPush, { ...active, key }).then(() => ({ ok: removed, activeId: list.activeId }))
+    } else if (removed) {
+      return callHost(IpcChannel.CredentialsKeyPush, { clear: true }).then(() => ({ ok: removed, activeId: null }))
+    }
+    return { ok: removed, activeId: list.activeId }
+  })
+  ipcMain.handle(IpcChannel.CredentialsActivate, (_event, payload: { id: string }) => {
+    const meta = activateEndpoint(app.getPath('userData'), payload.id)
+    const key = revealEndpointKey(app.getPath('userData'), meta.id)
+    if (!key) throw new Error('CAR-E-DESKTOP: 端点 Key 解密失败（换机/系统凭据变更？）——请编辑该端点重新输入 API Key 保存')
+    return callHost(IpcChannel.CredentialsKeyPush, { ...meta, key }).then(() => meta)
   })
   // —— S4-S2：doctor 全项 + 模型元数据（值不打印；元数据表 Key 永不出面——终验红条修补：main 路由漏注册） ——
   ipcMain.handle(IpcChannel.DoctorRun, (_event, payload: unknown) => callHost(IpcChannel.DoctorRun, payload))
