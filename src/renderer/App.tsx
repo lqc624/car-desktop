@@ -100,6 +100,9 @@ function activeCapabilityRefs(events: SessionEventDTO[]): string[] {
   return [...state.entries()].filter(([, on]) => on).map(([id]) => id)
 }
 
+/** @提及引用触发形态：输入以 @query 结尾（query 允许空——刚敲下 @ 即弹菜单） */
+const MENTION_RE = /@([a-zA-Z0-9_-]*)$/
+
 /** T-25：会话附件态（file/attach + file/attach-remove 链序收敛——与宿主同口径） */
 function activeAttachments(events: SessionEventDTO[]): AttachmentRowDTO[] {
   const state = new Map<string, AttachmentRowDTO>()
@@ -295,6 +298,8 @@ export function App() {
   const [caps, setCaps] = useState<CapabilityEntryDTO[]>([])
   const [showCapMenu, setShowCapMenu] = useState(false)
   const [capSearch, setCapSearch] = useState('')
+  // @提及引用：菜单由输入尾 @query 触发时置位——关闭/选中即剥离触发串（@ 非消息内容）
+  const [mentionArmed, setMentionArmed] = useState(false)
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
   const [showPolicy, setShowPolicy] = useState(false)
   const [windowSel, setWindowSel] = useState<number | null>(null) // S4-S3 受控版：null = 跟随元数据/端点
@@ -790,6 +795,39 @@ export function App() {
     }
   }
 
+  // ── @提及引用（T-24 增强）：输入尾 @query 触发引用菜单——与 ◆ 菜单同源数据面/同落链语义 ──
+  // 触发 = 输入以 @query 结尾（首尾打字主流形态；句中 @ 不触发，走 ◆ 菜单）；关闭即剥离触发串
+  // （@ 为交互触发器非消息内容）；选中 = 引用落链 + 剥离；@态 Enter = 收菜单不发送。
+  const onInputChange = (v: string): void => {
+    setInput(v)
+    const m = MENTION_RE.exec(v)
+    if (m && openId) {
+      setMentionArmed(true)
+      setShowCapMenu(true)
+      setCapSearch(m[1])
+    } else if (mentionArmed && showCapMenu) {
+      setMentionArmed(false)
+      setShowCapMenu(false)
+      setCapSearch('')
+    }
+  }
+  const stripMention = (): void => {
+    setInput((v) => v.replace(MENTION_RE, ''))
+    setMentionArmed(false)
+    setCapSearch('')
+  }
+  const closeCapMenu = (): void => {
+    setShowCapMenu(false)
+    if (mentionArmed) stripMention()
+    else setCapSearch('')
+  }
+  const pickCap = (id: string): void => {
+    void toggleRef(id)
+    setShowCapMenu(false)
+    if (mentionArmed) stripMention()
+    else setCapSearch('')
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -1221,11 +1259,17 @@ export function App() {
             {/* ── S5：输入区右下聚类 [上下文圆环][模型][发送]（原型 v0.5 同构，弹层向上） ── */}
             <div className="chat-input">
               <input
-                placeholder={busy ? '引导发出：当前 turn 收口后自动续跑（不打断）…' : '给 Agent 布置任务…（Enter 发送）'}
+                placeholder={busy ? '引导发出：当前 turn 收口后自动续跑（不打断）…' : '给 Agent 布置任务…（Enter 发送 · @ 引用技能）'}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => onInputChange(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && input.trim()) void send()
+                  if (e.key === 'Enter' && input.trim()) {
+                    if (showCapMenu && mentionArmed) {
+                      closeCapMenu() // @ 触发态 Enter = 收菜单剥离触发串（不把 @query 发进消息）
+                      return
+                    }
+                    void send()
+                  }
                 }}
               />
               <div className="input-cluster">
@@ -1238,7 +1282,11 @@ export function App() {
                 )}
                 {openId && (
                   <div className="cluster-item" style={{ position: 'relative' }}>
-                    <button className="pill" onClick={() => setShowCapMenu((v) => !v)} title="引用能力（专家/技能/知识包——prompt 注入，选中即落链）">
+                    <button
+                      className="pill"
+                      onClick={() => (showCapMenu ? closeCapMenu() : (setMentionArmed(false), setShowCapMenu(true)))}
+                      title="引用能力（专家/技能/知识包——prompt 注入，选中即落链；输入 @ 亦可触发）"
+                    >
                       ◆ 引用{activeRefs.length > 0 ? ` · ${activeRefs.length}` : ''}
                     </button>
                     {showCapMenu && (
@@ -1250,12 +1298,12 @@ export function App() {
                           autoFocus
                           onChange={(e) => setCapSearch(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Escape') setShowCapMenu(false)
+                            if (e.key === 'Escape') closeCapMenu()
                           }}
                         />
                         {filteredCaps.length === 0 && <div className="empty">无条目（能力库视图可新建）</div>}
                         {filteredCaps.map((c) => (
-                          <button key={c.id} className="mm-pick" onClick={() => void toggleRef(c.id)}>
+                          <button key={c.id} className="mm-pick" onClick={() => pickCap(c.id)}>
                             <span className="mm-check">{activeRefs.includes(c.id) ? '✓' : ''}</span>
                             <span className="mm-name">
                               {c.name}

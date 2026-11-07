@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CapabilityEntryDTO, CapabilityKindDTO, CapabilityStatusDTO, WorkspaceInfo } from '../../shared/ipc-contract'
+import type { CapabilityEntryDTO, CapabilityImportResultRow, CapabilityKindDTO, CapabilityStatusDTO, WorkspaceInfo } from '../../shared/ipc-contract'
 
 /**
  * T-24 能力库视图（D2-S1 / PRD C-4 React 原生重写——D-C7 iframe 方案关闭）
@@ -50,6 +50,8 @@ export function CapabilityView({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [form, setForm] = useState<FormState | null>(null)
   const [editId, setEditId] = useState<string | null>(null)
+  // SKILL.md 导入互认：逐文件结果（fail-visible——成功/失败分行呈现，禁静默吞）
+  const [importResult, setImportResult] = useState<CapabilityImportResultRow[] | null>(null)
 
   const load = useCallback(async () => {
     if (!selected) return
@@ -72,6 +74,7 @@ export function CapabilityView({
     setSelectedId(null)
     setForm(null)
     setEditId(null)
+    setImportResult(null)
     if (selected) void loadRef.current()
   }, [selected])
 
@@ -132,6 +135,20 @@ export function CapabilityView({
     }
   }
 
+  // SKILL.md 导入互认：选择器（main 侧）→ 宿主逐文件解析/写盘/落链 → 逐文件结果呈现
+  const importSkills = async (): Promise<void> => {
+    if (!selected || !openId) return
+    try {
+      const paths = await window.car.capabilityImportPick()
+      if (!paths) return
+      const r = await window.car.capabilityImport(selected.id, openId, paths)
+      setImportResult(r.results)
+      await load()
+    } catch (e) {
+      onFail(e)
+    }
+  }
+
   if (!selected) return <div className="view-empty">先选择工作区</div>
 
   return (
@@ -139,6 +156,9 @@ export function CapabilityView({
       <div className="cap-tree">
         <div className="cap-title">
           能力库
+          <button className="mini" disabled={!openId} onClick={() => void importSkills()} title="从 SKILL.md 导入（frontmatter name/description/tags 自动映射，正文 = spec；id 冲突自动 -2/-3 后缀）">
+            ⇪ 导入
+          </button>
           <button className="mini" disabled={!openId} onClick={startCreate} title="新建条目（CRUD 落链需活跃会话）">
             ＋ 新建
           </button>
@@ -160,6 +180,21 @@ export function CapabilityView({
             条目载入跳过：{w}
           </div>
         ))}
+        {importResult && (
+          <div className="cap-import-result">
+            {importResult.map((r, i) => (
+              <div key={`${r.file}-${i}`} className={r.ok ? 'dim' : 'error'} role={r.ok ? undefined : 'alert'}>
+                {r.ok ? (
+                  <>
+                    ⇪ 已导入 <b>{r.name}</b>（{r.id} · {r.chars} 字符 ← {r.file}）
+                  </>
+                ) : (
+                  <>导入失败：{r.error}</>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {filtered.length === 0 && <div className="empty">暂无条目</div>}
         {filtered.map((e) => (
           <button key={e.id} className={`item ${selectedId === e.id ? 'sel' : ''}`} onClick={() => setSelectedId(e.id)}>

@@ -66,6 +66,10 @@ export const IpcChannel = {
   CapabilityRefAdd: 'capability:ref-add',
   /** 撤销引用（remove 补偿事件落链） */
   CapabilityRefRemove: 'capability:ref-remove',
+  /** SKILL.md 导入：系统文件选择器（多选 .md；用户取消 = null；main 侧 dialog，同 AttachmentPick 先例） */
+  CapabilityImportPick: 'capability:import-pick',
+  /** SKILL.md 导入：逐文件解析→写盘→capability/write 叙事（imported:true）；逐文件结果 fail-visible */
+  CapabilityImport: 'capability:import',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -381,6 +385,20 @@ export interface CapabilityEditPatch {
   tags?: string[]
 }
 
+/** SKILL.md 导入逐文件结果（fail-visible——每文件独立 ok/error，禁静默吞） */
+export interface CapabilityImportResultRow {
+  file: string
+  ok: boolean
+  id?: string
+  name?: string
+  chars?: number
+  error?: string
+}
+
+export interface CapabilityImportResult {
+  results: CapabilityImportResultRow[]
+}
+
 /** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
 export interface AttachmentRowDTO {
   path: string
@@ -646,6 +664,8 @@ export interface IpcRequestMap {
   [IpcChannel.CapabilityDelete]: { workspaceId: string; sessionId: string; id: string }
   [IpcChannel.CapabilityRefAdd]: { workspaceId: string; sessionId: string; refId: string }
   [IpcChannel.CapabilityRefRemove]: { workspaceId: string; sessionId: string; refId: string }
+  [IpcChannel.CapabilityImportPick]: undefined
+  [IpcChannel.CapabilityImport]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -719,6 +739,11 @@ export interface CarBridge {
   /** 引用/撤销（选中即落链；撤销 = 补偿事件） */
   capabilityRefAdd(workspaceId: string, sessionId: string, refId: string): Promise<void>
   capabilityRefRemove(workspaceId: string, sessionId: string, refId: string): Promise<void>
+  // —— SKILL.md 导入互认（能力库视图导入入口） ——
+  /** 系统文件选择器（多选 .md；用户取消 = null） */
+  capabilityImportPick(): Promise<string[] | null>
+  /** 逐文件解析→写盘→capability/write 叙事（imported:true）；逐文件结果 fail-visible */
+  capabilityImport(workspaceId: string, sessionId: string, paths: string[]): Promise<CapabilityImportResult>
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   attachmentPick(): Promise<string[] | null>

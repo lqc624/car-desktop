@@ -144,6 +144,8 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.CapabilityDelete, (_event, payload: unknown) => callHost(IpcChannel.CapabilityDelete, payload))
   ipcMain.handle(IpcChannel.CapabilityRefAdd, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefAdd, payload))
   ipcMain.handle(IpcChannel.CapabilityRefRemove, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefRemove, payload))
+  // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链） ——
+  ipcMain.handle(IpcChannel.CapabilityImport, (_event, payload: unknown) => callHost(IpcChannel.CapabilityImport, payload))
   ipcMain.handle(IpcChannel.AttachmentAdd, (_event, payload: unknown) => callHost(IpcChannel.AttachmentAdd, payload))
   ipcMain.handle(IpcChannel.AttachmentRemove, (_event, payload: unknown) => callHost(IpcChannel.AttachmentRemove, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——
@@ -236,6 +238,17 @@ function registerIpc(): void {
     const picked = await dialog.showOpenDialog(win!, {
       title: '选择附件（文本类 ≤200KB 全文注入；其余路径登记，模型经 fs_read 按需读取）',
       properties: ['openFile', 'multiSelections'],
+    })
+    if (picked.canceled || picked.filePaths.length === 0) return null
+    return picked.filePaths
+  })
+  // —— SKILL.md 导入选择器（多选 .md——同 AttachmentPick 先例，选中后转宿主解析写盘落链） ——
+  ipcMain.handle(IpcChannel.CapabilityImportPick, async (event): Promise<string[] | null> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const picked = await dialog.showOpenDialog(win!, {
+      title: '选择 SKILL.md（frontmatter name/description/tags 自动映射，正文 = 规范 spec）',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Markdown 技能文档', extensions: ['md'] }],
     })
     if (picked.canceled || picked.filePaths.length === 0) return null
     return picked.filePaths

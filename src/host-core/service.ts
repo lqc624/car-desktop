@@ -7,7 +7,7 @@
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadSessionLog, MemoryStore, pendingSteerTurns } from '@lqc123qwe/car-runtime'
 import {
@@ -36,7 +36,8 @@ import {
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
 import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
-import { listCapabilities, writeCapability, editCapability, deleteCapability, type CapabilityEntry } from './capabilities.ts'
+import { listCapabilities, writeCapability, editCapability, deleteCapability, loadCapability, type CapabilityEntry } from './capabilities.ts'
+import { skillMdToCapability } from './skill-import.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
 import { runDoctor } from './doctor.ts'
@@ -789,6 +790,33 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         handle.capabilityRefRemove(requireString(p.refId, 'refId'))
         return { ok: true }
+      }
+      // ── SKILL.md 导入互认（pick = main 侧 dialog 误入守卫；import = 逐文件解析→写盘→叙事） ──
+      case IpcChannel.CapabilityImportPick:
+        throw new Error('CAR-E-DESKTOP: capability:import-pick 由 main 侧处理（契约通道误入宿主 dispatch）')
+      case IpcChannel.CapabilityImport: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        if (!Array.isArray(p.paths) || p.paths.length === 0) {
+          throw new Error('CAR-E-DESKTOP: capability:import 缺少 paths（string[]）')
+        }
+        if (p.paths.length > 50) throw new Error(`CAR-E-DESKTOP: 单次导入上限 50 个文件（当前 ${p.paths.length}）`)
+        const results = p.paths.map((raw: unknown): { file: string; ok: boolean; id?: string; name?: string; chars?: number; error?: string } => {
+          const file = String(raw)
+          try {
+            const content = readFileSync(file, 'utf8')
+            const cand = skillMdToCapability(content, file.split(/[\\/]/).pop() ?? file)
+            if (!cand.ok) return { file, ok: false, error: cand.error }
+            // 冲突消解：id 已存在 → -2/-3 后缀（导入不覆盖既有条目——可预测且结果行可见）
+            let id = cand.id
+            for (let n = 2; loadCapability(handle.workspaceRoot, id) !== null; n++) id = `${cand.id}-${n}`
+            const entry = writeCapability(handle.workspaceRoot, { ...cand, id })
+            handle.appendNarrative('capability/write', { id: entry.id, kind: entry.kind, name: entry.name, imported: true, source: file })
+            return { file, ok: true, id: entry.id, name: entry.name, chars: entry.spec.length }
+          } catch (err) {
+            return { file, ok: false, error: err instanceof Error ? err.message : String(err) }
+          }
+        })
+        return { results }
       }
       // ── T-25（D2-S2 / PRD §4）：附件面（file/attach 恒落链；选择器属 main 侧能力） ──
       case IpcChannel.AttachmentPick:

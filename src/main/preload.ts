@@ -83,6 +83,9 @@ const bridge: CarBridge = {
   capabilityDelete: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.CapabilityDelete, { workspaceId, sessionId, id }),
   capabilityRefAdd: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefAdd, { workspaceId, sessionId, refId }),
   capabilityRefRemove: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefRemove, { workspaceId, sessionId, refId }),
+  // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链） ——
+  capabilityImportPick: () => ipcRenderer.invoke(IpcChannel.CapabilityImportPick),
+  capabilityImport: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.CapabilityImport, { workspaceId, sessionId, paths }),
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),
