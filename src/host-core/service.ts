@@ -222,7 +222,10 @@ export function createHostService(opts: HostServiceOptions): HostService {
           signal: handle.abort,
           currentTurnId: () => handle.currentTurnId(),
           currentModel: () => handle.sessionModel ?? '',
-          toolDefs: mergeToolSources(builtinTools(root, fileSecurity), extraTools),
+          // 工具可见面 = handle.tools 活引用（K2 编排三工具经 attachSubagents 后置 push 进同一数组——
+          // R-DRILL-1 修复：此前此处固化 builtin+extra 快照，真模型看不见 subagent_spawn/join/kill，
+          // 执行注册表（runTurnFor 用 this.tools）与模型可见面分叉——演练实链暴露，mock 网关时代不可达）
+          toolDefs: handle.tools,
           // S5（D-S5-3）：会话级思考档位实时读（model/set 即时生效）
           currentReasoning: () => handle.sessionReasoning,
           // 1.19.0：流式增量推送面（渲染提示——不落链，事实本体在 JSONL；assistant 事件到达即收口）

@@ -155,7 +155,9 @@ export class SessionHandle {
   private readonly fileSecurity: FileSecurityEngine | null
   private readonly mcpToolUrl: Map<string, string> | null
   private readonly grants = new Set<string>()
-  private readonly tools: HostToolDef[]
+  /** 模型可见工具面（活引用）：attachRuntimeModel 以此为 toolDefs——attachSubagents 后置 push
+   *  对每请求可见（R-DRILL-1：此前生产快照分叉致真模型看不见编排三工具） */
+  readonly tools: HostToolDef[]
   private modelFn: HostModelFn | null = null
   private readonly waiters = new Map<string, (d: AuthzResponse) => void>()
   private turnSeq = 0
