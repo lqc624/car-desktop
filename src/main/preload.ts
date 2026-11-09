@@ -90,6 +90,30 @@ const bridge: CarBridge = {
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),
   attachmentRemove: (workspaceId, sessionId, path) => ipcRenderer.invoke(IpcChannel.AttachmentRemove, { workspaceId, sessionId, path }),
+  // —— T-FV：文件查看器（预览/落链 = 宿主；shell 打开 = main 侧，可执行扩展拒绝面） ——
+  filePreview: (workspaceId, sessionId, path) => ipcRenderer.invoke(IpcChannel.FilePreview, { workspaceId, sessionId, path }),
+  fileOpen: (workspaceId, sessionId, path, how) => ipcRenderer.invoke(IpcChannel.FileOpen, { workspaceId, sessionId, path, how }),
+  fileShellOpen: (path, how) => ipcRenderer.invoke(IpcChannel.FileShellOpen, { path, how }),
+  // —— T-FV-2：任务控制面（停子代理 / bash 输出尾部 / 停 bash——宿主动作不过授权门） ——
+  killSubagent: (workspaceId, sessionId, subagentId) => ipcRenderer.invoke(IpcChannel.SubagentKill, { workspaceId, sessionId, subagentId }),
+  bashOutput: (workspaceId, sessionId, taskId) => ipcRenderer.invoke(IpcChannel.BashOutput, { workspaceId, sessionId, taskId }),
+  bashKill: (workspaceId, sessionId, taskId) => ipcRenderer.invoke(IpcChannel.BashKill, { workspaceId, sessionId, taskId }),
+  // —— T-ME：记忆进化（LLM 直调核——批准落盘走内核 MemoryStore；模式 = 端侧偏好同步） ——
+  memoryEvolve: (workspaceId, sessionId, auto) =>
+    ipcRenderer.invoke(IpcChannel.MemoryEvolve, { workspaceId, sessionId, ...(auto !== undefined ? { auto } : {}) }),
+  memoryEvolveDecide: (workspaceId, sessionId, runId, cid, approve, feedback) =>
+    ipcRenderer.invoke(IpcChannel.MemoryEvolveDecide, { workspaceId, sessionId, runId, cid, approve, ...(feedback !== undefined ? { feedback } : {}) }),
+  memoryEvolveMode: (workspaceId, mode) => ipcRenderer.invoke(IpcChannel.MemoryEvolveMode, { workspaceId, mode }),
+  // —— T-MP：个性化设置（端侧偏好——应用于新会话快照） ——
+  personalizationGet: () => ipcRenderer.invoke(IpcChannel.PersonalizationGet),
+  personalizationSet: (patch) => ipcRenderer.invoke(IpcChannel.PersonalizationSet, patch),
+  // —— T-RW：RepoWiki（生成进度经 onRepoWiki 订阅——workspaceId 过滤） ——
+  repoWikiGet: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiGet, { workspaceId }),
+  repoWikiGenerate: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.RepoWikiGenerate, { workspaceId, sessionId }),
+  repoWikiStop: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiStop, { workspaceId }),
+  onRepoWiki: (cb) => subscribe(IpcPushTopic.RepoWiki, cb),
+  // —— T-DY：部署视图数据（main 侧真拉取） ——
+  deployInfo: () => ipcRenderer.invoke(IpcChannel.DeployInfo),
   onSessionEvent: (cb) => subscribe(IpcPushTopic.SessionEvent, cb),
   // 1.19.0：流式增量（渲染提示面——不落链，assistant 事件到达即收口清零）
   onSessionDelta: (cb) => subscribe(IpcPushTopic.SessionDelta, cb),

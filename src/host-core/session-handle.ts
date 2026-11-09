@@ -42,6 +42,8 @@ import type { BackupStore } from './backupStore.ts'
 import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 import type { SubagentManager } from './subagent.ts'
+import type { BashTaskManager, BashOutputResult } from './bashTasks.ts'
+import { buildPersonaText, type PersonalizationState } from '../shared/personalization.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
 
@@ -113,6 +115,10 @@ export interface SessionHandleDeps {
   memoryBudgetChars?: number
   /** T-24（PRD C-1）：能力库读取面（service 注入 workspaceRoot 闭包；缺省 = 引用面不可用） */
   loadCapabilities?: () => CapabilityEntry[]
+  /** T-ME：回合收口回调（runTurn 正常收口后触发——auto 进化的空闲点检查；缺省 = 无操作） */
+  onTurnClosed?: () => void
+  /** T-MP：个性化设置面（service 注入 store.state 闭包——创建时快照；缺省 = 无指令） */
+  personalization?: () => PersonalizationState
 }
 
 interface HandleInit {
@@ -164,6 +170,11 @@ export class SessionHandle {
   private currentTurnIdValue = ''
   private readonly deps: SessionHandleDeps
   private subagents: SubagentManager | null = null
+  /** T-FV-2：后台 bash 任务面（attachBashTasks 接线——工具入注册表 + 级联 + 孤儿收割） */
+  private bashTasks: BashTaskManager | null = null
+  /** T-MP：个性化指令快照（createFresh 取 store / resume 从链恢复——改设置不影响已开会话） */
+  private persona = ''
+  private personaToneStyle = ''
 
   private constructor(init: HandleInit, opts: { log?: SessionLog; turnSeq?: number } = {}) {
     this.sessionId = init.sessionId
@@ -200,6 +211,11 @@ export class SessionHandle {
   static createFresh(init: HandleInit): SessionHandle {
     const h = new SessionHandle(init)
     h.log.append('runtime', 'system', 'session', { type: 'session-start', workspaceId: init.workspaceId })
+    // T-MP：个性化快照（新会话语义——改设置不影响本会话；注入挂 sendTurn 压缩块之后，
+    // 保证「本回合若触发压缩」时注入事件落在压缩边界之后不被折叠）
+    const p = init.deps.personalization?.() ?? { toneStyle: 'default', customPrompt: '' }
+    h.persona = buildPersonaText(p)
+    h.personaToneStyle = p.toneStyle
     return h
   }
 
@@ -219,6 +235,14 @@ export class SessionHandle {
       if (m) maxTurn = Math.max(maxTurn, Number(m[1]))
     }
     const h = new SessionHandle(init, { log, turnSeq: maxTurn })
+    // T-MP：resume 从链恢复个性化快照（不读 store——防 resume 泄漏新设置；旧会话无注入 = 无指令）
+    for (const e of log.events) {
+      if (e.kind !== 'system') continue
+      if ((e.meta as Record<string, unknown> | null)?.['injection'] === 'persona') {
+        h.persona = String(e.payload ?? '')
+        h.personaToneStyle = String((e.meta as Record<string, unknown>)['toneStyle'] ?? '')
+      }
+    }
     const report = recoverInterrupted(h.log)
     // T-22：补记报告出面（service 层 open 路径据此落 session/recover 叙事 + 渲染层明示——禁静默补记）
     h.recoveryReport =
@@ -243,6 +267,39 @@ export class SessionHandle {
   attachSubagents(m: SubagentManager): void {
     this.subagents = m
     this.tools.push(...m.tools())
+  }
+
+  /**
+   * T-FV-2：后台 bash 任务面接线——bash_run 工具入父会话工具注册表（本 turn 起模型可见），
+   * 接线即孤儿收割（重启后链上无收口的 bash/start 补 stopped——K2 补记先例）。
+   * 级联挂点 = abortTurn（杀父 → 全部运行中任务树杀）与 close（收口即级联）。
+   */
+  attachBashTasks(m: BashTaskManager): void {
+    this.bashTasks = m
+    this.tools.push(...m.tools())
+    m.reapOrphans()
+  }
+
+  /** T-FV-2：用户/渲染层任务控制面（宿主动作不过授权门——与 turn:abort 同口径；manager 落链） */
+  bashRun(command: string, cwd?: string): { ok: true; taskId: string; state: 'running'; note: string } {
+    if (!this.bashTasks) throw new Error('CAR-E-DESKTOP: 后台任务面未挂载（会话未打开或无运行时）')
+    return this.bashTasks.run(command, cwd)
+  }
+
+  bashOutput(taskId: string): BashOutputResult {
+    if (!this.bashTasks) throw new Error('CAR-E-DESKTOP: 后台任务面未挂载（会话未打开或无运行时）')
+    return this.bashTasks.output(taskId)
+  }
+
+  bashKill(taskId: string): { ok: true; taskId: string; note: string } {
+    if (!this.bashTasks) throw new Error('CAR-E-DESKTOP: 后台任务面未挂载（会话未打开或无运行时）')
+    return this.bashTasks.kill(taskId, 'user')
+  }
+
+  /** T-FV-2：用户主动停子代理（subagent:kill IPC——manager.kill 自落 subagent/kill 链，渲染叙事行/行态现成消费者） */
+  killSubagent(subagentId: string): { ok: true; subagentId: string; note: string } {
+    if (!this.subagents) throw new Error('CAR-E-DESKTOP: 子 Agent 编排未挂载（会话未打开或无运行时）')
+    return this.subagents.kill(subagentId)
   }
 
   currentTurnId(): string {
@@ -361,6 +418,15 @@ export class SessionHandle {
         console.error('[host] 自动压缩跳过（无可折叠区间）：', err instanceof Error ? err.message : err)
       }
     }
+    // T-MP：个性化指令注入（置于压缩块之后——本回合若触发压缩，注入事件落在边界之后不被折叠；
+    // 不受 opts.memoryInject 门控——persona 是常驻指令不是记忆预算面）
+    if (this.persona && this.chainNeedsPersonaInjection()) {
+      this.log.append('user', 'system', 'system', this.persona, {
+        injection: 'persona',
+        toneStyle: this.personaToneStyle,
+        chars: this.persona.length,
+      })
+    }
     const turnId = 'T' + String(++this.turnSeq)
     this.currentTurnIdValue = turnId
     this.log.append('user', 'user', turnId, text)
@@ -371,6 +437,22 @@ export class SessionHandle {
   /** 链上是否已有记忆注入行（meta.injection==='memory' 的 system 事件） */
   chainHasMemoryInjection(): boolean {
     return this.log.events.some((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+  }
+
+  /**
+   * T-MP：persona 注入需求判定——链上无 persona 注入（首轮），或最后一条 persona 注入早于
+   * 最后一条 compact 事件（压缩折叠后重注一次；内核折叠下界 = 首个 system.seq+1，persona
+   * 非首条 system 会被折叠——重注保持风格跨压缩存活）。
+   */
+  private chainNeedsPersonaInjection(): boolean {
+    let lastPersona = -1
+    let lastCompact = -1
+    for (const e of this.log.events) {
+      if (e.kind !== 'system') continue
+      if ((e.meta as Record<string, unknown> | null)?.['injection'] === 'persona') lastPersona = e.seq
+      if ((e.payload as Record<string, unknown> | null)?.['type'] === 'compact') lastCompact = e.seq
+    }
+    return lastPersona < 0 || (lastCompact >= 0 && lastPersona < lastCompact)
   }
 
   // ── T-24（PRD C-2/C-5）：能力引用面（引用=prompt 注入，EventKind 零新增） ──
@@ -561,6 +643,12 @@ export class SessionHandle {
     }).then(
       () => {
         this.busy = false
+        // T-ME：回合收口 = 宿主空闲点（auto 进化检查挂这里——引导续跑的每条 turn 收口同此）
+        try {
+          this.deps.onTurnClosed?.()
+        } catch (err) {
+          console.error('[host] onTurnClosed 回调异常：', err instanceof Error ? err.message : err)
+        }
         // S6（D-S6-3）：turn 收口后 FIFO 续跑——扫描引导排队逐条消费（引导 turn 的 user 事件
         // 已在链上，消费 = 以其自身 turnId 开 runTurn，模型读 sessionModel 现值 = 末次 model/set）
         void this.drainPending()
@@ -611,6 +699,8 @@ export class SessionHandle {
     this.abort.aborted = true
     // T-K2-4：杀父级联——全部活跃子链 abort（内核以 aborted 收口）+ 在途子链人审即时取消
     this.subagents?.abortAll()
+    // T-FV-2：bash 后台任务级联（turn 中断 = 全部运行中任务树杀）
+    this.bashTasks?.abortAll()
   }
 
   /**
@@ -795,6 +885,8 @@ export class SessionHandle {
     this.abort.aborted = true
     // T-K2-4：级联收口 = abort 全部子链 + 子链 store 关闭（与父 store 关闭同点）
     this.subagents?.closeAll()
+    // T-FV-2：bash 后台任务级联收口
+    this.bashTasks?.closeAll()
     this.store.close()
   }
 

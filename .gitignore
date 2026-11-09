@@ -9,4 +9,5 @@ release-*/
 .verify-s5/
 .verify-s6/
 .verify-sbg/
+.verify-1109/
 .tmp-verify-si/

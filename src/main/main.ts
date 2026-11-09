@@ -15,9 +15,12 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'electron'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { activateEndpoint, clearEndpoint, listEndpoints, loadEndpointMeta, removeEndpoint, revealEndpointKey, saveEndpoint } from './credentials.ts'
 import { checkForUpdates, downloadUpdate, initUpdater, installUpdate, openReleases } from './updater.ts'
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
+import { isExecutableOpenBlocked } from '../shared/file-preview.ts'
+import { fetchReleases } from './deployInfo.ts'
 
 const HOST_TIMEOUT_MS = 20_000
 
@@ -162,6 +165,51 @@ function registerIpc(): void {
     const err = await shell.openPath(dir)
     return err ? { ok: false, error: err } : { ok: true }
   })
+  // —— T-FV：文件查看器（预览/落链走宿主；shell 打开 = main 侧能力，同 backup:open-dir 先例） ——
+  ipcMain.handle(IpcChannel.FilePreview, (_event, payload: unknown) => callHost(IpcChannel.FilePreview, payload))
+  ipcMain.handle(IpcChannel.FileOpen, (_event, payload: unknown) => callHost(IpcChannel.FileOpen, payload))
+  ipcMain.handle(IpcChannel.FileShellOpen, async (_event, payload: unknown) => {
+    const p = (payload ?? {}) as { path?: unknown; how?: unknown }
+    const target = typeof p.path === 'string' ? p.path : ''
+    if (!target) return { ok: false, error: 'CAR-E-DESKTOP: file:shell-open 缺少 path（string）' }
+    if (isExecutableOpenBlocked(target)) {
+      return { ok: false, error: `CAR-E-DESKTOP: 可执行/脚本文件不支持打开（仅预览——${target.split(/[\\/]/).pop()}）` }
+    }
+    if (p.how === 'browser') {
+      try {
+        await shell.openExternal(pathToFileURL(target).href)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+    const err = await shell.openPath(target)
+    return err ? { ok: false, error: err } : { ok: true }
+  })
+  // —— T-FV-2：任务控制面（宿主动作不过授权门，turn:abort 同口径——宿主 dispatch 直消化） ——
+  ipcMain.handle(IpcChannel.SubagentKill, (_event, payload: unknown) => callHost(IpcChannel.SubagentKill, payload))
+  ipcMain.handle(IpcChannel.BashOutput, (_event, payload: unknown) => callHost(IpcChannel.BashOutput, payload))
+  ipcMain.handle(IpcChannel.BashKill, (_event, payload: unknown) => callHost(IpcChannel.BashKill, payload))
+  // —— T-ME：记忆进化（宿主 LLM 直调核——批准落盘走内核 MemoryStore） ——
+  ipcMain.handle(IpcChannel.MemoryEvolve, (_event, payload: unknown) => callHost(IpcChannel.MemoryEvolve, payload))
+  ipcMain.handle(IpcChannel.MemoryEvolveDecide, (_event, payload: unknown) => callHost(IpcChannel.MemoryEvolveDecide, payload))
+  ipcMain.handle(IpcChannel.MemoryEvolveMode, (_event, payload: unknown) => callHost(IpcChannel.MemoryEvolveMode, payload))
+  // —— T-MP：个性化设置（宿主 store——端侧偏好不落链） ——
+  ipcMain.handle(IpcChannel.PersonalizationGet, () => callHost(IpcChannel.PersonalizationGet))
+  ipcMain.handle(IpcChannel.PersonalizationSet, (_event, payload: unknown) => callHost(IpcChannel.PersonalizationSet, payload))
+  // —— T-RW：RepoWiki（生成 = 宿主 fire-and-forget 编排；进度经 push:repo-wiki 广播白名单） ——
+  ipcMain.handle(IpcChannel.RepoWikiGet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGet, payload))
+  ipcMain.handle(IpcChannel.RepoWikiGenerate, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGenerate, payload))
+  ipcMain.handle(IpcChannel.RepoWikiStop, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiStop, payload))
+  // —— T-DY：部署视图数据（main 侧 https 真拉取——appVersion 真值恒回，releases 失败单显） ——
+  ipcMain.handle(IpcChannel.DeployInfo, async () => {
+    try {
+      const releases = await fetchReleases('https://api.github.com')
+      return { appVersion: app.getVersion(), releases }
+    } catch (err) {
+      return { appVersion: app.getVersion(), releases: null, releasesError: err instanceof Error ? err.message : String(err) }
+    }
+  })
   // —— S3-S4：审计报告 / 取证包导出（宿主载入面 + 内核链校验单点） ——
   ipcMain.handle(IpcChannel.AuditReport, (_event, payload: unknown) => callHost(IpcChannel.AuditReport, payload))
   ipcMain.handle(IpcChannel.AuditExport, (_event, payload: unknown) => callHost(IpcChannel.AuditExport, payload))
@@ -302,7 +350,7 @@ app.whenReady().then(async () => {
     // （renderer preload 桥 → ipcMain → utilityProcess → host-core → seam 顶层入口）
     try {
       const bridgeOk = await win.webContents.executeJavaScript(
-        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function' && typeof window.car.auditReport === 'function' && typeof window.car.meteringSummary === 'function' && typeof window.car.fileSecurityGet === 'function'",
+        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function' && typeof window.car.auditReport === 'function' && typeof window.car.meteringSummary === 'function' && typeof window.car.fileSecurityGet === 'function' && typeof window.car.filePreview === 'function' && typeof window.car.fileShellOpen === 'function' && typeof window.car.killSubagent === 'function' && typeof window.car.bashOutput === 'function' && typeof window.car.memoryEvolve === 'function' && typeof window.car.personalizationGet === 'function' && typeof window.car.repoWikiGet === 'function' && typeof window.car.deployInfo === 'function'",
       )
       const probe = (await win.webContents.executeJavaScript('window.car.probe()')) as {
         seamVersion?: string

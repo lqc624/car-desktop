@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AuthzPendingPush,
   AuthzResolvedPush,
+  BashOutputResultDTO,
   HostProbeResult,
   ModelMetaDTO,
   AttachmentRowDTO,
@@ -20,10 +21,15 @@ import { CapabilityView } from './views/CapabilityView'
 import { DashView } from './views/DashView'
 import { McpView } from './views/McpView'
 import { MemoryView } from './views/MemoryView'
+import { PersonalizationView } from './views/PersonalizationView'
+import { RepoWikiView } from './views/RepoWikiView'
+import { DeployView } from './views/DeployView'
 import { PluginsView } from './views/PluginsView'
 import { SecurityView } from './views/SecurityView'
 import { SettingsView } from './views/SettingsView'
-import { subagentRowsFrom } from './subagent-rows'
+import { FileViewer, type ViewerTarget } from './FileViewer'
+import { resolveViewerPath } from '../shared/file-preview'
+import { taskRowsFrom, formatDuration, type TaskRow } from './task-rows'
 
 /**
  * S2 会话主旅程（渲染薄皮，逻辑下沉宿主——D-S2-1 事件级流式：屏幕上每个字都来自
@@ -52,10 +58,15 @@ interface ToolCard {
   callId: string
   tool: string
   argsPreview: string
+  /** T-FV：fs_* 工具的原始 path 参数（可点开文件查看器——相对路径由调用方按工作区 root 解析） */
+  argsPath?: string
   authz: 'granted' | 'denied' | null
   result: string | null
   error: string | null
 }
+
+/** T-FV：内置文件三工具（toolcard 目标路径可点开查看器的工具面） */
+const FS_TOOLS = new Set(['fs_read', 'fs_write', 'fs_delete'])
 
 type ChatItem =
   | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean }
@@ -64,6 +75,9 @@ type ChatItem =
 
 const fmtTok = (n: number | null): string =>
   n == null ? '—' : n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n)
+
+/** T-FV：叙事行只显文件名（路径值不打印——路径本体在链上 payload，屏面留痕同原型 sys-note 口径） */
+const baseNameOf = (p: string): string => p.split(/[\\/]/).pop() || p
 
 function argsPreview(args: unknown): string {
   const p = args as Record<string, unknown> | null
@@ -160,10 +174,14 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
       }
     } else if (e.kind === 'toolCall') {
       const callId = String(p['id'] ?? '')
+      const tool = String(p['tool'] ?? '?')
+      const rawArgs = p['args'] as Record<string, unknown> | null | undefined
+      const rawPath = rawArgs?.['path']
       const card: ToolCard = {
         callId,
-        tool: String(p['tool'] ?? '?'),
+        tool,
         argsPreview: argsPreview(p['args']),
+        ...(FS_TOOLS.has(tool) && typeof rawPath === 'string' ? { argsPath: rawPath } : {}),
         authz: null,
         result: null,
         error: null,
@@ -208,10 +226,44 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
         items.push({ kind: 'line', tone: 'dim', text: `记忆注入 ${String(meta['count'] ?? '?')} 条（${String(meta['chars'] ?? '?')} 字符——loadMemoryForInjection 确定性拼装）` })
         continue
       }
+      // T-MP：个性化指令注入行（快照随会话——压缩重注即新事件）
+      if (meta['injection'] === 'persona') {
+        const ts = String(meta['toneStyle'] ?? '')
+        items.push({ kind: 'line', tone: 'dim', text: `回复风格已应用${ts && ts !== 'default' ? `：${ts}` : ''}（persona 注入落链 · ${String(meta['chars'] ?? '?')} 字符——新会话快照，压缩后重注）` })
+        continue
+      }
       if (type === 'session-start') items.push({ kind: 'line', tone: 'dim', text: '会话已创建（session-start 已落链）' })
       else if (type === 'model/set') items.push({ kind: 'line', tone: 'dim', text: `模型切换 → ${String(p['model'] ?? '?')}（model/set 已落链）` })
       else if (type === 'session/rename') items.push({ kind: 'line', tone: 'dim', text: `会话重命名 → ${String(p['title'] ?? '?')}` })
       else if (type === 'session/policy') items.push({ kind: 'line', tone: 'dim', text: `会话策略 → ${String(p['policy'] ?? '?')}（session/policy 已落链）` })
+      // T-FV：文件查看器动作留痕（file/preview / file/open——屏面只显文件名，路径值不打印）
+      else if (type === 'file/preview') items.push({ kind: 'line', tone: 'dim', text: `已打开预览 ${baseNameOf(String(p['path'] ?? '?'))}（file/preview 已落链 · 路径值不打印）` })
+      else if (type === 'file/open')
+        items.push({
+          kind: 'line',
+          tone: 'dim',
+          text: `已用${String(p['how'] ?? 'system') === 'browser' ? '浏览器' : '系统程序'}打开 ${baseNameOf(String(p['path'] ?? '?'))}（file/open 已落链 · 路径值不打印）`,
+        })
+      // T-ME：记忆进化叙事行（run/apply/reject/failed——candidates 明细在记忆页复核区，屏面只留痕）
+      else if (type === 'memory/evolution') {
+        const n = Array.isArray(p['candidates']) ? (p['candidates'] as unknown[]).length : 0
+        const u = p['usage'] as Record<string, number> | undefined
+        items.push({
+          kind: 'line',
+          tone: 'dim',
+          text: `记忆进化运行 ${String(p['runId'] ?? '?')} · 候选 ${n} 条（${p['auto'] === true ? '自动' : '手动'} · 压力 ${String((p['pressure'] as Record<string, number> | undefined)?.['pct'] ?? '?')}%${u ? ` · usage in ${u['input']}/out ${u['output']}` : ''}——memory/evolution 落链）`,
+        })
+      } else if (type === 'memory/evolution-apply') {
+        items.push({ kind: 'line', tone: 'ok', text: `进化候选 ${String(p['cid'] ?? '?')} 已写入（${String(p['op'] ?? '?')}${p['memoryId'] ? ` → ${String(p['memoryId'])}` : ''}）——memory/evolution-apply 落链` })
+      } else if (type === 'memory/evolution-reject') {
+        items.push({
+          kind: 'line',
+          tone: 'dim',
+          text: `进化候选 ${String(p['cid'] ?? '?')} 已放弃（${String(p['op'] ?? '?')}${p['reason'] === 'review-timeout' ? ' · 复核超时默认放弃' : p['feedback'] ? ' · feedback 留痕' : ''}）`,
+        })
+      } else if (type === 'memory/evolution-failed') {
+        items.push({ kind: 'line', tone: 'warn', text: `自动进化失败：${String(p['reason'] ?? '?')}` })
+      }
       else if (type === 'compact') items.push({ kind: 'line', tone: 'dim', text: `历史已压缩（context/compact 已落链，seq=${String(e.seq)}）` })
       // K2（1.16 子 Agent）：编排叙事行（复用 system 叙事渲染——零新 IPC）
       // v0.4（T-29）：subagentLink = 子链审计跳转（子链文件 = {sessionsDir}/{subagentId}.jsonl，审计页可开）
@@ -238,6 +290,26 @@ function writeDefaultModel(m: string | null): void {
     if (m == null) localStorage.removeItem(DEFAULT_MODEL_KEY)
     else localStorage.setItem(DEFAULT_MODEL_KEY, m)
   } catch { /* 存储不可用 = 端侧偏好降级，不阻塞 */ }
+}
+
+/** T-MP：显示文件修改过程（渲染显示偏好——fs_write/fs_delete 工具卡显隐；全局键，端侧不落链） */
+const SHOW_FS_CARDS_KEY = 'car-desktop.showFsCards'
+function readShowFsCards(): boolean {
+  try { return localStorage.getItem(SHOW_FS_CARDS_KEY) !== '0' } catch { return true }
+}
+
+/** T-FV-2：状态面板展开策略（auto=有任务运行时自动展开 / always / collapsed——端侧偏好不落审计链） */
+const TASK_PANEL_KEY = 'car-desktop.taskPanel'
+type TaskPanelPolicy = 'auto' | 'always' | 'collapsed'
+const TASK_PANEL_LABEL: Record<TaskPanelPolicy, string> = { auto: '自动展开', always: '始终展开', collapsed: '始终收起' }
+function readTaskPanelPolicy(): TaskPanelPolicy {
+  try {
+    const v = localStorage.getItem(TASK_PANEL_KEY)
+    return v === 'always' || v === 'collapsed' ? v : 'auto'
+  } catch { return 'auto' }
+}
+function writeTaskPanelPolicy(p: TaskPanelPolicy): void {
+  try { localStorage.setItem(TASK_PANEL_KEY, p) } catch { /* 存储不可用 = 端侧偏好降级，不阻塞 */ }
 }
 
 // K5-F：退役 K5-E 自由模型清单（模型归属端点 URL——设置面板模型列表维护）；挂载时清理遗留键
@@ -291,9 +363,18 @@ export function App() {
   const [showCtx, setShowCtx] = useState(false)
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
-  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory' | 'caps'>('chat')
+  const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory' | 'caps' | 'persona' | 'repowiki' | 'deploy'>('chat')
   // v0.4（T-29）：子链审计跳转目标——叙事行「查看子链」→ 审计页预选该子链
   const [auditFocus, setAuditFocus] = useState<string | null>(null)
+  // T-FV：文件查看器（会话产出/附件点击预览——toolcard fs_* 目标路径与附件 chip 两入口）
+  const [viewer, setViewer] = useState<ViewerTarget | null>(null)
+  // T-FV-2：任务进程条（展开策略三态 + auto 态手动覆盖 + bash 输出行单开态）
+  const [taskPanelPolicy, setTaskPanelPolicy] = useState<TaskPanelPolicy>(() => readTaskPanelPolicy())
+  const [taskPanelOpen, setTaskPanelOpen] = useState<boolean | null>(null)
+  const [bashOutFor, setBashOutFor] = useState<string | null>(null)
+  // T-MP：显示文件修改过程（个性化视图开关——chat 流 fs_write/fs_delete 卡显隐）
+  const [showFsCards, setShowFsCards] = useState<boolean>(() => readShowFsCards())
+  const [bashOutData, setBashOutData] = useState<BashOutputResultDTO | null>(null)
   // T-24：能力库数据面（引用菜单 / chips / ctx 行）
   const [caps, setCaps] = useState<CapabilityEntryDTO[]>([])
   const [showCapMenu, setShowCapMenu] = useState(false)
@@ -377,6 +458,14 @@ export function App() {
         // 1.19.0：全文事件到达 = 流式缓冲收口（增量之和 ≡ 落链全文，屏幕无第二事实源）
         setStream((s) => (s && s.turnId === p.event.turnId ? null : s))
       }
+      if (p.event.kind === 'system') {
+        // T-ME：进化运行到达 → 状态条提示（候选明细在记忆页复核区——auto 运行用户可能不在记忆页）
+        const ep = p.event.payload as Record<string, unknown> | null
+        if (ep?.['type'] === 'memory/evolution') {
+          const n = Array.isArray(ep['candidates']) ? (ep['candidates'] as unknown[]).length : 0
+          setStatus(`记忆进化 ${String(ep['runId'] ?? '')}：候选 ${n} 条待复核（记忆页）`)
+        }
+      }
       if (p.event.kind === 'turnEnd' && !p.event.turnId.startsWith('authz:')) {
         // 1.19.0：turn 收口（含 aborted/error）清残留增量——中断态不留下半截临时文本
         setStream((s) => (s && s.turnId === p.event.turnId ? null : s))
@@ -419,14 +508,6 @@ export function App() {
       offUpdate()
     }
   }, [fail])
-
-  // 倒计时（展示口径；真值在内核）——R-K2-1：队列态统一 ticker，各弹窗按自身 ts/timeoutMs 现算
-  useEffect(() => {
-    if (pendings.length === 0) return
-    setNowTick(Date.now())
-    const t = setInterval(() => setNowTick(Date.now()), 500)
-    return () => clearInterval(t)
-  }, [pendings.length])
 
   // 自动滚底
   useEffect(() => {
@@ -712,6 +793,8 @@ export function App() {
   const sessions = selected ? (sessionsByWs[selected.id] ?? []) : []
   const expandedSet = new Set(expandedWs ?? workspaces.map((w) => w.id))
   const { items, routing } = buildChatItems(events, busy)
+  // T-MP：显示文件修改过程——过滤 fs_write/fs_delete 工具卡（fs_read 保留；pendingCount 只数 msg 不受影响）
+  const visibleItems = showFsCards ? items : items.filter((it) => !(it.kind === 'tool' && (it.card.tool === 'fs_write' || it.card.tool === 'fs_delete')))
   // S5（D-S5-1）：最近的池降级/耗尽事件 → 顶部横幅（fail-visible，禁静默换模型）
   const lastRouting = routing.at(-1) ?? null
   const showRoutingBanner = lastRouting != null && (lastRouting.reason === 'fallback' || lastRouting.reason === 'exhausted')
@@ -741,6 +824,8 @@ export function App() {
   // S6（D-S6-6）：待执行队列（user 事件无对应 turnEnd = 引导排队中）→ 提示条显隐 + ctx-pop 记忆注入行数据
   const pendingCount = items.filter((it) => it.kind === 'msg' && it.role === 'user' && it.pending).length
   const lastInjectionEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+  // T-MP：个性化指令注入行（ctx-pop「风格指令」——快照随会话，压缩重注即新事件）
+  const lastPersonaEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'persona')
   // T-24：能力引用态（chips + cap-menu ✓ 数据源）+ 最近注入行（ctx-pop D-C3 行位真值）
   const activeRefs = activeCapabilityRefs(events)
   const lastCapInjection = [...events]
@@ -761,8 +846,37 @@ export function App() {
     return e.kind === 'system' && (t === 'subagent/join' || t === 'subagent/kill')
   }).length
   const subagentActive = Math.max(0, subagentSpawns.length - subagentClosed)
-  // v0.4（T-30 最小档）：子 Agent 状态区行数据——纯函数派生（subagent-rows.ts，链即真值）
-  const subagentRows = subagentRowsFrom(events)
+  // T-FV-2：任务进程条行数据——统一派生（task-rows.ts：subagent/* + bash/* 合并，链即真值）
+  const taskRows = taskRowsFrom(events)
+  const activeTaskCount = taskRows.filter((r) => r.state === 'active').length
+  // 秒表数据源：busy 时回合起点 = 最近 user 事件 ts（steer 追加即换道——最后一条即当前回合）
+  const turnStartTs = busy ? (events.filter((e) => e.kind === 'user').at(-1)?.ts ?? null) : null
+  const taskPanelExpanded = taskPanelPolicy === 'always' ? true : taskPanelPolicy === 'collapsed' ? false : taskPanelOpen ?? (busy || activeTaskCount > 0)
+
+  // 秒表/倒计时统一 ticker（展示口径；真值在内核）——R-K2-1 队列态 + T-FV-2 任务秒表/回合用时
+  useEffect(() => {
+    if (pendings.length === 0 && !busy && activeTaskCount === 0) return
+    setNowTick(Date.now())
+    const t = setInterval(() => setNowTick(Date.now()), 500)
+    return () => clearInterval(t)
+  }, [pendings.length, busy, activeTaskCount])
+
+  /** T-FV-2：bash 输出行单开态（拉取即读——tail 已在宿主过 redact） */
+  const toggleBashOut = async (taskId: string): Promise<void> => {
+    if (bashOutFor === taskId) {
+      setBashOutFor(null)
+      setBashOutData(null)
+      return
+    }
+    if (!selected || !openId) return
+    setBashOutFor(taskId)
+    setBashOutData(null)
+    try {
+      setBashOutData(await window.car.bashOutput(selected.id, openId, taskId))
+    } catch (e) {
+      fail(e)
+    }
+  }
   const attachFiles = async (): Promise<void> => {
     if (!selected || !openId) return
     try {
@@ -784,6 +898,12 @@ export function App() {
     } catch (e) {
       fail(e)
     }
+  }
+
+  /** T-FV：打开文件查看器（相对路径按工作区 root 词法解析——与宿主 fsReadTool 同口径） */
+  const openFileViewer = (rawPath: string, source: 'produced' | 'attach'): void => {
+    if (!selected || !openId) return
+    setViewer({ workspaceId: selected.id, sessionId: openId, path: resolveViewerPath(selected.path, rawPath), source })
   }
   const toggleRef = async (refId: string): Promise<void> => {
     if (!selected || !openId) return
@@ -876,6 +996,9 @@ export function App() {
           </span>
         </button>
         <button className={`item ${view === 'settings' ? 'sel' : ''}`} onClick={() => setView('settings')}><span className="ico">◐</span><span><b>设置 / 诊断</b><small>doctor · 自定义端点</small></span></button>
+        <button className={`item ${view === 'persona' ? 'sel' : ''}`} onClick={() => setView('persona')}><span className="ico">✦</span><span><b>个性化</b><small>回复风格 · 自定义指令</small></span></button>
+        <button className={`item ${view === 'repowiki' ? 'sel' : ''}`} onClick={() => setView('repowiki')}><span className="ico">⬡</span><span><b>RepoWiki</b><small>仓库文档 · 本地零上传</small></span></button>
+        <button className={`item ${view === 'deploy' ? 'sel' : ''}`} onClick={() => setView('deploy')}><span className="ico">⇩</span><span><b>部署</b><small>版本面 · 发布渠道</small></span></button>
 
         {/* ── 段二：工作区分组（v0.3-R1：点击展开/收缩，会话嵌套展示在各组下） ── */}
         <div className="sec">
@@ -909,6 +1032,16 @@ export function App() {
                   <span className="ws-ops">
                     <button className="mini" title="在此工作区新建会话" onClick={() => void newSession(w)}>
                       ＋
+                    </button>
+                    <button
+                      className="mini"
+                      title="RepoWiki：生成/查看"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setView('repowiki')
+                      }}
+                    >
+                      ⬡
                     </button>
                   </span>
                 </div>
@@ -1032,8 +1165,22 @@ export function App() {
           <DashView selected={selected} />
         ) : view === 'security' ? (
           <SecurityView />
-        ) : view === 'memory' ? (
-          <MemoryView selected={selected} openId={openId} onFail={fail} onStatus={setStatus} />
+  ) : view === 'memory' ? (
+    <MemoryView selected={selected} openId={openId} events={events} onFail={fail} onStatus={setStatus} />
+  ) : view === 'persona' ? (
+    <PersonalizationView
+      showFsCards={showFsCards}
+      onShowFsCardsChange={(next) => {
+        setShowFsCards(next)
+        try { localStorage.setItem(SHOW_FS_CARDS_KEY, next ? '1' : '0') } catch { /* 端侧偏好降级 */ }
+      }}
+      onStatus={setStatus}
+      onFail={fail}
+    />
+        ) : view === 'repowiki' ? (
+          <RepoWikiView workspaces={workspaces} selected={selected} openId={openId} onStatus={setStatus} onFail={fail} />
+        ) : view === 'deploy' ? (
+          <DeployView update={update} probe={probe} onStatus={setStatus} onFail={fail} />
         ) : view === 'caps' ? (
           <CapabilityView selected={selected} openId={openId} onFail={fail} onStatus={setStatus} onChanged={capsChanged} />
         ) : openId && selected ? (
@@ -1121,6 +1268,12 @@ export function App() {
                     </b>
                   </div>
                 )}
+                {lastPersonaEvent && (
+                  <div className="cp-row">
+                    <span>风格指令（persona 注入——新会话快照，压缩后重注）</span>
+                    <b>{String((lastPersonaEvent.meta as Record<string, unknown>)['chars'] ?? '?')} 字符</b>
+                  </div>
+                )}
                 {subagentSpawns.length > 0 && (
                   <div className="cp-row">
                     <span>子 Agent（subagent/spawn 链上真值——活跃 ≈ 未 join/kill）</span>
@@ -1154,26 +1307,99 @@ export function App() {
                 </div>
               )
             })}
-            {/* v0.4（T-30 最小档）：子 Agent 状态区——活跃/已收口 + 护栏口径 + 授权等待计数（pending 弹窗独立可见） */}
-            {subagentRows.length > 0 && (
+            {/* T-FV-2：任务进程条（原型 summaryPanel 同构——胶囊头 spinner/秒表/N 后台/展开策略三态 +
+                任务行 [bash|子代理] 类型徽标/停止按钮/输出尾部；底注 = 语义口径） */}
+            {(busy || taskRows.length > 0) && (
               <div className="subagent-panel">
-                <div className="sp-head">
-                  <b>子 Agent</b>
-                  <span className="dim">活跃 {subagentRows.filter((r) => r.state === 'active').length} · 累计 {subagentRows.length}{pendings.length > 0 ? ` · 授权等待 ${pendings.length}` : ''}（护栏 CONC≤3 · CUM≤10）</span>
+                <div
+                  className="sp-head"
+                  onClick={() => setTaskPanelOpen(!taskPanelExpanded)}
+                  title={taskPanelExpanded ? '收起状态面板' : '展开状态面板'}
+                >
+                  {(busy || activeTaskCount > 0) && <span className="sp-spin" />}
+                  <b>状态</b>
+                  {busy && turnStartTs != null && <span className="sp-elapsed">{formatDuration(nowTick - turnStartTs)}</span>}
+                  {activeTaskCount > 0 && <span className="sp-badge">{activeTaskCount} 后台</span>}
+                  {pendings.length > 0 && <span className="sp-badge warn">授权等待 {pendings.length}</span>}
+                  <span className="sp-flex" />
+                  <button
+                    className="sp-strategy"
+                    title={`状态面板展开策略：${TASK_PANEL_LABEL[taskPanelPolicy]}（点击切换）`}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const next: TaskPanelPolicy = taskPanelPolicy === 'auto' ? 'always' : taskPanelPolicy === 'always' ? 'collapsed' : 'auto'
+                      setTaskPanelPolicy(next)
+                      writeTaskPanelPolicy(next)
+                      setTaskPanelOpen(null)
+                    }}
+                  >
+                    ⛶ {TASK_PANEL_LABEL[taskPanelPolicy]}
+                  </button>
+                  <span className={`sp-caret${taskPanelExpanded ? ' open' : ''}`}>▾</span>
                 </div>
-                {subagentRows.map((r) => (
-                  <div key={r.id} className={`sp-row ${r.state}`}>
-                    <span className={`sp-state ${r.state}`}>{r.state === 'active' ? '运行中' : r.state === 'joined' ? '已汇合' : '已终止'}</span>
-                    <code>{r.id.length > 20 ? r.id.slice(0, 20) + '…' : r.id}</code>
-                    <span className="sp-task">{r.task.slice(0, 40) || '(无任务描述)'}</span>
-                    {r.joinReason && <span className="dim">reason={r.joinReason}</span>}
-                    <button className="link-btn" onClick={() => { setAuditFocus(r.id); setView('audit') }}>子链 ↗</button>
+                {taskPanelExpanded && (
+                  <div className="sp-body">
+                    {taskRows.map((r: TaskRow) => (
+                      <div key={r.kind + r.id} className={`sp-row ${r.state}`}>
+                        <span className={`sp-type ${r.kind}`}>{r.kind === 'bash' ? 'bash' : '子代理'}</span>
+                        <span className={`sp-state ${r.state}`}>
+                          {r.state === 'active'
+                            ? `运行中 ${formatDuration(nowTick - r.startedTs)}`
+                            : r.state === 'joined'
+                              ? '已汇合'
+                              : r.state === 'killed'
+                                ? '已终止'
+                                : r.state === 'stopped'
+                                  ? '已停止'
+                                  : `已完成 exit=${r.exitCode ?? '—'}${r.durationMs != null ? ` · ${formatDuration(r.durationMs)}` : ''}`}
+                        </span>
+                        <span className="sp-task" title={r.title}>{r.title.slice(0, 56) || '(无描述)'}</span>
+                        {r.kind === 'bash' && r.state === 'done' && r.exitCode != null && r.exitCode !== 0 && <span className="dim">exit={r.exitCode}</span>}
+                        {r.joinReason && <span className="dim">reason={r.joinReason}</span>}
+                        {r.state === 'active' && selected && openId && (
+                          <button
+                            className="sp-stop"
+                            onClick={() => {
+                              const call = r.kind === 'bash' ? window.car.bashKill(selected.id, openId, r.id) : window.car.killSubagent(selected.id, openId, r.id)
+                              void call
+                                .then(() => setStatus(r.kind === 'bash' ? `后台任务已发终止信号（bash/kill 落链）` : `子 Agent 已发终止信号（subagent/kill 落链）`))
+                                .catch(fail)
+                            }}
+                          >
+                            停止
+                          </button>
+                        )}
+                        {r.kind === 'subagent' && (
+                          <button className="link-btn" onClick={() => { setAuditFocus(r.id); setView('audit') }}>子链 ↗</button>
+                        )}
+                        {r.kind === 'bash' && (
+                          <button className="link-btn" onClick={() => void toggleBashOut(r.id)}>
+                            {bashOutFor === r.id ? '收起输出' : '输出 ↗'}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {bashOutFor && bashOutData && bashOutData.taskId === bashOutFor && (
+                      <div className="sp-out-wrap">
+                        <pre className="sp-out">{bashOutData.tail || '（无输出）'}</pre>
+                        <div className="dim sp-out-meta">
+                          {bashOutData.running ? '运行中' : bashOutData.stopped ? '已停止' : `退出码 ${bashOutData.exitCode ?? '—'}`}
+                          {' · '}输出 {bashOutData.outputBytes}B{bashOutData.truncated ? ' · 尾部窗口（超出已截除）' : ''}
+                          {' · '}读取面已脱敏（K-FS-4）
+                        </div>
+                      </div>
+                    )}
+                    {taskRows.length === 0 && <div className="dim sp-empty">本轮暂无后台任务——bash_run / 子代理派生后将在此实时呈现</div>}
                   </div>
-                ))}
+                )}
+                <div className="sp-foot">
+                  后台任务 = agent 工具调用：派生 / 汇合 / 终止与 bash 启动 / 退出 / 停止均落审计链 ·
+                  bash 经 M3 授权门（只读模式一律拒）· 子面白名单仅 fs_read · 停止 = 终止信号，子链 / 进程以 aborted 收口
+                </div>
               </div>
             )}
             <div className="chat-scroll" ref={scrollRef}>
-              {items.map((it, i) => {
+              {visibleItems.map((it, i) => {
                 if (it.kind === 'msg') {
                   return (
                     <div key={i} className={`msg ${it.role}`}>
@@ -1197,7 +1423,18 @@ export function App() {
                             {it.card.authz === 'denied' && <span className="tag err">授权拒绝</span>}
                           </div>
                           <div className="tc-body">
-                            目标 <code>{it.card.argsPreview}</code>
+                            目标{' '}
+                            {it.card.argsPath ? (
+                              <code
+                                className="file-path"
+                                title="点击打开文件查看器（fs_read 同管线预览 · 动作落链）"
+                                onClick={() => openFileViewer(it.card.argsPath!, 'produced')}
+                              >
+                                {it.card.argsPreview}
+                              </code>
+                            ) : (
+                              <code>{it.card.argsPreview}</code>
+                            )}
                             {it.card.result && <div className="ok-line">结果：{it.card.result}</div>}
                             {it.card.error && <div className="err-line">{it.card.error}</div>}
                           </div>
@@ -1246,10 +1483,22 @@ export function App() {
                   </span>
                 ))}
                 {attachments.map((a) => (
-                  <span key={a.path} className={`ref-chip att-chip${a.mode === 'path-ref' ? ' att-ref' : ''}`} title={`${a.path}（${a.mime} · ${a.size}B · ${a.mode === 'fulltext' ? '全文注入' : '路径登记，fs_read 按需读取'}）`}>
+                  <span
+                    key={a.path}
+                    className={`ref-chip att-chip${a.mode === 'path-ref' ? ' att-ref' : ''}`}
+                    title={`${a.path}（${a.mime} · ${a.size}B · ${a.mode === 'fulltext' ? '全文注入' : '路径登记，fs_read 按需读取'}）· 点击打开文件查看器`}
+                    onClick={() => openFileViewer(a.path, 'attach')}
+                  >
                     📎 {a.path.split(/[\\/]/).pop()}
                     {a.mode === 'path-ref' && <small>（按需读取）</small>}
-                    <button className="ref-x" onClick={() => void detachFile(a.path)} title="撤销附件（file/attach-remove 补偿事件落链）">
+                    <button
+                      className="ref-x"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void detachFile(a.path)
+                      }}
+                      title="撤销附件（file/attach-remove 补偿事件落链）"
+                    >
                       ✕
                     </button>
                   </span>
@@ -1464,6 +1713,8 @@ export function App() {
           </section>
         )}
       </main>
+      {/* T-FV：文件查看器弹层（全屏遮罩——Esc/遮罩点击/✕ 关闭） */}
+      {viewer && <FileViewer target={viewer} onClose={() => setViewer(null)} />}
     </div>
   )
 }

@@ -58,7 +58,7 @@ test('R-DRILL-1：生产模型可见面含 subagent 三工具（活引用非快�
     const deadline = Date.now() + 10_000
     while (capturedTools === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
     assert.ok(capturedTools, '假网关未捕获到请求体——前置失效')
-    for (const name of ['fs_read', 'fs_write', 'fs_delete', 'subagent_spawn', 'subagent_join', 'subagent_kill']) {
+    for (const name of ['fs_read', 'fs_write', 'fs_delete', 'bash_run', 'subagent_spawn', 'subagent_join', 'subagent_kill']) {
       assert.ok(capturedTools!.includes(name), `模型可见面缺 ${name}（R-DRILL-1 回归命中——执行/可见面分叉复现）`)
     }
   } finally {

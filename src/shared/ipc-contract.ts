@@ -12,6 +12,7 @@
  *  - SessionEventDTO 为内核 SessionEvent 结构镜像（1.12 实查）：推送载荷 = 落盘行
  *    JSON.parse 产物（零手抄漂移——事实本体在 JSONL）。
  */
+import type { FilePreviewKind } from './file-preview.ts'
 
 /** 请求/响应通道白名单（renderer invoke → main → 宿主 dispatch） */
 export const IpcChannel = {
@@ -77,6 +78,42 @@ export const IpcChannel = {
   AttachmentAdd: 'attachment:add',
   /** 撤销附件（file/attach-remove 补偿事件） */
   AttachmentRemove: 'attachment:remove',
+  // —— T-FV（原型 fv-mask 复刻）：文件查看器（预览读取 = fs_read 同管线；打开动作落链） ——
+  /** 受限预览读取（text/csv/html 走 fs_read 管线：redact/256KB/二进制拒；binary 仅 stat；alive 会话落 file/preview 叙事） */
+  FilePreview: 'file:preview',
+  /** 打开动作落链（file/open 叙事——shell 成功后由渲染层调用；宿主只管叙事） */
+  FileOpen: 'file:open',
+  /** 系统打开（main 侧 shell 能力——同 backup:open-dir 先例，不入宿主 dispatch；可执行文件拒绝面） */
+  FileShellOpen: 'file:shell-open',
+  // —— T-FV-2：任务控制面（任务进程条——用户主动停子代理 / bash 输出尾部 / 停 bash；宿主动作不过授权门） ——
+  /** 停止子代理（subagent/kill 落链在 manager 内；settled → fail-visible） */
+  SubagentKill: 'subagent:kill',
+  /** bash 后台任务输出尾部（读取面过 redact——K-FS-4） */
+  BashOutput: 'bash:output',
+  /** 停止 bash 后台任务（bash/kill 落链；进程树终止后以 bash/exit(stopped) 收口） */
+  BashKill: 'bash:kill',
+  // —— T-ME：记忆进化（手动 + auto；LLM 直调核——批准落盘走内核 MemoryStore） ——
+  /** 进化运行（全量记忆 → 模型重组候选；落链 memory/evolution + usage 计量；空记忆/无模型 fail-visible） */
+  MemoryEvolve: 'memory:evolve',
+  /** 候选复核裁决（approve = MemoryStore 落盘 + memory/evolution-apply；reject = evolution-reject + feedback） */
+  MemoryEvolveDecide: 'memory:evolve-decide',
+  /** 进化模式同步（端侧 localStorage 权威 → 宿主 workspace 级内存态；auto = 回合收口检查压力） */
+  MemoryEvolveMode: 'memory:evolve-mode',
+  // —— T-MP：个性化设置面（端侧偏好——不落链；应用于新会话快照） ——
+  /** 读当前个性化（toneStyle + customPrompt） */
+  PersonalizationGet: 'personalization:get',
+  /** 部分更新（toneStyle ∈ 档位表 / customPrompt ≤2000——校验 fail-visible） */
+  PersonalizationSet: 'personalization:set',
+  // —— T-RW：RepoWiki（工作区级本地生成——零上传；落链承载 = 该工作区活跃会话） ——
+  /** 读 manifest（无则 null——不需会话） */
+  RepoWikiGet: 'repoWiki:get',
+  /** 发起生成（即时返回 runId——编排 fire-and-forget，进度经 push:repo-wiki） */
+  RepoWikiGenerate: 'repoWiki:generate',
+  /** 停止生成（取消旗标——步间检查，随时可停） */
+  RepoWikiStop: 'repoWiki:stop',
+  // —— T-DY：部署视图数据面（main 侧能力——同 backup:open-dir 先例不入宿主 dispatch） ——
+  /** 本机版本 + GitHub Releases 真拉取（拉取失败 releasesError 单显——禁假数据） */
+  DeployInfo: 'deploy:info',
   // —— S3：文件安全设置面（SEC_SETTINGS；host 持久化 + 校验，渲染层接线 S3-S6） ——
   /** 读当前规则表（出厂预设 8 条 / 用户规则） */
   FileSecurityGet: 'fileSecurity:get',
@@ -160,6 +197,8 @@ export const IpcPushTopic = {
   AuthzResolved: 'push:authz-resolved',
   /** T-23：自动更新状态机推送（available/downloading/downloaded/error——fail-visible 横幅数据源） */
   UpdateStatus: 'push:update-status',
+  /** RepoWiki 生成进度（workspaceId 过滤——多工作区并行互不阻塞） */
+  RepoWiki: 'push:repo-wiki',
 } as const
 
 export type IpcPushTopicName = (typeof IpcPushTopic)[keyof typeof IpcPushTopic]
@@ -290,6 +329,17 @@ export interface UpdateStatusPush {
   ts: number
 }
 
+/** T-RW：RepoWiki 生成进度推送（step: scan→outline→page*→done；aborted/error 终态） */
+export interface RepoWikiPush {
+  workspaceId: string
+  runId: string
+  step: 'scan' | 'outline' | 'page' | 'write' | 'done' | 'aborted' | 'error'
+  pct: number
+  message: string
+  pagesDone?: number
+  error?: string
+}
+
 export interface SessionOpenResult {
   sessionId: string
   workspaceId: string
@@ -405,6 +455,107 @@ export interface AttachmentRowDTO {
   mode: 'fulltext' | 'path-ref'
   size: number
   mime: string
+}
+
+/** T-FV：预览读取结果（kind 分支渲染面；content 仅 text/csv/html，binary 只给元信息） */
+export interface FilePreviewResultDTO {
+  /** 绝对路径（相对入参已按工作区 root 解析——渲染层 shell 打开/展示统一用此值） */
+  path: string
+  kind: FilePreviewKind
+  /** 元信息（binary = stat 真值；text/csv/html = 盘面文件大小） */
+  size: number
+  /** 修改时间（mtimeMs） */
+  mtime: number
+  /** 内容（fs_read 同管线：已 redact 脱敏 + 256KB 截断；binary 不带键） */
+  content?: string
+  truncated?: boolean
+  redactedCount?: number
+  /** 动作是否已落链（alive 会话 = true；回放/无句柄 = false——界面注记「未落链」） */
+  logged: boolean
+  /** 规则面命中上下文（decide('read') informational 随叙事——拦截已由 hardReject 同口径承担） */
+  tier?: string
+  ruleId?: string
+}
+
+/** T-FV：打开动作落链结果 */
+export interface FileOpenResultDTO {
+  ok: true
+  logged: boolean
+}
+
+/** T-FV-2：bash 后台任务输出尾部（tail 已过内核 redact 脱敏；输出内容不落链） */
+export interface BashOutputResultDTO {
+  taskId: string
+  running: boolean
+  exitCode: number | null
+  durationMs: number | null
+  tail: string
+  /** 输出总量超过环形缓冲上限 = tail 非全量 */
+  truncated: boolean
+  outputBytes: number
+  stopped: boolean
+}
+
+/** T-ME：进化候选（op = add 新增 / update 更新 targetId / delete 删除 targetId） */
+export interface EvolutionCandidateDTO {
+  cid: string
+  op: 'add' | 'update' | 'delete'
+  targetId?: string
+  text: string
+  tags?: string[]
+  reason: string
+}
+
+/** T-ME：进化运行结果（压力 = 确定性派生；usage = 一次性 log 的 usage 事件事实，无则省键禁估算） */
+export interface MemoryEvolveResultDTO {
+  runId: string
+  auto: boolean
+  model: string
+  pressure: { chars: number; count: number; pct: number }
+  candidates: EvolutionCandidateDTO[]
+  usage?: { input: number; output: number }
+  logged: boolean
+}
+
+/** T-ME：候选裁决结果（approve 时 memoryId = 落盘后的记忆 id；delete = targetId 本身） */
+export interface MemoryEvolveDecideResultDTO {
+  ok: true
+  op: 'add' | 'update' | 'delete'
+  memoryId?: string
+}
+
+/** T-RW：RepoWiki 页面（正文按需读盘——manifest 只载体量事实） */
+export interface RepoWikiPageDTO {
+  id: string
+  title: string
+  chars: number
+  md?: string
+}
+
+/** T-DY：GitHub Releases 发布行（真拉取规范化——draft 不出表） */
+export interface DeployReleaseDTO {
+  tag: string
+  name: string
+  publishedAt: string
+  prerelease: boolean
+  url: string
+}
+
+/** T-DY：部署视图数据（appVersion 真值恒回；releases 拉取失败 = null + releasesError 单显） */
+export interface DeployInfoDTO {
+  appVersion: string
+  releases: DeployReleaseDTO[] | null
+  releasesError?: string
+}
+
+/** T-RW：RepoWiki manifest（userData/repo-wiki/<workspaceId>/manifest.json；repoWikiGet 返回时 pages 随带 md 正文） */
+export interface RepoWikiManifestDTO {
+  workspaceId: string
+  generatedAt: number
+  model: string
+  durationMs: number
+  pages: RepoWikiPageDTO[]
+  usage?: { input: number; output: number }
 }
 
 /** 会话用量聚合（usage 事件真实值求和；无 usage 的 turn 计入分母不估算——D-S2-4） */
@@ -658,6 +809,15 @@ export interface IpcRequestMap {
   [IpcChannel.MemoryEdit]: MemoryOpRequest
   [IpcChannel.MemoryRemove]: MemoryOpRequest
   [IpcChannel.MemoryRollback]: MemoryOpRequest
+  [IpcChannel.MemoryEvolve]: { workspaceId: string; sessionId: string; auto?: boolean }
+  [IpcChannel.MemoryEvolveDecide]: { workspaceId: string; sessionId: string; runId: string; cid: string; approve: boolean; feedback?: string }
+  [IpcChannel.MemoryEvolveMode]: { workspaceId: string; mode: 'manual' | 'auto' }
+  [IpcChannel.PersonalizationGet]: undefined
+  [IpcChannel.PersonalizationSet]: { toneStyle?: string; customPrompt?: string }
+  [IpcChannel.RepoWikiGet]: { workspaceId: string }
+  [IpcChannel.RepoWikiGenerate]: { workspaceId: string; sessionId: string }
+  [IpcChannel.RepoWikiStop]: { workspaceId: string }
+  [IpcChannel.DeployInfo]: undefined
   [IpcChannel.CapabilityList]: { workspaceId: string }
   [IpcChannel.CapabilityWrite]: { workspaceId: string; sessionId: string; entry: CapabilityEntryInput }
   [IpcChannel.CapabilityEdit]: { workspaceId: string; sessionId: string; id: string; patch: CapabilityEditPatch }
@@ -669,6 +829,12 @@ export interface IpcRequestMap {
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
+  [IpcChannel.FilePreview]: { workspaceId: string; sessionId: string; path: string }
+  [IpcChannel.FileOpen]: { workspaceId: string; sessionId: string; path: string; how: 'system' | 'browser' }
+  [IpcChannel.FileShellOpen]: { path: string; how: 'system' | 'browser' }
+  [IpcChannel.SubagentKill]: { workspaceId: string; sessionId: string; subagentId: string }
+  [IpcChannel.BashOutput]: { workspaceId: string; sessionId: string; taskId: string }
+  [IpcChannel.BashKill]: { workspaceId: string; sessionId: string; taskId: string }
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
@@ -729,6 +895,23 @@ export interface CarBridge {
   memoryRemove(workspaceId: string, sessionId: string, id: string): Promise<void>
   /** 回滚（undo 栈单步；返回 null = 已回退到删除态） */
   memoryRollback(workspaceId: string, sessionId: string, id: string): Promise<MemoryEntryDTO | null>
+  /** T-ME：进化运行（LLM 直调——候选落链 + usage 计量） */
+  memoryEvolve(workspaceId: string, sessionId: string, auto?: boolean): Promise<MemoryEvolveResultDTO>
+  /** T-ME：候选复核裁决（approve = 落盘落链；reject = feedback 留痕） */
+  memoryEvolveDecide(workspaceId: string, sessionId: string, runId: string, cid: string, approve: boolean, feedback?: string): Promise<MemoryEvolveDecideResultDTO>
+  /** T-ME：进化模式同步（端侧偏好 → 宿主 workspace 内存态） */
+  memoryEvolveMode(workspaceId: string, mode: 'manual' | 'auto'): Promise<{ ok: true; mode: 'manual' | 'auto' }>
+  /** T-MP：个性化设置（端侧偏好——get 读当前，set 部分更新 fail-visible；应用于新会话） */
+  personalizationGet(): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string }>
+  personalizationSet(patch: { toneStyle?: string; customPrompt?: string }): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string }>
+  /** T-RW：RepoWiki（get 读 manifest；generate 即时返回 runId；stop 置取消旗标） */
+  repoWikiGet(workspaceId: string): Promise<RepoWikiManifestDTO | null>
+  repoWikiGenerate(workspaceId: string, sessionId: string): Promise<{ runId: string }>
+  repoWikiStop(workspaceId: string): Promise<{ ok: true }>
+  /** T-RW：生成进度订阅（按 workspaceId 过滤——多工作区并行） */
+  onRepoWiki(cb: (p: RepoWikiPush) => void): () => void
+  /** T-DY：部署视图数据（真拉取——main 侧 https） */
+  deployInfo(): Promise<DeployInfoDTO>
   // —— T-24：能力库条目面（能力库视图 + 引用菜单） ——
   /** 条目列表（只读；损坏条目经 warnings 显性化） */
   capabilityList(workspaceId: string): Promise<{ entries: CapabilityEntryDTO[]; warnings: string[] }>
@@ -750,6 +933,18 @@ export interface CarBridge {
   /** 附件登记（工作区外/拒绝规则路径 fail-visible） */
   attachmentAdd(workspaceId: string, sessionId: string, paths: string[]): Promise<AttachmentRowDTO[]>
   attachmentRemove(workspaceId: string, sessionId: string, path: string): Promise<void>
+  /** T-FV：文件查看器——受限预览读取（fs_read 同管线；alive 会话落 file/preview 叙事） */
+  filePreview(workspaceId: string, sessionId: string, path: string): Promise<FilePreviewResultDTO>
+  /** T-FV：打开动作落链（shell 成功后由渲染层调用——宿主只管叙事） */
+  fileOpen(workspaceId: string, sessionId: string, path: string, how: 'system' | 'browser'): Promise<FileOpenResultDTO>
+  /** T-FV：系统打开（main 侧 shell；可执行扩展拒绝面） */
+  fileShellOpen(path: string, how: 'system' | 'browser'): Promise<{ ok: boolean; error?: string }>
+  /** T-FV-2：停止子代理（manager.kill 自落 subagent/kill 链） */
+  killSubagent(workspaceId: string, sessionId: string, subagentId: string): Promise<{ ok: true; subagentId: string; note: string }>
+  /** T-FV-2：bash 后台任务输出尾部（读取面已脱敏） */
+  bashOutput(workspaceId: string, sessionId: string, taskId: string): Promise<BashOutputResultDTO>
+  /** T-FV-2：停止 bash 后台任务 */
+  bashKill(workspaceId: string, sessionId: string, taskId: string): Promise<{ ok: true; taskId: string; note: string }>
   // —— S3：文件安全设置面（安全中心页） ——
   fileSecurityGet(): Promise<FileSecurityState>
   fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>

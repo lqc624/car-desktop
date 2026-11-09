@@ -1,6 +1,5 @@
 /**
- * 自动更新（T-23 / D-V03-4：GitHub Releases 渠道先行，源 = lqc123qwe/car-desktop——
- * 占位坐标，实际仓库名定稿后在 package.json build.publish 修改一行即可）
+ * 自动更新（T-23 / D-V03-4：GitHub Releases 渠道先行，源 = lqc624/car-desktop（与 package.json build.publish 同源——终验修正占位残留）)
  *
  * 口径：
  *  - electron-updater + GitHub provider：更新包校验沿发布链纪律——latest.yml sha512 +
@@ -16,9 +15,10 @@
 import { app, shell } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import type { UpdateStatusPush } from '../shared/ipc-contract.ts'
+import { RELEASES_URL } from '../shared/deploy.ts'
 
-/** 发布页（手动下载降级入口——与 package.json build.publish 同仓） */
-export const RELEASES_URL = 'https://github.com/lqc123qwe/car-desktop/releases'
+/** 发布页（手动下载降级入口——单一事实源 shared/deploy.ts，与 package.json build.publish 同仓） */
+export { RELEASES_URL }
 
 let push: ((s: UpdateStatusPush) => void) | null = null
 let lastPercent = -1

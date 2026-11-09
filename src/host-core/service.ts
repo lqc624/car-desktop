@@ -7,23 +7,42 @@
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { loadSessionLog, MemoryStore, pendingSteerTurns } from '@lqc123qwe/car-runtime'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
+import { loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
   IpcPushTopic,
   type AuthzDecisionInput,
+  type FileOpenResultDTO,
+  type FilePreviewResultDTO,
   type HostProbeResult,
+  type MemoryEvolveResultDTO,
+  type RepoWikiManifestDTO,
   type SessionInfo,
   type SessionOpenResult,
   type SessionUsageResult,
   type WorkspaceInfo,
 } from '../shared/ipc-contract.ts'
+import { classifyPreviewFile } from '../shared/file-preview.ts'
+import { memoryPressureOf, EVOLVE_AUTO_PCT, EVOLVE_REVIEW_TIMEOUT_MS, type EvolutionCandidate } from '../shared/memory-evolution.ts'
+import { buildEvolvePrompt, parseEvolveResponse } from './memoryEvolve.ts'
+import {
+  buildOutlinePrompt,
+  buildPagePrompt,
+  parseOutlineResponse,
+  scanWorkspace,
+  stripFences,
+  REPO_WIKI_CHAR_BUDGET,
+  REPO_WIKI_MAX_FILES,
+  type WikiCorpusFile,
+  type WikiOutlinePage,
+} from './repoWiki.ts'
 import { probeSeam } from './probe.ts'
 import { WorkspaceRegistry } from './workspaces.ts'
 import { SessionHandle, usageOver, type AuthzResponse } from './session-handle.ts'
 import { SubagentManager, childSessionIds, recoverChildSessions, type ChildModelFnOpts } from './subagent.ts'
+import { BashTaskManager } from './bashTasks.ts'
 import {
   assertSafeId,
   listSessions,
@@ -42,10 +61,11 @@ import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type Rou
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
 import { runDoctor } from './doctor.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
-import { builtinTools } from './tools.ts'
+import { builtinTools, fsReadTool } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
 import { createFileSecurityStore } from './fileSecurityStore.ts'
 import { createSecuritySettingsStore, type SessionPolicy } from './securitySettingsStore.ts'
+import { createPersonalizationStore } from './personalizationStore.ts'
 import { createBackupStore } from './backupStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 
@@ -70,6 +90,11 @@ export interface HostServiceOptions {
    * 同装配的受限形态；子链 runTurn 仍真跑——行为证明）。缺席且 runtime 不可用 = 编排工具不挂。
    */
   childModelFnOverride?: (o: ChildModelFnOpts) => HostModelFn
+  /**
+   * T-ME：auto 进化候选复核超时（缺省 120s——timeout-default-deny 同语义；测试注入短值）。
+   * 仅 auto 运行挂计时器；手动运行不超时。
+   */
+  memoryEvolveReviewTimeoutMs?: number
 }
 
 export type PushMessage = { topic: string; payload: unknown }
@@ -90,6 +115,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
   const fileSecurity: FileSecurityEngine = createFileSecurityEngine(fileSecurityStore)
   // 安全中心设置 + 自动备份（S3-S3）：默认策略 / 备份开关与配额（backup 配置闭包即时读设置）
   const securitySettings = createSecuritySettingsStore(opts.userDataDir)
+  // T-MP：个性化设置（端侧偏好——不进审计链；会话创建时快照注入）
+  const personalizationStore = createPersonalizationStore(opts.userDataDir)
   const backup = createBackupStore(opts.userDataDir, () => securitySettings.get().autoBackup)
   // 价目 Provider（S3-S5 / R-D5 两模式）：本地模式 = null Provider（金额「价目未同步」禁 0）；
   // 平台价目同步可用后由装配方注入实现（接口面预留）
@@ -160,7 +187,76 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return h
   }
 
-  // —— S6（D-S6-1）：工作区记忆存储（per-workspace 懒创建；dir = <workspaceRoot>/.car/memory/） ——
+  // ── T-FV（原型 fv-mask 复刻）：文件查看器（预览 = fs_read 同管线；打开动作落链；回放 = 只读预览不落链） ──
+
+  /** file/preview | file/open 叙事落链（alive 句柄存在才落——回放/未打开 = logged:false，弹层注记） */
+  function fileNarrative(
+    workspaceId: string,
+    sessionId: string,
+    type: 'file/preview' | 'file/open',
+    extra: Record<string, unknown>,
+  ): boolean {
+    const handle = handles.get(key(workspaceId, sessionId))
+    if (!handle) return false
+    handle.appendNarrative(type, extra)
+    return true
+  }
+
+  /**
+   * 受限预览读取：text/csv/html = fs_read 同管线（hardReject 拒 deny/工作区外、二进制拒读、
+   * 256KB 截断、redact 脱敏——用户预览与模型读取同一纪律，不另开旁路）；binary 仅 stat 元信息
+   * （不读内容——pdf/xlsx/图片面）。规则面命中 tier/ruleId 随叙事（informational——拦截已由
+   * fs_read 口径承担）。
+   */
+  async function filePreview(workspaceId: string, sessionId: string, rawPath: string): Promise<FilePreviewResultDTO> {
+    const root = registry.pathOf(workspaceId)
+    const kind = classifyPreviewFile(rawPath)
+    const decision = fileSecurity.decide('read', rawPath, root)
+    const ruleCtx = { tier: decision.tier, ...(decision.rule ? { ruleId: decision.rule.id } : {}) }
+    if (kind === 'binary') {
+      const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath)
+      const st = statSync(abs) // 不存在 = fail-visible（ENOENT 全文）
+      if (st.isDirectory()) throw new Error(`CAR-E-DESKTOP: 预览目标是目录（${rawPath}）`)
+      const logged = fileNarrative(workspaceId, sessionId, 'file/preview', { path: rawPath, kind, bytes: st.size, ...ruleCtx })
+      return { path: abs, kind, size: st.size, mtime: st.mtimeMs, logged, ...ruleCtx }
+    }
+    const read = (await fsReadTool(root, fileSecurity).run({ path: rawPath })) as {
+      path: string
+      bytes: number
+      totalBytes: number
+      truncated?: boolean
+      redactedCount: number
+      content: string
+    }
+    const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath)
+    const st = statSync(abs)
+    const logged = fileNarrative(workspaceId, sessionId, 'file/preview', {
+      path: rawPath,
+      kind,
+      bytes: read.bytes,
+      redacted: read.redactedCount,
+      ...ruleCtx,
+    })
+    return {
+      path: abs,
+      kind,
+      size: st.size,
+      mtime: st.mtimeMs,
+      content: read.content,
+      ...(read.truncated ? { truncated: true } : {}),
+      redactedCount: read.redactedCount,
+      logged,
+      ...ruleCtx,
+    }
+  }
+
+  /** 打开动作落链（file/open——shell 成功后由渲染层调用，留痕 = 已发生事实；宿主只管叙事） */
+  function fileOpenLog(workspaceId: string, sessionId: string, rawPath: string, how: 'system' | 'browser'): FileOpenResultDTO {
+    const logged = fileNarrative(workspaceId, sessionId, 'file/open', { path: rawPath, how })
+    return { ok: true, logged }
+  }
+
+  // S6（D-S6-1）：工作区记忆存储（per-workspace 懒创建；dir = <workspaceRoot>/.car/memory/）
   const memoryStores = new Map<string, MemoryStore>()
   function getMemoryStore(workspaceRoot: string): MemoryStore {
     let store = memoryStores.get(workspaceRoot)
@@ -171,7 +267,420 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return store
   }
 
-  function depsFor(workspaceId: string, workspaceRoot: string, contextWindow: number | null): Parameters<typeof SessionHandle.createFresh>[0]['deps'] {
+  // ── T-ME：记忆进化（手动 + auto）——LLM 直调核（memoryEvolve.ts 纯函数 + 一次性内存 log），
+  //    批准落盘走内核 MemoryStore（kind='memory' 事件自动落链）；复核校验 = 链派生（重启安全） ──
+  const evolveReviewTimeoutMs = opts.memoryEvolveReviewTimeoutMs ?? EVOLVE_REVIEW_TIMEOUT_MS
+  /** 进化模式（workspace 级内存态——端侧 localStorage 权威经 memory:evolve-mode 同步；缺省 manual） */
+  const evolveModes = new Map<string, 'manual' | 'auto'>()
+  /** 运行中守卫（session 级单飞——LLM 直调不并发） */
+  const evolveInFlight = new Set<string>()
+  /** auto 运行的复核超时计时器（key = ws::sid::runId；dispose 全清） */
+  const evolveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  /** 未决候选存在检查（链派生——上一轮候选未复核完不叠跑 auto） */
+  function evolutionPendingExists(handle: SessionHandle): boolean {
+    const runs = new Map<string, number>()
+    const decided = new Set<string>()
+    for (const e of handle.log.events) {
+      if (e.kind !== 'system') continue
+      const p = e.payload as Record<string, unknown> | null
+      if (!p) continue
+      const t = String(p['type'] ?? '')
+      if (t === 'memory/evolution') {
+        const cands = Array.isArray(p['candidates']) ? (p['candidates'] as unknown[]).length : 0
+        runs.set(String(p['runId'] ?? '?'), cands)
+      } else if (t === 'memory/evolution-apply' || t === 'memory/evolution-reject') {
+        decided.add(String(p['runId'] ?? '?') + '::' + String(p['cid'] ?? ''))
+      }
+    }
+    for (const [runId, n] of runs) {
+      let undecided = n
+      for (const d of decided) if (d.startsWith(runId + '::')) undecided--
+      if (undecided > 0) return true
+    }
+    return false
+  }
+
+  /**
+   * 进化运行：LLM 直调（一次性内存 SessionLog——chatStep 投影不污染会话链；toolDefs 空 = 无工具面），
+   * 候选解析后落链 memory/evolution（usage 从一次性 log 的 usage 事件提取——禁估算，无则省键）。
+   * auto = true 时挂复核超时计时器；失败落 memory/evolution-failed 叙事（禁静默）后 rethrow。
+   */
+  async function memoryEvolve(workspaceId: string, sessionId: string, auto: boolean): Promise<MemoryEvolveResultDTO> {
+    const k = key(workspaceId, sessionId)
+    if (evolveInFlight.has(k)) throw new Error('CAR-E-DESKTOP: 进化运行进行中——等待完成后再试')
+    const handle = requireAliveHandle(workspaceId, sessionId)
+    const store = getMemoryStore(handle.workspaceRoot)
+    const entries = store.list()
+    if (entries.length === 0) throw new Error('CAR-E-DESKTOP: 记忆为空——无可进化的对象（先在面板或对话沉淀记忆）')
+    const { runtime, modelError } = await loadRuntimeFor(handle.workspaceRoot)
+    if (!runtime) throw new Error(`CAR-E-DESKTOP: 进化运行需要会话模型（${modelError ?? '模型未装配'}）`)
+    const runId = 'EV-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
+    const evolveLog = new SessionLog('evolve-' + runId)
+    const model = createChatModelFn({
+      runtime,
+      log: evolveLog,
+      signal: { aborted: false },
+      currentTurnId: () => 'evolve',
+      currentModel: () => handle.sessionModel ?? '',
+      toolDefs: [],
+    })
+    evolveInFlight.add(k)
+    try {
+      // chatStep 消息投影 = log 上本 turnId 的事件——prompt 以 user 事件先行落一次性 log
+      evolveLog.append('user', 'user', 'evolve', buildEvolvePrompt(entries.map((e) => ({ id: e.id, text: e.text, updatedAt: e.updatedAt }))))
+      const step = await model()
+      if (step.stopReason !== 'stop' || !step.text || !step.text.trim()) {
+        throw new Error(`CAR-E-DESKTOP: 进化运行未返回有效文本（stopReason=${step.stopReason}）`)
+      }
+      const parsed = parseEvolveResponse(step.text, new Set(entries.map((e) => e.id)))
+      if (parsed.candidates.length === 0) {
+        throw new Error(`CAR-E-DESKTOP: 进化候选解析为空（剔除 ${parsed.dropped} 条不合规）——模型输出不合规`)
+      }
+      const usageEv = evolveLog.events.find((e) => e.kind === 'usage')
+      const up = (usageEv?.payload ?? {}) as Record<string, unknown>
+      const usage = typeof up['input'] === 'number' && typeof up['output'] === 'number' ? { input: up['input'] as number, output: up['output'] as number } : undefined
+      const pressure = memoryPressureOf(entries)
+      const modelId = handle.sessionModel ?? ''
+      handle.appendNarrative('memory/evolution', {
+        runId,
+        auto,
+        model: modelId,
+        pressure,
+        ...(usage ? { usage } : {}),
+        candidates: parsed.candidates,
+        dropped: parsed.dropped,
+      })
+      if (auto) {
+        const tk = k + '::' + runId
+        evolveTimers.set(
+          tk,
+          setTimeout(() => {
+            evolveTimers.delete(tk)
+            if (!handles.has(k)) return
+            for (const c of parsed.candidates) {
+              try {
+                memoryEvolveDecide(workspaceId, sessionId, runId, c.cid, false, undefined, 'review-timeout')
+              } catch {
+                /* 已决竞态 = 忽略（复核语义幂等） */
+              }
+            }
+          }, evolveReviewTimeoutMs),
+        )
+      }
+      return {
+        runId,
+        auto,
+        model: modelId,
+        pressure,
+        candidates: parsed.candidates,
+        ...(usage ? { usage } : {}),
+        logged: true,
+      }
+    } catch (err) {
+      if (auto) {
+        try {
+          handle.appendNarrative('memory/evolution-failed', { runId, auto: true, reason: (err instanceof Error ? err.message : String(err)).slice(0, 200) })
+        } catch {
+          /* 链写失败 = 上层 rethrow 已可见 */
+        }
+      }
+      throw err
+    } finally {
+      evolveInFlight.delete(k)
+    }
+  }
+
+  /**
+   * 候选复核裁决（链派生校验——run 候选 − apply/reject 已决集，重启安全无内存 stash）。
+   * approve = 内核 MemoryStore 落盘（kind='memory' 事件自动落链）+ memory/evolution-apply 叙事；
+   * reject = memory/evolution-reject 叙事（feedback 或 reason 留痕）。
+   */
+  function memoryEvolveDecide(
+    workspaceId: string,
+    sessionId: string,
+    runId: string,
+    cid: string,
+    approve: boolean,
+    feedback?: string,
+    rejectReason?: string,
+  ): { ok: true; op: EvolutionCandidate['op']; memoryId?: string } {
+    const handle = requireAliveHandle(workspaceId, sessionId)
+    let found: EvolutionCandidate | undefined
+    const decided = new Set<string>()
+    for (const e of handle.log.events) {
+      if (e.kind !== 'system') continue
+      const p = e.payload as Record<string, unknown> | null
+      if (!p) continue
+      const t = String(p['type'] ?? '')
+      if (t === 'memory/evolution' && p['runId'] === runId) {
+        for (const c of (p['candidates'] as EvolutionCandidate[]) ?? []) {
+          if (c && c.cid === cid) found = c
+        }
+      } else if ((t === 'memory/evolution-apply' || t === 'memory/evolution-reject') && p['runId'] === runId && p['cid'] === cid) {
+        decided.add(cid)
+      }
+    }
+    if (!found) throw new Error(`CAR-E-DESKTOP: 进化候选不存在（${runId}/${cid}）`)
+    if (decided.has(cid)) throw new Error(`CAR-E-DESKTOP: 进化候选已决（${runId}/${cid}）——复核幂等禁重复落盘`)
+    const store = getMemoryStore(handle.workspaceRoot)
+    if (approve) {
+      let memoryId: string | undefined
+      if (found.op === 'add') {
+        memoryId = store.write(handle.log, { text: found.text, ...(found.tags ? { tags: found.tags } : {}), sourceSession: handle.sessionId }).id
+      } else if (found.op === 'update') {
+        memoryId = store.edit(handle.log, found.targetId!, found.text, found.tags).id
+      } else {
+        store.remove(handle.log, found.targetId!)
+        memoryId = found.targetId
+      }
+      handle.appendNarrative('memory/evolution-apply', {
+        runId,
+        cid,
+        op: found.op,
+        ...(found.targetId ? { targetId: found.targetId } : {}),
+        ...(memoryId ? { memoryId } : {}),
+      })
+      return { ok: true, op: found.op, ...(memoryId ? { memoryId } : {}) }
+    }
+    handle.appendNarrative('memory/evolution-reject', {
+      runId,
+      cid,
+      op: found.op,
+      ...(rejectReason ? { reason: rejectReason } : feedback && feedback.trim() ? { feedback: feedback.trim().slice(0, 500) } : {}),
+    })
+    return { ok: true, op: found.op }
+  }
+
+  /** auto 触发（回合收口空闲点）：模式 auto + 无在途 run + 无未决候选 + 压力达阈值 → fire-and-forget */
+  function onTurnClosedFor(workspaceId: string, sessionId: string): void {
+    if (evolveModes.get(workspaceId) !== 'auto') return
+    const handle = handles.get(key(workspaceId, sessionId))
+    if (!handle || evolveInFlight.has(key(workspaceId, sessionId))) return
+    if (evolutionPendingExists(handle)) return
+    const entries = getMemoryStore(handle.workspaceRoot).list()
+    if (entries.length === 0 || memoryPressureOf(entries).pct < EVOLVE_AUTO_PCT) return
+    void memoryEvolve(workspaceId, sessionId, true).catch((err) => {
+      console.error('[host] 自动进化失败（已落 memory/evolution-failed）：', err instanceof Error ? err.message : err)
+    })
+  }
+
+  // ── T-RW：RepoWiki（工作区级本地生成——扫描→大纲→逐页→落盘 userData/repo-wiki/<wsId>/，
+  //    零上传；落链承载 = 该工作区活跃会话；进度经 push:repo-wiki；dispatch 20s 超时 →
+  //    generate 即时返回 runId、编排 fire-and-forget；取消旗标步间检查） ──
+
+  /** 编排中止信号（区别于失败——aborted 落链口径不同） */
+  class RepoWikiAbort extends Error {
+    constructor() {
+      super('RepoWiki generation aborted')
+    }
+  }
+
+  const repoWikiInFlight = new Set<string>()
+  const repoWikiCancel = new Map<string, boolean>()
+
+  function repoWikiDir(workspaceId: string): string {
+    return join(opts.userDataDir, 'repo-wiki', workspaceId)
+  }
+
+  function repoWikiGet(workspaceId: string): RepoWikiManifestDTO | null {
+    const dir = repoWikiDir(workspaceId)
+    const file = join(dir, 'manifest.json')
+    if (!existsSync(file)) return null
+    try {
+      const m = JSON.parse(readFileSync(file, 'utf8')) as RepoWikiManifestDTO
+      // 页面正文随取（≤6 页全量可承受——渲染层双栏直用，免二次 IPC）
+      return {
+        ...m,
+        pages: m.pages.map((p) => {
+          const pf = join(dir, 'pages', p.id + '.md')
+          return { ...p, ...(existsSync(pf) ? { md: readFileSync(pf, 'utf8') } : {}) }
+        }),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  function repoWikiStop(workspaceId: string): { ok: true } {
+    if (repoWikiInFlight.has(workspaceId)) repoWikiCancel.set(workspaceId, true)
+    return { ok: true }
+  }
+
+  function repoWikiGenerate(workspaceId: string, sessionId: string): { runId: string } {
+    if (repoWikiInFlight.has(workspaceId)) {
+      throw new Error('CAR-E-DESKTOP: RepoWiki 生成进行中（该工作区）——等待完成或先停止')
+    }
+    requireAliveHandle(workspaceId, sessionId) // 落链承载前置校验（D-46②）
+    const runId = 'RW-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
+    repoWikiInFlight.add(workspaceId)
+    repoWikiCancel.set(workspaceId, false)
+    void runWikiGeneration(workspaceId, sessionId, runId).catch((err) => {
+      console.error('[host] RepoWiki 编排异常（应为已兜底路径）：', err instanceof Error ? err.message : err)
+    })
+    return { runId }
+  }
+
+  async function runWikiGeneration(workspaceId: string, sessionId: string, runId: string): Promise<void> {
+    const t0 = Date.now()
+    const usageTotal = { input: 0, output: 0 }
+    let usageSeen = false
+    const progress = (step: string, pct: number, message: string, extra: Record<string, unknown> = {}): void => {
+      emit(IpcPushTopic.RepoWiki, { workspaceId, runId, step, pct, message, ...extra })
+    }
+    const alive = (): SessionHandle | undefined => handles.get(key(workspaceId, sessionId))
+    const cancelled = (): boolean => repoWikiCancel.get(workspaceId) === true
+    /** 一次 LLM 直调（一次性内存 log——usage 提取禁估算；工具面空） */
+    const callModel = async (runtime: NonNullable<Awaited<ReturnType<typeof loadRuntimeFor>>['runtime']>, prompt: string): Promise<{ text: string; usage?: { input: number; output: number } }> => {
+      const log = new SessionLog('rw-' + runId + '-' + Math.random().toString(36).slice(2, 6))
+      const model = createChatModelFn({
+        runtime,
+        log,
+        signal: { aborted: false },
+        currentTurnId: () => 'wiki',
+        currentModel: () => alive()?.sessionModel ?? '',
+        toolDefs: [],
+      })
+      log.append('user', 'user', 'wiki', prompt)
+      const step = await model()
+      if (step.stopReason !== 'stop' || !step.text || !step.text.trim()) {
+        throw new Error(`RepoWiki LLM 调用未返回有效文本（stopReason=${step.stopReason}）`)
+      }
+      const u = log.events.find((e) => e.kind === 'usage')
+      const up = (u?.payload ?? {}) as Record<string, unknown>
+      const usage = typeof up['input'] === 'number' && typeof up['output'] === 'number' ? { input: up['input'] as number, output: up['output'] as number } : undefined
+      if (usage) {
+        usageTotal.input += usage.input
+        usageTotal.output += usage.output
+        usageSeen = true
+      }
+      return { text: step.text, usage }
+    }
+    try {
+      const handle = alive()
+      if (!handle) throw new Error('会话已关闭（落链承载不可用）')
+      const root = registry.pathOf(workspaceId)
+      const { runtime, modelError } = await loadRuntimeFor(root)
+      if (!runtime) throw new Error(`RepoWiki 生成需要会话模型（${modelError ?? '模型未装配'}）`)
+
+      // ① scan：fs_read 同管线逐文件（decide 预筛 + catch 分类）——语料天然脱敏/截断
+      progress('scan', 5, '扫描工作区文件…（排除 .git/node_modules/拒绝路径）')
+      const scan = scanWorkspace(root)
+      const readTool = fsReadTool(root, fileSecurity)
+      const corpus: WikiCorpusFile[] = []
+      const excluded = { denied: 0, binary: 0, other: 0 }
+      let budgetSkipped = 0
+      let totalChars = 0
+      for (const rel of scan.files) {
+        if (cancelled()) throw new RepoWikiAbort()
+        if (corpus.length >= REPO_WIKI_MAX_FILES || totalChars >= REPO_WIKI_CHAR_BUDGET) {
+          budgetSkipped++
+          continue
+        }
+        const d = fileSecurity.decide('read', rel, root)
+        if (d.tier === 'deny' || d.tier === 'fallback-outside') {
+          excluded.denied++
+          continue
+        }
+        try {
+          const r = (await readTool.run({ path: rel })) as { content: string }
+          corpus.push({ path: rel, content: r.content })
+          totalChars += r.content.length
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('二进制')) excluded.binary++
+          else if (msg.includes('被文件规则拒绝') || msg.includes('越界')) excluded.denied++
+          else excluded.other++
+        }
+      }
+      handle.appendNarrative('repo-wiki/scan', {
+        runId,
+        fileCount: corpus.length,
+        totalChars,
+        excluded,
+        budgetSkipped,
+        prunedDirs: scan.prunedDirs,
+        files: corpus.map((c) => c.path),
+      })
+      progress('scan', 10, `扫描完成：${corpus.length} 文件 / ${totalChars} 字符（.git/node_modules/拒绝路径已排除）`)
+
+      // ② outline：LLM 直调出页面大纲（≤6 页）
+      if (cancelled()) throw new RepoWikiAbort()
+      const outline: WikiOutlinePage[] = parseOutlineResponse(
+        (await callModel(runtime, buildOutlinePrompt(corpus))).text,
+        new Set(corpus.map((c) => c.path)),
+      )
+      handle.appendNarrative('repo-wiki/outline', { runId, pages: outline.map((p) => ({ id: p.id, title: p.title, files: p.files.length })) })
+      progress('outline', 25, `大纲就绪：${outline.length} 页`)
+
+      // ③ pages：逐页 LLM 直调（每步间查取消 + 会话存活）
+      const pages: Array<{ id: string; title: string; md: string; chars: number; durationMs: number }> = []
+      for (let i = 0; i < outline.length; i++) {
+        const p = outline[i]!
+        if (cancelled()) throw new RepoWikiAbort()
+        if (!alive()) throw new Error('会话已关闭（落链承载不可用——生成中止）')
+        const t1 = Date.now()
+        const { text, usage } = await callModel(runtime, buildPagePrompt(p, corpus))
+        const md = stripFences(text)
+        handle.appendNarrative('repo-wiki/page', {
+          runId,
+          pageId: p.id,
+          title: p.title,
+          chars: md.length,
+          durationMs: Date.now() - t1,
+          ...(usage ? { usage } : {}),
+        })
+        pages.push({ id: p.id, title: p.title, md, chars: md.length, durationMs: Date.now() - t1 })
+        progress('page', 25 + Math.round(((i + 1) / outline.length) * 65), `已生成 ${i + 1}/${outline.length} 页：${p.title}`, { pagesDone: i + 1 })
+      }
+
+      // ④ write：userData/repo-wiki/<wsId>/（manifest tmp+rename 原子）
+      const dir = repoWikiDir(workspaceId)
+      mkdirSync(join(dir, 'pages'), { recursive: true })
+      for (const p of pages) writeFileSync(join(dir, 'pages', p.id + '.md'), p.md, 'utf8')
+      const manifest: RepoWikiManifestDTO = {
+        workspaceId,
+        generatedAt: Date.now(),
+        model: alive()?.sessionModel ?? '',
+        durationMs: Date.now() - t0,
+        pages: pages.map((p) => ({ id: p.id, title: p.title, chars: p.chars })),
+        ...(usageSeen ? { usage: { ...usageTotal } } : {}),
+      }
+      const tmp = join(dir, 'manifest.json.tmp')
+      writeFileSync(tmp, JSON.stringify(manifest, null, 2), 'utf8')
+      renameSync(tmp, join(dir, 'manifest.json'))
+      const h = alive()
+      if (h) {
+        h.appendNarrative('repo-wiki/done', {
+          runId,
+          pages: pages.length,
+          totalChars: pages.reduce((n, p) => n + p.chars, 0),
+          durationMs: manifest.durationMs,
+          ...(usageSeen ? { usage: { ...usageTotal } } : {}),
+        })
+      }
+      progress('done', 100, `RepoWiki 已生成 ${pages.length} 页（本地落盘 · 零上传）`, { pagesDone: pages.length })
+    } catch (err) {
+      const aborted = err instanceof RepoWikiAbort || cancelled()
+      const msg = err instanceof Error ? err.message : String(err)
+      const h = alive()
+      if (h) {
+        if (aborted) h.appendNarrative('repo-wiki/aborted', { runId, atMs: Date.now() - t0 })
+        else h.appendNarrative('repo-wiki/failed', { runId, reason: msg.slice(0, 200) })
+      }
+      progress(
+        aborted ? 'aborted' : 'error',
+        0,
+        aborted ? '已停止（生成随时可停）' : `生成失败：${msg.slice(0, 120)}`,
+        aborted ? {} : { error: msg.slice(0, 200) },
+      )
+    } finally {
+      repoWikiInFlight.delete(workspaceId)
+      repoWikiCancel.delete(workspaceId)
+    }
+  }
+
+  function depsFor(workspaceId: string, sessionId: string, workspaceRoot: string, contextWindow: number | null): Parameters<typeof SessionHandle.createFresh>[0]['deps'] {
     return {
       workspaceId,
       authzTimeoutMs,
@@ -191,6 +700,10 @@ export function createHostService(opts: HostServiceOptions): HostService {
       memoryStore: getMemoryStore(workspaceRoot),
       // T-24（PRD C-1）：能力库读取面（<workspaceRoot>/.car/capabilities/ 白盒目录）
       loadCapabilities: () => listCapabilities(workspaceRoot).entries,
+      // T-ME：回合收口 = 宿主空闲点（auto 进化检查）
+      onTurnClosed: () => onTurnClosedFor(workspaceId, sessionId),
+      // T-MP：个性化设置面（创建时快照——store.state 闭包即时读）
+      personalization: () => personalizationStore.state(),
     }
   }
 
@@ -358,6 +871,14 @@ export function createHostService(opts: HostServiceOptions): HostService {
   }
 
   /**
+   * T-FV-2：后台 bash 任务面装配——无运行时依赖（宿主 spawn 自管），无条件挂载；
+   * 接线即孤儿收割（重启后链上无收口的 bash/start 补 stopped 收口）。
+   */
+  function attachBashTasksFor(root: string, handle: SessionHandle): void {
+    handle.attachBashTasks(new BashTaskManager({ parentLog: handle.log, workspaceRoot: root }))
+  }
+
+  /**
    * 跨运行句柄重建公共路径（T-22 / T-20 结论）：验链（调用方先决）→ 五件套同构
    * （loadRuntimeFor + loadExtraTools + SessionHandle.resume + wireRoutingSink +
    * attachRuntimeModel）。session:open（打开即恢复）与 turn:send（惰性兜底）共用——
@@ -380,7 +901,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         workspaceRoot: root,
         configModel: runtime?.llm.model ?? null,
         modelError,
-        deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
+        deps: { ...depsFor(workspaceId, sessionId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
       },
       loaded.log,
     )
@@ -388,6 +909,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
     wireRoutingSink(routingSink, handle)
     attachRuntimeModel(handle, runtime, root, extraTools)
     attachSubagentsFor(workspaceId, root, handle, runtime)
+    attachBashTasksFor(root, handle)
     handles.set(key(workspaceId, sessionId), handle)
     return handle
   }
@@ -523,12 +1045,13 @@ export function createHostService(opts: HostServiceOptions): HostService {
           workspaceRoot: root,
           configModel: runtime?.llm.model ?? null,
           modelError,
-          deps: { ...depsFor(workspaceId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
+          deps: { ...depsFor(workspaceId, sessionId, root, contextWindow), extraTools, mcpToolUrl, compactionCfg: runtime?.compaction },
         })
         // S5（D-S5-1）：routing/decide 落链出口回填（先于任何请求——未回填期无决策丢失面）
         wireRoutingSink(routingSink, handle)
         attachRuntimeModel(handle, runtime, root, extraTools)
         attachSubagentsFor(workspaceId, root, handle, runtime)
+    attachBashTasksFor(root, handle)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}
@@ -761,6 +1284,43 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
         return getMemoryStore(handle.workspaceRoot).rollback(handle.log, requireString(p.id, 'id'))
       }
+      // ── T-ME：记忆进化（手动 + auto；LLM 直调核——批准落盘走内核 MemoryStore） ──
+      case IpcChannel.MemoryEvolve:
+        return memoryEvolve(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+          p['auto'] === true,
+        )
+      case IpcChannel.MemoryEvolveDecide:
+        return memoryEvolveDecide(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+          requireString(p.runId, 'runId'),
+          requireString(p.cid, 'cid'),
+          p['approve'] === true,
+          typeof p['feedback'] === 'string' ? p['feedback'] : undefined,
+        )
+      case IpcChannel.MemoryEvolveMode: {
+        // 端侧偏好同步（localStorage 权威；workspace 级内存态，不落链）
+        const wid = requireString(p.workspaceId, 'workspaceId')
+        evolveModes.set(wid, p['mode'] === 'auto' ? 'auto' : 'manual')
+        return { ok: true, mode: evolveModes.get(wid) }
+      }
+      // ── T-MP：个性化设置面（端侧偏好——不落链；应用于新会话快照） ──
+      case IpcChannel.PersonalizationGet:
+        return personalizationStore.get()
+      case IpcChannel.PersonalizationSet:
+        return personalizationStore.set(p)
+      // ── T-RW：RepoWiki（生成 = fire-and-forget 编排——dispatch 20s 超时面禁同步等待） ──
+      case IpcChannel.RepoWikiGet:
+        return repoWikiGet(requireString(p.workspaceId, 'workspaceId'))
+      case IpcChannel.RepoWikiGenerate:
+        return repoWikiGenerate(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+        )
+      case IpcChannel.RepoWikiStop:
+        return repoWikiStop(requireString(p.workspaceId, 'workspaceId'))
       // ── T-24（D2-S1 / PRD §2）：能力库条目面（CRUD 落链承载 = 活跃会话——memory CRUD 同款链同源） ──
       case IpcChannel.CapabilityList:
         return listCapabilities(registry.pathOf(requireString(p.workspaceId, 'workspaceId')))
@@ -836,6 +1396,36 @@ export function createHostService(opts: HostServiceOptions): HostService {
         handle.attachmentRemove(requireString(p.path, 'path'))
         return { ok: true }
       }
+      // ── T-FV：文件查看器（file:shell-open 属 main 侧 shell 能力，不入宿主） ──
+      case IpcChannel.FilePreview:
+        return filePreview(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+          requireString(p.path, 'path'),
+        )
+      case IpcChannel.FileOpen:
+        return fileOpenLog(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+          requireString(p.path, 'path'),
+          p.how === 'browser' ? 'browser' : 'system',
+        )
+      case IpcChannel.FileShellOpen:
+        throw new Error('CAR-E-DESKTOP: file:shell-open 由 main 侧处理（契约通道误入宿主 dispatch）')
+      // ── T-FV-2：任务控制面（subagent:kill / bash:output / bash:kill——宿主动作不过授权门，
+      // turn:abort 同口径；落链在 manager 内部——subagent/kill、bash/start|exit|kill） ──
+      case IpcChannel.SubagentKill: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return handle.killSubagent(requireString(p.subagentId, 'subagentId'))
+      }
+      case IpcChannel.BashOutput: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return handle.bashOutput(requireString(p.taskId, 'taskId'))
+      }
+      case IpcChannel.BashKill: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        return handle.bashKill(requireString(p.taskId, 'taskId'))
+      }
       case IpcChannel.FileSecurityGet:
         return fileSecurityStore.get()
       case IpcChannel.FileSecuritySet:
@@ -909,6 +1499,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
       // 测试/收口面：MCP stdio 子进程收口（不收口 = 存活流钉住事件环）
       for (const [, entry] of mcpFaces) entry.face.close()
       mcpFaces.clear()
+      // T-ME：auto 进化复核超时计时器全清（收口后 handle 查无即 no-op，此处防悬挂句柄）
+      for (const t of evolveTimers.values()) clearTimeout(t)
+      evolveTimers.clear()
     },
   }
 }
