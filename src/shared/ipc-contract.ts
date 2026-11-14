@@ -277,7 +277,10 @@ export interface SessionEventPush {
 /**
  * 流式增量推送载荷（1.19.0）：turnId 对齐 SessionEventDTO.turnId（渲染层按 turn 归组、
  * assistant/turnEnd 事件到达即清零该 turn 的增量缓冲）。textDelta = 内核脱敏后放行段；
- * toolName = 工具名首次可知（一次）；二者至多其一非空。
+ * toolName = 工具名首次可知（一次）；textDelta 与 toolName 互斥。
+ * v0.9.0（内核 1.22 / D-SD2）：+thinkingDelta = 思考掩蔽流（内核侧独立 StreamRedactor 已脱敏——
+ * D-C1 主面纪律）；与 textDelta 可共存（openai 形 reasoning+content 同 chunk 分流到达）；
+ * 可选键向后兼容（内核 ≤1.21.1 不推此键，渲染层零影响）。
  */
 export interface SessionDeltaPush {
   workspaceId: string
@@ -285,6 +288,7 @@ export interface SessionDeltaPush {
   turnId: string
   textDelta?: string
   toolName?: string
+  thinkingDelta?: string
   ts: number
 }
 

@@ -749,6 +749,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
               turnId: d.turnId,
               ...(d.textDelta !== undefined ? { textDelta: d.textDelta } : {}),
               ...(d.toolName !== undefined ? { toolName: d.toolName } : {}),
+              // v0.9.0（内核 1.22 / D-SD2）：思考掩蔽流透传（可选键——老内核 d 无此键零影响）
+              ...(d.thinkingDelta !== undefined ? { thinkingDelta: d.thinkingDelta } : {}),
               ts: Date.now(),
             }),
         }),

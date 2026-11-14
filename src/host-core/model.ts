@@ -155,8 +155,9 @@ export function createChatModelFn(opts: {
    * 1.19.0：流式增量出口（内核 chatStep onDelta 透传——textDelta 已过 StreamRedactor）。
    * turnId = 本请求装配时锚定值（与 chatStep turnId 同源，句柄现值漂移免疫）。
    * 缺省 = 不回调（零行为变化）；宿主侧组装 SessionDeltaPush 推送面（不落链——事实本体在 JSONL）。
+   * v0.9.0（内核 1.22 / D-SD2）：+thinkingDelta = 思考掩蔽流（内核侧独立 StreamRedactor 已脱敏）。
    */
-  onDelta?: (d: { turnId: string; textDelta?: string; toolName?: string }) => void
+  onDelta?: (d: { turnId: string; textDelta?: string; toolName?: string; thinkingDelta?: string }) => void
 }): HostModelFn {
   return () => {
     // 会话级思考档位——每次请求实时读（model/set 即时生效）
@@ -178,8 +179,8 @@ export function createChatModelFn(opts: {
       ...(opts.runtime.llm.adapterId ? { adapterId: opts.runtime.llm.adapterId } : {}),
       // S5（D-S5-3）：reasoning 透传（off/缺席 = 字节面零痕迹）
       ...(r && r !== 'off' ? { reasoning: { effort: r } } : {}),
-      // 1.19.0：流式增量透传（turnId 请求级锚定；缺省不传——chatStep 零行为变化）
-      ...(opts.onDelta ? { onDelta: (d: { textDelta?: string; toolName?: string }) => opts.onDelta!({ ...d, turnId }) } : {}),
+      // 1.19.0：流式增量透传（turnId 请求级锚定；缺省不传——chatStep 零行为变化）；v0.9.0 thinkingDelta 透传
+      ...(opts.onDelta ? { onDelta: (d: { textDelta?: string; toolName?: string; thinkingDelta?: string }) => opts.onDelta!({ ...d, turnId }) } : {}),
       signal: opts.signal,
     })
   }

@@ -802,6 +802,20 @@ body {
 
 /* 1.19.0：流式增量气泡（生成中实时上屏——光标呼吸 + 气泡临时态弱化描边） */
 .msg.streaming .bubble { border-style: dashed; }
+/* v0.9.0（D-SD3）：思考条——掩蔽流滚动呈现（内核侧已脱敏；即时态，turn 收口由叙事 chip 接管） */
+.msg.thinking-live .bubble {
+  font-style: italic;
+  max-height: 9em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.thinking-live .think-label {
+  font-style: normal;
+  font-weight: 600;
+  margin-right: 6px;
+  color: var(--dim, #8a8f98);
+}
 .stream-cursor {
   display: inline-block;
   width: 7px;

@@ -125,11 +125,18 @@ export function AuditView({ selected, sessions, focusSid, onFocused }: { selecte
                     const isMemory = e.kind === 'memory'
                     const memType = isMemory ? String((e.payload as Record<string, unknown> | null)?.['type'] ?? '?') : null
                     const memId = isMemory ? String((e.payload as Record<string, unknown> | null)?.['id'] ?? '?') : null
+                    // v0.9.0（D-SD5）：thinking 多块行徽标（内核 1.22 meta.blockIndex——多块链行级留痕；单块行原样）
+                    const kindLabel =
+                      e.kind === 'thinking' && typeof (e.meta as Record<string, unknown> | null | undefined)?.['blockIndex'] === 'number'
+                        ? `thinking·块${(e.meta as Record<string, unknown>)['blockIndex']}`
+                        : isMemory
+                          ? `memory·${memType}`
+                          : e.kind
                     return (
                       <tr key={e.seq} className={isAuthz ? 'hl-authz' : isMemory ? 'hl-memory' : ''}>
                         <td>{e.seq}</td>
                         <td className="mono">{ts(e.ts)}</td>
-                        <td>{isMemory ? `memory·${memType}` : e.kind}</td>
+                        <td>{kindLabel}</td>
                         <td className="mono">{isAuthz ? 'authz:*' : e.turnId}</td>
                         <td className="mono dim2">{isMemory ? `${memId} · ${preview(e.payload)}` : preview(e.payload)}</td>
                       </tr>

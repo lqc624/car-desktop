@@ -42,17 +42,8 @@ import { taskRowsFrom, formatDuration, type TaskRow } from './task-rows'
  */
 
 /** 1.19.0：流式增量缓冲（按 turn 归组——assistant/turnEnd 事件到达即清零该 turn） */
-interface StreamBuf {
-  turnId: string
-  text: string
-  toolName: string | null
-}
-
-/** 流式增量归并（纯函数——按 turnId 换道重建，textDelta 追加，toolName 首见钉住） */
-function applyStreamDelta(prev: StreamBuf | null, p: SessionDeltaPush): StreamBuf {
-  const base = prev && prev.turnId === p.turnId ? prev : { turnId: p.turnId, text: '', toolName: null }
-  return { turnId: base.turnId, text: base.text + (p.textDelta ?? ''), toolName: p.toolName ?? base.toolName }
-}
+/** v0.9.0：StreamBuf/applyStreamDelta/thinkingRowsFrom 迁纯函数模块（stream-thinking——可测面） */
+import { applyStreamDelta, thinkingRowsFrom, type StreamBuf } from './stream-thinking'
 
 interface ToolCard {
   callId: string
@@ -71,7 +62,7 @@ const FS_TOOLS = new Set(['fs_read', 'fs_write', 'fs_delete'])
 type ChatItem =
   | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean }
   | { kind: 'tool'; card: ToolCard }
-  | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string; subagentLink?: string }
+  | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string; subagentLink?: string; auditJump?: true }
 
 const fmtTok = (n: number | null): string =>
   n == null ? '—' : n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n)
@@ -152,6 +143,9 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
   // 执行中的 turn 不是「排队」：busy 时 seq 最靠前的未闭合 turn = 正在跑，其消息不挂待执行徽标
   // （徽标语义 = 引导排队；此前 T1 自身也挂徽标，S6 终验③ 实测量到 3 条而非 2 条）
   const runningTurnId = busy ? [...pendingTurnIds][0] : undefined
+  // v0.9.0（D-SD4）：thinking 叙事 chip——同 turn 聚合（内核一块一事件）；主面零原文（D-C1），
+  // chip 只显计数，点击跳审计页看原文
+  const thinkRowByFirstSeq = new Map(thinkingRowsFrom(events).map((r) => [r.firstSeq, r]))
   for (const e of events) {
     const payload = e.payload
     const p = (payload ?? {}) as Record<string, unknown>
@@ -159,6 +153,10 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
       items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: (pendingTurnIds.has(e.turnId) && e.turnId !== runningTurnId) || undefined })
     } else if (e.kind === 'assistant') {
       items.push({ kind: 'msg', role: 'agent', text: String(payload ?? '') })
+    } else if (e.kind === 'thinking') {
+      const row = thinkRowByFirstSeq.get(e.seq)
+      if (row) items.push({ kind: 'line', tone: 'dim', text: `已思考 ~${row.chars} 字 · ${row.blocks} 块（原文审计可见）`, auditJump: true })
+      // 非 firstSeq 的 thinking 事件 = 同 turn 后续块（chip 已聚合计数）——零行
     } else if (e.kind === 'routing') {
       // S5（D-S5-1）：模型池路由决策——降级 fail-visible（禁静默换模型）
       routing.push({ seq: e.seq, selected: p['selected'] as string | null, reason: String(p['reason'] ?? '?'), retries: Number(p['retries'] ?? 0) })
@@ -1449,9 +1447,24 @@ export function App() {
                     {it.subagentLink && (
                       <button className="link-btn" onClick={() => { setAuditFocus(it.subagentLink!); setView('audit') }}>查看子链 ↗</button>
                     )}
+                    {it.auditJump && (
+                      <button className="link-btn" onClick={() => setView('audit')}>审计原文 ↗</button>
+                    )}
                   </div>
                 )
               })}
+              {/* v0.9.0（D-SD3）：思考条——掩蔽流滚动呈现（内核侧已脱敏，D-C1 主面纪律；即时态，
+                  assistant/turnEnd 到达清零由叙事 chip 接管） */}
+              {stream && stream.thinking && (
+                <div className="msg agent thinking-live">
+                  <div className="who">CR</div>
+                  <div className="bubble">
+                    <span className="think-label">思考中</span>
+                    {stream.thinking}
+                    <span className="stream-cursor" aria-hidden />
+                  </div>
+                </div>
+              )}
               {/* 1.19.0：流式增量气泡（生成中实时上屏——内核脱敏放行段；assistant 事件到达即被事件全文取代） */}
               {stream && (stream.text || stream.toolName) && (
                 <div className="msg agent streaming">
