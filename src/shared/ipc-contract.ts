@@ -254,8 +254,8 @@ export interface SessionEventDTO {
   seq: number
   ts: number
   actor: 'user' | 'model' | 'plugin' | 'runtime'
-  /** 内核 EventKind 镜像（1.15 实查：+usage/compact/routing/memory） */
-  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage' | 'compact' | 'routing' | 'memory'
+  /** 内核 EventKind 镜像（1.15 实查：+usage/compact/routing/memory；1.21 实查：+thinking——R-TOKENHUB-1 工具环回传面） */
+  kind: 'user' | 'assistant' | 'toolCall' | 'toolResult' | 'turnEnd' | 'goalUpdate' | 'hostRaw' | 'fork' | 'system' | 'usage' | 'compact' | 'routing' | 'memory' | 'thinking'
   turnId: string
   payload: unknown
   meta?: Record<string, unknown> | null
