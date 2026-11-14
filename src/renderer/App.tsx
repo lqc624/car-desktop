@@ -1448,7 +1448,7 @@ export function App() {
                       <button className="link-btn" onClick={() => { setAuditFocus(it.subagentLink!); setView('audit') }}>查看子链 ↗</button>
                     )}
                     {it.auditJump && (
-                      <button className="link-btn" onClick={() => setView('audit')}>审计原文 ↗</button>
+                      <button className="link-btn" onClick={() => { if (openId) setAuditFocus(openId); setView('audit') }}>审计原文 ↗</button>
                     )}
                   </div>
                 )
