@@ -147,8 +147,9 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.CapabilityDelete, (_event, payload: unknown) => callHost(IpcChannel.CapabilityDelete, payload))
   ipcMain.handle(IpcChannel.CapabilityRefAdd, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefAdd, payload))
   ipcMain.handle(IpcChannel.CapabilityRefRemove, (_event, payload: unknown) => callHost(IpcChannel.CapabilityRefRemove, payload))
-  // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链） ——
+  // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链；preview = C4 向导只读预览） ——
   ipcMain.handle(IpcChannel.CapabilityImport, (_event, payload: unknown) => callHost(IpcChannel.CapabilityImport, payload))
+  ipcMain.handle(IpcChannel.CapabilityImportPreview, (_event, payload: unknown) => callHost(IpcChannel.CapabilityImportPreview, payload))
   ipcMain.handle(IpcChannel.AttachmentAdd, (_event, payload: unknown) => callHost(IpcChannel.AttachmentAdd, payload))
   ipcMain.handle(IpcChannel.AttachmentRemove, (_event, payload: unknown) => callHost(IpcChannel.AttachmentRemove, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——

@@ -1383,6 +1383,32 @@ export function createHostService(opts: HostServiceOptions): HostService {
         })
         return { results }
       }
+      // ── C4 导入向导预览（先收集后计划）：只读解析 + id 冲突预测——零写盘零落链（执行走 CapabilityImport；
+      //    预览与执行间文件可变 = 以执行时实际消解为准，预览行 conflict 仅作计划呈现） ──
+      case IpcChannel.CapabilityImportPreview: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        if (!Array.isArray(p.paths) || p.paths.length === 0) {
+          throw new Error('CAR-E-DESKTOP: capability:import-preview 缺少 paths（string[]）')
+        }
+        if (p.paths.length > 50) throw new Error(`CAR-E-DESKTOP: 单次导入上限 50 个文件（当前 ${p.paths.length}）`)
+        const results = p.paths.map((raw: unknown): { file: string; ok: boolean; id?: string; name?: string; chars?: number; predictedId?: string; conflict?: boolean; error?: string } => {
+          const file = String(raw)
+          try {
+            const content = readFileSync(file, 'utf8')
+            const cand = skillMdToCapability(content, file.split(/[\\/]/).pop() ?? file)
+            if (!cand.ok) return { file, ok: false, error: cand.error }
+            const conflict = loadCapability(handle.workspaceRoot, cand.id) !== null
+            let predictedId = cand.id
+            if (conflict) {
+              for (let n = 2; loadCapability(handle.workspaceRoot, predictedId) !== null; n++) predictedId = `${cand.id}-${n}`
+            }
+            return { file, ok: true, id: cand.id, name: cand.name, chars: cand.spec.length, predictedId, conflict }
+          } catch (err) {
+            return { file, ok: false, error: err instanceof Error ? err.message : String(err) }
+          }
+        })
+        return { results }
+      }
       // ── T-25（D2-S2 / PRD §4）：附件面（file/attach 恒落链；选择器属 main 侧能力） ──
       case IpcChannel.AttachmentPick:
         throw new Error('CAR-E-DESKTOP: attachment:pick 由 main 侧处理（契约通道误入宿主 dispatch）')

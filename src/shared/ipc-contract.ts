@@ -71,6 +71,8 @@ export const IpcChannel = {
   CapabilityImportPick: 'capability:import-pick',
   /** SKILL.md 导入：逐文件解析→写盘→capability/write 叙事（imported:true）；逐文件结果 fail-visible */
   CapabilityImport: 'capability:import',
+  /** C4 导入向导（先收集后计划）：只读预览——解析 + id 冲突预测，零写盘零落链（执行仍走 CapabilityImport） */
+  CapabilityImportPreview: 'capability:import-preview',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -453,6 +455,23 @@ export interface CapabilityImportResult {
   results: CapabilityImportResultRow[]
 }
 
+/** C4 导入向导预览行（只读——冲突预测 = 盘上已有 id 时带 suffix，执行时以实际消解为准） */
+export interface CapabilityImportPreviewRow {
+  file: string
+  ok: boolean
+  id?: string
+  name?: string
+  chars?: number
+  /** 盘上已存在同 id 条目 → 预测 -2/-3 后缀（计划呈现「将新增为」） */
+  predictedId?: string
+  conflict?: boolean
+  error?: string
+}
+
+export interface CapabilityImportPreview {
+  results: CapabilityImportPreviewRow[]
+}
+
 /** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
 export interface AttachmentRowDTO {
   path: string
@@ -830,6 +849,7 @@ export interface IpcRequestMap {
   [IpcChannel.CapabilityRefRemove]: { workspaceId: string; sessionId: string; refId: string }
   [IpcChannel.CapabilityImportPick]: undefined
   [IpcChannel.CapabilityImport]: { workspaceId: string; sessionId: string; paths: string[] }
+  [IpcChannel.CapabilityImportPreview]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -931,6 +951,8 @@ export interface CarBridge {
   capabilityImportPick(): Promise<string[] | null>
   /** 逐文件解析→写盘→capability/write 叙事（imported:true）；逐文件结果 fail-visible */
   capabilityImport(workspaceId: string, sessionId: string, paths: string[]): Promise<CapabilityImportResult>
+  /** C4 导入向导：只读预览（解析 + id 冲突预测——零写盘零落链；执行走 capabilityImport） */
+  capabilityImportPreview(workspaceId: string, sessionId: string, paths: string[]): Promise<CapabilityImportPreview>
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   attachmentPick(): Promise<string[] | null>

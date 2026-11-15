@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CapabilityEntryDTO, CapabilityImportResultRow, CapabilityKindDTO, CapabilityStatusDTO, WorkspaceInfo } from '../../shared/ipc-contract'
+import { CapabilityImportWizard } from '../wizard/CapabilityImportWizard'
 
 /**
  * T-24 能力库视图（D2-S1 / PRD C-4 React 原生重写——D-C7 iframe 方案关闭）
@@ -52,6 +53,8 @@ export function CapabilityView({
   const [editId, setEditId] = useState<string | null>(null)
   // SKILL.md 导入互认：逐文件结果（fail-visible——成功/失败分行呈现，禁静默吞）
   const [importResult, setImportResult] = useState<CapabilityImportResultRow[] | null>(null)
+  // C4 导入向导：激活态（先预览后确认——直接导入按钮保留为专家路径）
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   const load = useCallback(async () => {
     if (!selected) return
@@ -75,6 +78,7 @@ export function CapabilityView({
     setForm(null)
     setEditId(null)
     setImportResult(null)
+    setWizardOpen(false)
     if (selected) void loadRef.current()
   }, [selected])
 
@@ -156,6 +160,9 @@ export function CapabilityView({
       <div className="cap-tree">
         <div className="cap-title">
           能力库
+          <button className="mini" disabled={!openId} onClick={() => setWizardOpen(true)} title="导入向导（先只读预览后确认执行——协议六条；直接导入按钮保留为专家路径）">
+            ⌁ 向导
+          </button>
           <button className="mini" disabled={!openId} onClick={() => void importSkills()} title="从 SKILL.md 导入（frontmatter name/description/tags 自动映射，正文 = spec；id 冲突自动 -2/-3 后缀）">
             ⇪ 导入
           </button>
@@ -212,7 +219,16 @@ export function CapabilityView({
         ))}
       </div>
       <div className="cap-detail">
-        {form && (
+        {wizardOpen && selected && openId && (
+          <CapabilityImportWizard
+            workspaceId={selected.id}
+            sessionId={openId}
+            onCancel={() => setWizardOpen(false)}
+            onDone={(msg) => { setWizardOpen(false); onStatus(msg) }}
+            onChanged={() => { void loadRef.current() }}
+          />
+        )}
+        {!wizardOpen && form && (
           <div className="cap-form">
             <div className="cap-title">{editId ? `编辑：${editId}` : '新建条目'}</div>
             {!editId && (
@@ -258,7 +274,7 @@ export function CapabilityView({
             {!openId && <div className="dim">无活跃会话——CRUD 落链需活跃会话（先打开一个会话）</div>}
           </div>
         )}
-        {!form && detail && (
+        {!wizardOpen && !form && detail && (
           <div className="cap-meta">
             <div className="cap-title-row">
               <b>{detail.name}</b>
@@ -284,7 +300,7 @@ export function CapabilityView({
             </div>
           </div>
         )}
-        {!form && !detail && <div className="empty">选择条目查看详情</div>}
+        {!wizardOpen && !form && !detail && <div className="empty">选择条目查看详情</div>}
       </div>
     </div>
   )

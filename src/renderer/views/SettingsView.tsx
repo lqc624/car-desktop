@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { DoctorRowDTO, EndpointListDTO, ModelMetaDTO, WorkspaceInfo } from '../../shared/ipc-contract'
+import { EndpointWizard } from '../wizard/EndpointWizard'
 
 /**
  * S4-S2 设置/诊断（立项书 F-D5）：doctor 全项（凭据在位/LLM 连通性/seam——值不打印）
@@ -23,6 +24,8 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // C4 向导：端点配置向导激活态（向导 = 表单引导层——表单保留为专家路径）
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   const load = useCallback(async () => {
     setError(null)
@@ -205,8 +208,24 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         <button className="btn" onClick={startAdd} title="新增一个自定义端点（不同 URL 各配各的模型）">
           ＋ 新端点
         </button>
-        <span className="dim">{editingId ? '正在编辑已有端点' : '正在新增端点（保存后自动设为使用中）'}</span>
+        <button
+          className="btn"
+          onClick={() => { setWizardOpen(true); setStatus(null); setError(null) }}
+          title="端点配置向导（协议六条：探针先行 / 一次一问 / ≤300 字 / 密钥不进对话 / 先计划后执行 / 全程留痕）"
+        >
+          ⌁ 向导新增
+        </button>
+        <span className="dim">{wizardOpen ? '向导模式（表单专家路径可随时切换回）' : editingId ? '正在编辑已有端点' : '正在新增端点（保存后自动设为使用中）'}</span>
       </div>
+      {wizardOpen && (
+        <EndpointWizard
+          onCancel={() => setWizardOpen(false)}
+          onDone={(msg) => { setWizardOpen(false); setStatus(msg); void load() }}
+          onEndpointChanged={onEndpointChanged}
+        />
+      )}
+      {!wizardOpen && (
+      <>
       <div className="row wrap">
         <select value={adapterId} onChange={(e) => setAdapterId(e.target.value === 'anthropic' ? 'anthropic' : 'openai-compat')} style={{ width: 150 }} title="适配器族：OpenAI 兼容 = /chat/completions；Anthropic = /v1/messages（Claude Code 型网关，baseUrl 不带 /v1）">
           <option value="openai-compat">OpenAI 兼容</option>
@@ -243,6 +262,8 @@ export function SettingsView({ selected, onEndpointChanged }: { selected?: Works
         </button>
       </div>
       <p className="dim">优先级 = 使用中的自定义端点 &gt; car.config llm（R-D6）· 多端点各槽各 Key，均经 safeStorage 加密（新增必填，编辑可留空沿用该槽 Key）、解密后仅内存推宿主装配（不落盘、不回显、不打印）· Anthropic 形态 = Claude Code 型网关（商汤等）：baseUrl 不带 /v1、Key 走 ANTHROPIC_API_KEY 通道 · 窗口声明可选——无值时该模型 ctx 百分比不显示、压缩 token 阈值不武装（禁估算）。</p>
+      </>
+      )}
 
       <h3>内置模型元数据</h3>
       <table className="mtable">
