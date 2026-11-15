@@ -78,6 +78,13 @@ export const IpcChannel = {
   ToolSourceHotGet: 'tool-source-hot:get',
   /** 开关切换（即时生效 start/stop watcher；返回切换后状态） */
   ToolSourceHotSet: 'tool-source-hot:set',
+  // —— C3-B1：受控浏览器（main 侧能力——窗口/partition/清除面归 main；缺省关 D-V10-2） ——
+  /** 浏览器设置状态（enabled/cdpPortActive/restartRequired） */
+  BrowserGet: 'browser:get',
+  /** 开关切换（重启宿主生效——CDP 端口启动期开关；返回切换后状态） */
+  BrowserSet: 'browser:set',
+  /** 清除面（T-B3：清除受控 partition Cookie/缓存——双动作显式） */
+  BrowserClearData: 'browser:clear-data',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -492,6 +499,16 @@ export interface ToolSourceHotStateDTO {
   watching: string[]
 }
 
+/** C3-B1 受控浏览器设置状态（缺省关 D-V10-2；CDP 端口 = 启动期开关） */
+export interface BrowserSettingsDTO {
+  enabled: boolean
+  /** 本宿主进程启动时已启用（CDP 端口在位） */
+  cdpPortActive: boolean
+  /** 已启用但本进程启动时未启用（须重启宿主生效） */
+  restartRequired: boolean
+  cdpPort: number
+}
+
 /** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
 export interface AttachmentRowDTO {
   path: string
@@ -872,6 +889,9 @@ export interface IpcRequestMap {
   [IpcChannel.CapabilityImportPreview]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.ToolSourceHotGet]: undefined
   [IpcChannel.ToolSourceHotSet]: { enabled: boolean }
+  [IpcChannel.BrowserGet]: undefined
+  [IpcChannel.BrowserSet]: { enabled: boolean }
+  [IpcChannel.BrowserClearData]: { cookies?: boolean; cache?: boolean }
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -978,6 +998,10 @@ export interface CarBridge {
   // —— C1：工具源热更新（缺省关 D-V10-2；Set 即时生效） ——
   toolSourceHotGet(): Promise<ToolSourceHotStateDTO>
   toolSourceHotSet(enabled: boolean): Promise<ToolSourceHotStateDTO>
+  // —— C3-B1：受控浏览器（main 侧；缺省关；Set 重启宿主生效） ——
+  browserGet(): Promise<BrowserSettingsDTO>
+  browserSet(enabled: boolean): Promise<BrowserSettingsDTO>
+  browserClearData(cookies: boolean, cache: boolean): Promise<{ ok: boolean; cleared: string[] }>
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   attachmentPick(): Promise<string[] | null>

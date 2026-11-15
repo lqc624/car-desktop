@@ -44,6 +44,8 @@ import { WorkspaceRegistry } from './workspaces.ts'
 import { SessionHandle, usageOver, type AuthzResponse } from './session-handle.ts'
 import { SubagentManager, childSessionIds, recoverChildSessions, type ChildModelFnOpts } from './subagent.ts'
 import { BashTaskManager } from './bashTasks.ts'
+import { BrowserTasks, BROWSER_CDP_PORT } from './browserTasks.ts'
+import { createBrowserStore } from './browserStore.ts'
 import {
   assertSafeId,
   listSessions,
@@ -926,6 +928,18 @@ export function createHostService(opts: HostServiceOptions): HostService {
   }
 
   /**
+   * C3-B1：受控浏览器工具面装配——**缺省关**（D-V10-2 / 提案 T-B5：browserEnabled 设置 + 宿主
+   * 重启生效的 CDP 端口）；启用态挂 browser_open/browser_read（网络轴在 authorize ⓪″；落链
+   * browser/* 由 manager 承载）。partition 'persist:car-browser'（Q-B4 单分片——账号体系接入
+   * 后扩展分片键，登记）；受控窗口 = main 进程创建（宿主启动时、设置启用态）。
+   */
+  const browserStore = createBrowserStore(opts.userDataDir)
+  function attachBrowserFor(handle: SessionHandle): void {
+    if (!browserStore.get().browserEnabled) return
+    handle.attachBrowserTasks(new BrowserTasks({ parentLog: handle.log, userDataDir: opts.userDataDir, cdpPort: BROWSER_CDP_PORT }))
+  }
+
+  /**
    * 跨运行句柄重建公共路径（T-22 / T-20 结论）：验链（调用方先决）→ 五件套同构
    * （loadRuntimeFor + loadExtraTools + SessionHandle.resume + wireRoutingSink +
    * attachRuntimeModel）。session:open（打开即恢复）与 turn:send（惰性兜底）共用——
@@ -957,6 +971,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
     attachRuntimeModel(handle, runtime, root, extraTools)
     attachSubagentsFor(workspaceId, root, handle, runtime)
     attachBashTasksFor(root, handle)
+    attachBrowserFor(handle)
     handles.set(key(workspaceId, sessionId), handle)
     return handle
   }
@@ -1099,6 +1114,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         attachRuntimeModel(handle, runtime, root, extraTools)
         attachSubagentsFor(workspaceId, root, handle, runtime)
     attachBashTasksFor(root, handle)
+    attachBrowserFor(handle)
         handles.set(key(workspaceId, sessionId), handle)
         const idx = readSessionIndex(root)
         idx.sessions[sessionId] = idx.sessions[sessionId] ?? {}

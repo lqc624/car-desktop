@@ -90,6 +90,10 @@ const bridge: CarBridge = {
   // —— C1：工具源热更新开关（缺省关；Set 即时生效） ——
   toolSourceHotGet: () => ipcRenderer.invoke(IpcChannel.ToolSourceHotGet),
   toolSourceHotSet: (enabled) => ipcRenderer.invoke(IpcChannel.ToolSourceHotSet, { enabled }),
+  // —— C3-B1：受控浏览器（main 侧；缺省关；Set 重启宿主生效） ——
+  browserGet: () => ipcRenderer.invoke(IpcChannel.BrowserGet),
+  browserSet: (enabled) => ipcRenderer.invoke(IpcChannel.BrowserSet, { enabled }),
+  browserClearData: (cookies, cache) => ipcRenderer.invoke(IpcChannel.BrowserClearData, { cookies, cache }),
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),

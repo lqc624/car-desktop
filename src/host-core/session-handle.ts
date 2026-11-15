@@ -43,6 +43,7 @@ import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts
 import type { HostModelFn, HostToolDef } from './types.ts'
 import type { SubagentManager } from './subagent.ts'
 import type { BashTaskManager, BashOutputResult } from './bashTasks.ts'
+import type { BrowserTasks } from './browserTasks.ts'
 import { buildPersonaText, type PersonalizationState } from '../shared/personalization.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
@@ -172,6 +173,7 @@ export class SessionHandle {
   private subagents: SubagentManager | null = null
   /** T-FV-2：后台 bash 任务面（attachBashTasks 接线——工具入注册表 + 级联 + 孤儿收割） */
   private bashTasks: BashTaskManager | null = null
+  private browserTasks: BrowserTasks | null = null
   /** T-MP：个性化指令快照（createFresh 取 store / resume 从链恢复——改设置不影响已开会话） */
   private persona = ''
   private personaToneStyle = ''
@@ -278,6 +280,16 @@ export class SessionHandle {
     this.bashTasks = m
     this.tools.push(...m.tools())
     m.reapOrphans()
+  }
+
+  /**
+   * C3-B1：受控浏览器工具面接线——browser_open/browser_read 入会话工具注册表（本 turn 起模型
+   * 可见；提案 §4.2 首版前台原子工具）。网络轴判定在 authorize ⓪″（browser_open 目标 url 过
+   * decideNetwork——Q-B3 readonly+网络轴与远程 MCP 同口径）；落链叙事 browser/* 由 manager 承载。
+   */
+  attachBrowserTasks(m: BrowserTasks): void {
+    this.browserTasks = m
+    this.tools.push(...m.tools())
   }
 
   /** T-FV-2：用户/渲染层任务控制面（宿主动作不过授权门——与 turn:abort 同口径；manager 落链） */
@@ -716,13 +728,14 @@ export class SessionHandle {
    */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
     const action = fileActionOf(call.tool)
-    // capability 分派：fs 三件按动作（K-FS-3）；MCP 工具 = 'mcp'；未知工具按最高约束 fs-write（T-22）
+    // capability 分派：fs 三件按动作（K-FS-3）；MCP 工具 = 'mcp'；browser_* = 'mcp'（Q-B3 同口径——
+    // readonly 声明 + 网络轴）；未知工具按最高约束 fs-write（T-22）
     const capability: AuthzRequest['capability'] =
       call.tool === 'fs_read'
         ? 'fs-read'
         : call.tool === 'fs_delete'
           ? 'fs-delete'
-          : call.tool.startsWith('mcp_')
+          : call.tool.startsWith('mcp_') || call.tool.startsWith('browser_')
             ? 'mcp'
             : 'fs-write'
     const resource = action
@@ -732,8 +745,9 @@ export class SessionHandle {
       : call.tool.startsWith('mcp_')
         ? `${call.tool}（远程 MCP）`
         : describeResource(call.tool, call.args)
-    // ⓪会话策略「只读」：写/删/未知类（MCP 工具副作用未知 = 按最高约束）一律拒；fs_read 不在此拦截
-    if (this.policy === 'readonly' && action !== 'read') {
+    // ⓪会话策略「只读」：写/删/未知类（MCP 工具副作用未知 = 按最高约束）一律拒；fs_read 不在此拦截；
+    // browser_read 同为读取语义（C3-B1——readonly 声明，网络门在 open 时承担）不在此拦截
+    if (this.policy === 'readonly' && action !== 'read' && call.tool !== 'browser_read') {
       this.authz.decideByRule(
         { authorizationId: `${this.sessionId}:policy-ro:${call.tool}:${call.id}`, actor: 'user', capability, resource },
         { decision: 'DENIED', reason: `session-policy:readonly deny ${action ?? call.tool}` },
@@ -759,6 +773,35 @@ export class SessionHandle {
           return nd.tier === 'allow'
         }
         // 未命中 → ask（现行策略：MCP 工具全过人审门）——落入 grant 面 / 人审门
+      }
+    }
+    // ⓪″网络轴（C3-B1：browser_open 目标 url——Q-B3 readonly+网络轴；白名单外首次人审 +
+    // 会话 grant 缓存由现行编排承接；只读策略下白名单外 = 硬拒〔提案 §4.3「只读策略硬拒」〕）
+    if (call.tool === 'browser_open' && this.fileSecurity) {
+      const url = typeof call.args['url'] === 'string' ? String(call.args['url']) : ''
+      if (url) {
+        const nd = this.fileSecurity.decideNetwork(url)
+        if (nd) {
+          const netReq = {
+            authorizationId: `${this.sessionId}:net-rule:${call.tool}:${call.id}`,
+            actor: 'user' as const,
+            capability,
+            resource: url,
+          }
+          this.authz.decideByRule(netReq, {
+            decision: nd.tier === 'allow' ? 'APPROVED' : 'DENIED',
+            reason: `net-rule:${nd.rule.id} ${nd.tier} ${nd.rule.pattern}`,
+          })
+          return nd.tier === 'allow'
+        }
+        if (this.policy === 'readonly') {
+          this.authz.decideByRule(
+            { authorizationId: `${this.sessionId}:net-policy-ro:${call.tool}:${call.id}`, actor: 'user', capability, resource: url },
+            { decision: 'DENIED', reason: 'session-policy:readonly deny browser_open（网络轴未命中白名单——提案 §4.3 只读硬拒）' },
+          )
+          return false
+        }
+        // 未命中且非只读策略 → 落 grant 面 / 人审门（首次某域人审，同域后续会话 grant 免审）
       }
     }
     // ①规则面

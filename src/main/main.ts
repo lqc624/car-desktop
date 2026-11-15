@@ -12,8 +12,8 @@
  * S2：请求/响应（ipcMain.handle ↔ reqId 映射）+ 推送转发（宿主 push → 全部窗口
  * webContents.send，主题白名单 = IpcPushTopic）。
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, utilityProcess } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { app, BrowserWindow, dialog, ipcMain, shell, session, utilityProcess } from 'electron'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { activateEndpoint, clearEndpoint, listEndpoints, loadEndpointMeta, removeEndpoint, revealEndpointKey, saveEndpoint } from './credentials.ts'
@@ -21,11 +21,65 @@ import { checkForUpdates, downloadUpdate, initUpdater, installUpdate, openReleas
 import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 import { isExecutableOpenBlocked } from '../shared/file-preview.ts'
 import { fetchReleases } from './deployInfo.ts'
+import { createBrowserStore } from '../host-core/browserStore.ts'
+import { BROWSER_CDP_PORT } from '../host-core/browserTasks.ts'
 
 const HOST_TIMEOUT_MS = 20_000
 
 // 验收缝：CAR_USER_DATA_OVERRIDE = 隔离 userData（终验/多实例并行——正式形态不设置走默认档）
 if (process.env.CAR_USER_DATA_OVERRIDE) app.setPath('userData', process.env.CAR_USER_DATA_OVERRIDE)
+
+// ── C3-B1：受控浏览器（提案模块 A——缺省关 D-V10-2；main 进程窗口面） ─────────────
+const browserStore = createBrowserStore(app.getPath('userData'))
+const browserEnabledAtBoot = browserStore.get().browserEnabled
+// CDP 端口 = 启动期开关（Chromium 缺省仅绑 loopback；设置切换后须重启宿主生效——Get 面 restartRequired 标注）
+if (browserEnabledAtBoot) app.commandLine.appendSwitch('remote-debugging-port', String(BROWSER_CDP_PORT))
+
+const browserTargetFile = (): string => path.join(app.getPath('userData'), 'browser-target.json')
+
+/** 受控 BrowserWindow 创建（partition persist:car-browser——Q-B4 单分片；登录态落盘持久复用 T-B2）；
+ *  target 发现文件 = debugger.getTargetInfo（targetId 跨导航稳定——host 侧主路径发现源） */
+async function attachControlledBrowserWindow(): Promise<void> {
+  const win = new BrowserWindow({
+    width: 980,
+    height: 760,
+    show: true,
+    title: 'CAR 受控浏览器',
+    webPreferences: {
+      partition: 'persist:car-browser',
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  const writeTarget = async (): Promise<void> => {
+    try {
+      win.webContents.debugger.attach()
+      const info = (await win.webContents.debugger.sendCommand('Target.getTargetInfo')) as { targetInfo?: { targetId?: string } }
+      const targetId = info.targetInfo?.targetId
+      if (targetId) {
+        writeFileSync(browserTargetFile(), JSON.stringify({ targetId, cdpPort: BROWSER_CDP_PORT, at: Date.now() }, null, 2), 'utf8')
+      }
+    } catch (e) {
+      console.error('[main] browser-target 发现文件写入失败：', e instanceof Error ? e.message : e)
+    }
+  }
+  void writeTarget()
+  win.webContents.on('did-navigate', () => void writeTarget())
+  win.on('closed', () => {
+    try { rmSync(browserTargetFile(), { force: true }) } catch { /* 收口容错 */ }
+  })
+  await win.loadURL('about:blank')
+}
+
+function browserStateDTO(): { enabled: boolean; cdpPortActive: boolean; restartRequired: boolean; cdpPort: number } {
+  return {
+    enabled: browserStore.get().browserEnabled,
+    cdpPortActive: browserEnabledAtBoot,
+    restartRequired: browserStore.get().browserEnabled && !browserEnabledAtBoot,
+    cdpPort: BROWSER_CDP_PORT,
+  }
+}
 
 let hostProc: ReturnType<typeof utilityProcess.fork> | null = null
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
@@ -305,6 +359,29 @@ function registerIpc(): void {
     if (picked.canceled || picked.filePaths.length === 0) return null
     return picked.filePaths
   })
+  // —— C3-B1：受控浏览器设置/清除面（main 侧能力——窗口与 partition 归 main；缺省关 D-V10-2） ——
+  ipcMain.handle(IpcChannel.BrowserGet, () => browserStateDTO())
+  ipcMain.handle(IpcChannel.BrowserSet, (_event, payload: unknown) => {
+    const enabled = (payload as { enabled?: unknown } | null)?.['enabled'] === true
+    browserStore.set({ browserEnabled: enabled })
+    return browserStateDTO() // 切换后 restartRequired 标注（CDP 端口 = 启动期开关，重启宿主生效）
+  })
+  ipcMain.handle(IpcChannel.BrowserClearData, async (_event, payload: unknown) => {
+    const p = (payload ?? {}) as { cookies?: unknown; cache?: unknown }
+    const parted = session.fromPartition('persist:car-browser')
+    const cleared: string[] = []
+    if (p.cookies === true) {
+      await parted.clearStorageData({ storages: ['cookies'] })
+      cleared.push('cookies')
+    }
+    if (p.cache === true) {
+      await parted.clearCache()
+      cleared.push('cache')
+    }
+    // 控制面审计：桌面无控制面链——main 日志留痕（差异登记 D-V10-W1；平台接入后落控制面审计）
+    console.error(`[main] browser 清除面动作：${cleared.join('、') || '无'}（审计留痕）`)
+    return { ok: true, cleared }
+  })
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {
@@ -326,6 +403,8 @@ async function createWindow(show: boolean): Promise<BrowserWindow> {
 
 app.whenReady().then(async () => {
   registerIpc()
+  // C3-B1：受控浏览器窗口（缺省关——启用态才创建；窗口可见可并存操作 T-B1，宿主退出销毁/partition 落盘保留）
+  if (browserEnabledAtBoot && process.env.CAR_SMOKE !== '1') void attachControlledBrowserWindow()
   // T-23：自动更新初始化 + 启动检查（CAR_SMOKE 无头冒烟跳过——不触网；dev 形态 updater 短路 disabled）
   const smoke = process.env.CAR_SMOKE === '1'
   if (!smoke) {

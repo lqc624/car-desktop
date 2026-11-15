@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { FileRuleDTO, NetworkRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
+import type { BrowserSettingsDTO, FileRuleDTO, NetworkRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
 
 /**
  * S3-S3 安全中心设置页（对照原型 v0.3；S3-S2/S3-S3 通道消费）：
@@ -23,6 +23,41 @@ export function SecurityView() {
   const [netRules, setNetRules] = useState<NetworkRuleDTO[]>([])
   const [netPattern, setNetPattern] = useState('')
   const [netTier, setNetTier] = useState<'allow' | 'ask' | 'deny'>('ask')
+  // C3-B1：受控浏览器（缺省关 D-V10-2——开关 + 清除面）
+  const [browserState, setBrowserState] = useState<BrowserSettingsDTO | null>(null)
+  const [browserError, setBrowserError] = useState<string | null>(null)
+
+  const loadBrowser = useCallback(async () => {
+    setBrowserError(null)
+    try {
+      setBrowserState(await window.car.browserGet())
+    } catch (e) {
+      setBrowserError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadBrowser()
+  }, [loadBrowser])
+
+  const toggleBrowser = async (): Promise<void> => {
+    setBrowserError(null)
+    try {
+      setBrowserState(await window.car.browserSet(!(browserState?.enabled ?? false)))
+    } catch (e) {
+      setBrowserError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const clearBrowser = async (cookies: boolean, cache: boolean): Promise<void> => {
+    setBrowserError(null)
+    try {
+      const r = await window.car.browserClearData(cookies, cache)
+      setStatus(`受控浏览器已清除：${r.cleared.join('、') || '无'}`)
+    } catch (e) {
+      setBrowserError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const load = useCallback(async () => {
     setError(null)
@@ -265,6 +300,43 @@ export function SecurityView() {
           <span className="dim">「会话内放行」仅可在会话内切换（chat 工具栏策略菜单），不作为出厂默认。</span>
         </div>
       )}
+
+      <h3>受控浏览器（缺省关）</h3>
+      <p className="dim">
+        Agent 操控受控浏览器窗口（与日常浏览器隔离——专属 partition 登录态持久复用/按账号分片）；工具
+        browser_open/browser_read 均过授权门：目标域名过网络轴（白名单外首次人审 + 会话内免审），只读策略下白名单外硬拒；
+        browser/* 全落审计链。CDP 仅绑 127.0.0.1（启动期开关——切换后重启宿主生效）。
+      </p>
+      {browserError && (
+        <div className="error" role="alert">
+          {browserError}
+        </div>
+      )}
+      {browserState && (
+        <div className={`banner ${browserState.enabled ? (browserState.restartRequired ? '' : 'ok') : ''}`} style={{ margin: '6px 0' }}>
+          <b>{browserState.enabled ? '已启用' : '已关闭'}</b>
+          {' · '}
+          {browserState.restartRequired
+            ? `⚠ 须重启宿主生效（CDP ${browserState.cdpPort} 未随本进程启动）`
+            : browserState.cdpPortActive
+              ? `CDP ${browserState.cdpPort}（loopback）在位`
+              : 'CDP 端口未随本进程启动（重启后生效）'}
+        </div>
+      )}
+      <div className="row wrap">
+        <button
+          className={`btn ${browserState?.enabled ? 'danger' : 'primary'}`}
+          onClick={() => void toggleBrowser()}
+        >
+          {browserState?.enabled ? '关闭浏览器操控' : '启用浏览器操控'}
+        </button>
+        <button className="btn" disabled={!browserState?.enabled} onClick={() => void clearBrowser(true, false)} title="清除受控 partition 的全部 Cookie（登录态销毁——显式动作）">
+          清除 Cookie
+        </button>
+        <button className="btn" disabled={!browserState?.enabled} onClick={() => void clearBrowser(false, true)} title="清除受控 partition 缓存">
+          清除缓存
+        </button>
+      </div>
     </section>
   )
 }
