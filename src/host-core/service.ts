@@ -7,7 +7,7 @@
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
 import {
@@ -64,7 +64,7 @@ import { listCapabilities, writeCapability, editCapability, deleteCapability, lo
 import { skillMdToCapability } from './skill-import.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
-import { runDoctor } from './doctor.ts'
+import { runDoctor, summarizeRecentFailures, type TurnEndLite, type DoctorRow } from './doctor.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools, fsReadTool } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
@@ -1012,6 +1012,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         let llm: { adapterId?: string; allowEnvFallback?: boolean; baseUrl?: string } = { allowEnvFallback: false, baseUrl: undefined }
         let configError: string | null = null
         let poolMembers: Array<{ id: string; baseUrl: string; model: string; adapterId: 'openai-compat' | 'anthropic' }> = []
+        let failureRow: DoctorRow | null = null
         if (workspaceId) {
           try {
             const root = registry.pathOf(workspaceId)
@@ -1031,6 +1032,27 @@ export function createHostService(opts: HostServiceOptions): HostService {
           } catch (err) {
             configError = err instanceof Error ? err.message : String(err)
           }
+          // C2（W-1c）：近期失败细类扫描——最近 3 个会话 JSONL 尾部 turnEnd（kind/abortedAt 中文标签，
+          // doctor.ts summarizeRecentFailures 纯汇总；1.22 旧事件无 kind = reason 原样）
+          try {
+            const dir = sessionsDirFor(registry.pathOf(workspaceId))
+            const files = readdirSync(dir)
+              .filter((f) => f.endsWith('.jsonl'))
+              .map((f) => ({ f, m: statSync(join(dir, f)).mtimeMs }))
+              .sort((a, b) => b.m - a.m)
+              .slice(0, 3)
+            const turnEnds: TurnEndLite[] = []
+            for (const { f } of files) {
+              const lines = readFileSync(join(dir, f), 'utf8').split('\n')
+              for (const line of lines.slice(-200)) {
+                try {
+                  const e = JSON.parse(line) as { kind?: string; ts?: number; meta?: Record<string, unknown> }
+                  if (e.kind === 'turnEnd') turnEnds.push({ ts: e.ts ?? 0, meta: e.meta ?? null })
+                } catch { /* 半行容错 */ }
+              }
+            }
+            failureRow = summarizeRecentFailures(turnEnds)
+          } catch { /* 会话目录不可读 = 无此行（医生面不因扫描失败而红） */ }
         }
         const rows = [
           ...(configError
@@ -1058,6 +1080,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
               ? { label: '压缩武装', ok: true, detail: `token 阈值 ${Math.floor(anchorWin * 0.78)}（端点声明 ${Math.round(anchorWin / 1000)}k × 0.78；滑窗口径网关建议声明网关口径等效窗口）` }
               : { label: '压缩武装', ok: false, detail: '未武装（锚点模型无窗口声明——禁估算；端点面板补窗口 k 或 car.config 显式 thresholdTokens）' }
           })(),
+          ...(failureRow ? [failureRow] : []),
         ]
         return { rows }
       }

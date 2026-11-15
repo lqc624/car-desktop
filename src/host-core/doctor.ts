@@ -10,6 +10,7 @@
 import { probePoolMember, type PoolMember } from '@lqc123qwe/car-runtime'
 import { probeSeam } from './probe.ts'
 import { credentialPresence } from './model.ts'
+import { ABORTED_AT_LABEL, FAILURE_KIND_LABEL } from '../shared/failure-kinds.ts'
 
 export interface DoctorRow {
   label: string
@@ -52,6 +53,40 @@ async function probeConnectivity(baseUrl: string, adapterId: string | undefined,
     const aborted = err instanceof Error && err.name === 'AbortError'
     return { label: 'LLM 连通性', ok: false, detail: aborted ? `超时（>5s）` : `网络错误 · ${ms}ms` }
   }
+}
+
+/** C2（W-1c）turnEnd 尾部扫描行（供 service 从最近会话 JSONL 收集——本函数纯汇总可测） */
+export interface TurnEndLite {
+  ts: number
+  meta: Record<string, unknown> | null
+}
+
+/**
+ * ⑤ C2（W-1c）：近期失败细类行——turnEnd meta.kind 九类中文标签（W-0 处置动作随标签）+
+ * abortedAt 取消时机；kind 缺失 = 1.22 旧事件（reason 原样呈现）。失败在案 = ok:false（红行
+ * fail-visible）；无失败 = ok:true。完整事实在审计链（本行 = 医生面摘要，值不打印红线：只出
+ * 类别标签不含 detail 消息原文）。
+ */
+export function summarizeRecentFailures(turnEnds: readonly TurnEndLite[]): { label: string; ok: boolean; detail: string } {
+  const failures = turnEnds
+    .filter((e) => e.meta?.['reason'] === 'error' || e.meta?.['reason'] === 'aborted')
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 5)
+  if (!failures.length) {
+    return { label: '近期失败细类', ok: true, detail: '最近会话无 error/aborted turn' }
+  }
+  const parts = failures.map((e) => {
+    const reason = String(e.meta?.['reason'] ?? '?')
+    const kind = typeof e.meta?.['kind'] === 'string' ? String(e.meta['kind']) : null
+    const abortedAt = typeof e.meta?.['abortedAt'] === 'string' ? String(e.meta['abortedAt']) : null
+    const label = kind
+      ? (FAILURE_KIND_LABEL[kind] ?? `${kind}（未知类别——原样呈现）`)
+      : abortedAt
+        ? (ABORTED_AT_LABEL[abortedAt] ?? '取消')
+        : reason
+    return `${label}（${reason}${abortedAt ? `/${abortedAt}` : ''}）`
+  })
+  return { label: '近期失败细类', ok: false, detail: `${parts.join('；')}（处置动作随标签；完整事实在审计链）` }
 }
 
 export async function runDoctor(input: DoctorInput): Promise<{ rows: DoctorRow[] }> {

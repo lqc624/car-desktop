@@ -16,6 +16,7 @@ import type {
   UpdateStatusPush,
   WorkspaceInfo,
 } from '../shared/ipc-contract'
+import { ABORTED_AT_LABEL, failureKindLabel } from '../shared/failure-kinds'
 import { AuditView } from './views/AuditView'
 import { CapabilityView } from './views/CapabilityView'
 import { DashView } from './views/DashView'
@@ -209,11 +210,19 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
     } else if (e.kind === 'turnEnd') {
       const meta = (e.meta ?? {}) as Record<string, unknown>
       const u = meta['usage'] as Record<string, number> | undefined
+      // C2（W-1c）：失败细类消费——turnEnd meta.kind 九类中文标签 + 处置动作；abortedAt 取消时机；
+      // kind 缺失 = 1.22 旧事件（不带键，回退原文 reason——向后兼容）
+      const reason = String(meta['reason'] ?? '?')
+      const kindLabel = failureKindLabel(typeof meta['kind'] === 'string' ? (meta['kind'] as string) : null)
+      const abortedLabel = ABORTED_AT_LABEL[String(meta['abortedAt'] ?? '')] ?? null
+      const isError = reason === 'error'
+      const kindSuffix = kindLabel ? ` · 失败细类：${kindLabel}` : typeof meta['kind'] === 'string' ? ` · 失败细类：${String(meta['kind'])}（未知类别——原样呈现）` : ''
+      const abortSuffix = abortedLabel ? ` · ${abortedLabel}` : ''
       items.push({
         kind: 'line',
-        tone: 'dim',
+        tone: isError ? 'warn' : 'dim',
         text:
-          `turn 收口：${String(meta['reason'] ?? '?')}` +
+          `turn 收口：${reason}${abortSuffix}${kindSuffix}` +
           (u ? ` · 用量 in ${fmtTok(u['input'] ?? null)} / out ${fmtTok(u['output'] ?? null)} / 缓存读 ${fmtTok(u['cacheRead'] ?? null)}` : ' · 用量未采集'),
       })
     } else if (e.kind === 'system') {
