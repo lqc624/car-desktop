@@ -117,7 +117,13 @@ test('主旅程（无工具）：发送 → assistant 落链 → turnEnd complet
   const evts = eventsOf(env).filter((e) => e.turnId === sent.turnId)
   assert.deepEqual(
     evts.map((e) => e.kind),
-    ['user', 'assistant', 'turnEnd'],
+    ['user', 'assistant', 'system', 'turnEnd'],
+    '1.24-W2：turnEnd 前落 settlement 回执（system+payload.type——链形加法，消费面投影排除）',
+  )
+  assert.equal(
+    ((evts[2] as { payload?: { type?: string } }).payload as { type?: string } | undefined)?.type,
+    'settlement',
+    '第三事件 = settlement 回执',
   )
   assert.equal(evts[0].payload, '打个招呼')
   assert.equal(evts[1].payload, '你好，世界')
