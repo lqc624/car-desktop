@@ -13,7 +13,7 @@
  * webContents.send，主题白名单 = IpcPushTopic）。
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, session, utilityProcess } from 'electron'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { activateEndpoint, clearEndpoint, listEndpoints, loadEndpointMeta, removeEndpoint, revealEndpointKey, saveEndpoint } from './credentials.ts'
@@ -38,8 +38,9 @@ if (browserEnabledAtBoot) app.commandLine.appendSwitch('remote-debugging-port', 
 const browserTargetFile = (): string => path.join(app.getPath('userData'), 'browser-target.json')
 
 /** 受控 BrowserWindow 创建（partition persist:car-browser——Q-B4 单分片；登录态落盘持久复用 T-B2）；
- *  target 发现文件 = debugger.getTargetInfo（targetId 跨导航稳定——host 侧主路径发现源） */
-async function attachControlledBrowserWindow(): Promise<void> {
+ *  target 发现文件 = debugger.getTargetInfo（targetId 跨导航稳定——host 侧主路径发现源）。
+ *  B-2（D-B2-6）：拆出 createControlledWindow 可复用体——need-window 中继重建与启动挂载同源 */
+async function createControlledWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 980,
     height: 760,
@@ -72,6 +73,39 @@ async function attachControlledBrowserWindow(): Promise<void> {
   await win.loadURL('about:blank')
 }
 
+/** B-2（D-B2-6）：受控窗口按 title 查找（focus 重建判定共用——零耦合 title 标记） */
+function findControlledWindow(): BrowserWindow | null {
+  return BrowserWindow.getAllWindows().find((w) => w.title === 'CAR 受控浏览器') ?? null
+}
+
+/**
+ * B-2（D-B2-6）：受控窗口按需重建（push:browser-need-window 中继触发——宿主 target 发现失败）。
+ * 幂等：在窗即返（并发护栏 §4.3 ≤2——首版单实例）；CDP 端口 = 启动期开关，未启用态重建无意义
+ * （重建后仍不可发现——不动作由宿主 findTarget 超时报错 fail-visible）。
+ */
+function ensureControlledBrowserWindow(): void {
+  if (!browserEnabledAtBoot || process.env.CAR_SMOKE === '1') return
+  if (findControlledWindow()) return
+  console.error('[main] browser 受控窗口重建（need-window 中继——宿主 target 发现失败）')
+  void createControlledWindow()
+}
+
+/**
+ * B-2（D-B2-6）：孤儿收割——上一宿主运行遗留的陈旧发现文件清理（崩溃路径 'closed' 不触发）。
+ * 陈旧 targetId 指向已死 ws → host findTarget 主路径反复命中死连接；收割后兜底 /json/list 或
+ * 重建路径可接管。控制面无链——console 留痕（D-V10-W1 差异登记）。
+ */
+function reapOrphanBrowserTarget(): void {
+  try {
+    if (existsSync(browserTargetFile())) {
+      rmSync(browserTargetFile(), { force: true })
+      console.error('[main] browser 孤儿收割：陈旧 browser-target.json 已清理（上一运行遗留）')
+    }
+  } catch (e) {
+    console.error('[main] browser 孤儿收割失败：', e instanceof Error ? e.message : e)
+  }
+}
+
 function browserStateDTO(): { enabled: boolean; cdpPortActive: boolean; restartRequired: boolean; cdpPort: number } {
   return {
     enabled: browserStore.get().browserEnabled,
@@ -101,6 +135,11 @@ function ensureHost(): ReturnType<typeof utilityProcess.fork> {
     // S2 推送面：宿主 emit → 全部窗口广播（主题白名单校验——非契约主题丢弃）
     if (msg?.push === true) {
       if (typeof msg.topic !== 'string' || !Object.values(IpcPushTopic).includes(msg.topic as IpcPushTopicName)) return
+      // B-2（D-B2-6）：受控窗口重建触发——main 侧动作主题（广播前拦截执行，渲染层无订阅者）
+      if (msg.topic === IpcPushTopic.BrowserNeedWindow) {
+        ensureControlledBrowserWindow()
+        return
+      }
       for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send(msg.topic, msg.payload)
       }
@@ -382,6 +421,16 @@ function registerIpc(): void {
     console.error(`[main] browser 清除面动作：${cleared.join('、') || '无'}（审计留痕）`)
     return { ok: true, cleared }
   })
+  // —— C3-B2：HITL「前置受控窗口」+ consent 授权记录清除（宿主 revoke） ——
+  ipcMain.handle(IpcChannel.BrowserFocus, () => {
+    const win = findControlledWindow()
+    if (!win) return { ok: false }
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    return { ok: true }
+  })
+  ipcMain.handle(IpcChannel.BrowserRevokeGrants, () => callHost(IpcChannel.BrowserRevokeGrants))
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {
@@ -403,8 +452,9 @@ async function createWindow(show: boolean): Promise<BrowserWindow> {
 
 app.whenReady().then(async () => {
   registerIpc()
-  // C3-B1：受控浏览器窗口（缺省关——启用态才创建；窗口可见可并存操作 T-B1，宿主退出销毁/partition 落盘保留）
-  if (browserEnabledAtBoot && process.env.CAR_SMOKE !== '1') void attachControlledBrowserWindow()
+  // C3-B1/B-2：受控浏览器窗口（缺省关——启用态才创建；窗口可见可并存操作 T-B1，宿主退出销毁/partition 落盘保留）
+  if (browserEnabledAtBoot && process.env.CAR_SMOKE !== '1') void createControlledWindow()
+  else reapOrphanBrowserTarget() // B-2（D-B2-6）：非启用态启动 = 上一运行孤儿发现文件清理
   // T-23：自动更新初始化 + 启动检查（CAR_SMOKE 无头冒烟跳过——不触网；dev 形态 updater 短路 disabled）
   const smoke = process.env.CAR_SMOKE === '1'
   if (!smoke) {

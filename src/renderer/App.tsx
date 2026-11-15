@@ -6,6 +6,7 @@ import type {
   HostProbeResult,
   ModelMetaDTO,
   AttachmentRowDTO,
+  BrowserHitlPush,
   CapabilityEntryDTO,
   SessionDeltaPush,
   SessionEventDTO,
@@ -17,6 +18,8 @@ import type {
   WorkspaceInfo,
 } from '../shared/ipc-contract'
 import { ABORTED_AT_LABEL, failureKindLabel } from '../shared/failure-kinds'
+import { settlementRow, type SettlementLite } from '../shared/settlement-rows'
+import { browserRow } from '../shared/browser-rows'
 import { AuditView } from './views/AuditView'
 import { CapabilityView } from './views/CapabilityView'
 import { DashView } from './views/DashView'
@@ -281,6 +284,16 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
       } else if (type === 'subagent/kill') {
         items.push({ kind: 'line', tone: 'warn', text: `子 Agent 终止 · ${String(p['subagentId'] ?? '?')}（subagent/kill 已落链）`, subagentLink: String(p['subagentId'] ?? '') || undefined })
       }
+      // 1.24-W2（D-B2-9）：回合结算行——hasUnknownOutcomes 显式 warn = fail-visible（方案 B 终验项）
+      else if (type === 'settlement') {
+        const row = settlementRow(p as unknown as SettlementLite)
+        items.push({ kind: 'line', tone: row.tone, text: row.text })
+      }
+      // C3-B2（D-B2-8）：browser/* 叙事主面分支（B-1 仅审计页可见的缺口补齐；行面零页面内容）
+      else {
+        const row = browserRow(type, p)
+        if (row) items.push({ kind: 'line', tone: row.tone, text: row.text })
+      }
     }
     // kind usage：turnEnd 摘要已覆盖，不重复渲染
   }
@@ -358,6 +371,8 @@ export function App() {
   const [pendings, setPendings] = useState<AuthzPendingPush[]>([])
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [update, setUpdate] = useState<UpdateStatusPush | null>(null)
+  /** B-2（D-B2-4）：HITL 接管卡（detect 建 / resolved/timeout/aborted 收——受控窗口人工完成语义） */
+  const [hitl, setHitl] = useState<BrowserHitlPush | null>(null)
   const [busy, setBusy] = useState(false)
   // 1.19.0：流式增量缓冲（发送后不空等——生成中实时上屏；assistant/turnEnd 事件收口清零）
   const [stream, setStream] = useState<StreamBuf | null>(null)
@@ -505,6 +520,14 @@ export function App() {
         return prev.filter((x) => x.requestId !== p.requestId)
       })
     })
+    // B-2（D-B2-4）：HITL 接管卡订阅——detect 建/其余收卡；超时显式留痕（任务转 waiting 由模型报告）
+    const offHitl = window.car.onBrowserHitl((p: BrowserHitlPush) => {
+      if (p.phase === 'detect') setHitl(p)
+      else {
+        setHitl(null)
+        if (p.phase === 'timeout') setStatus('浏览器接管超时（5 分钟）——结果已报告模型（hitl-timeout，不静默重试）')
+      }
+    })
     // T-23：自动更新状态机（available/downloaded/error 横幅 fail-visible；disabled = dev 形态不显）
     const offUpdate = window.car.onUpdateStatus((s: UpdateStatusPush) => setUpdate(s))
     return () => {
@@ -512,6 +535,7 @@ export function App() {
       offDelta()
       offPending()
       offResolved()
+      offHitl()
       offUpdate()
     }
   }, [fail])
@@ -1311,9 +1335,26 @@ export function App() {
                       拒绝
                     </button>
                   </div>
+          </div>
+        )
+      })}
+            {hitl && hitl.phase === 'detect' && (
+              <div className="authz" data-testid="browser-hitl-card">
+                <div className="authz-head">
+                  <b>浏览器接管</b>
+                  <span className="timer hot">{hitl.deadlineTs ? `${Math.max(0, Math.ceil((hitl.deadlineTs - nowTick) / 1000))}s` : ''} 后转 waiting</span>
                 </div>
-              )
-            })}
+                <div className="authz-body">
+                  检测到登录/验证特征（{hitl.reason ?? '确定性规则'}）——请在受控窗口完成
+                  <code>{hitl.url.slice(0, 60)}</code>
+                </div>
+                <div className="authz-actions">
+                  <button className="btn primary" onClick={() => void window.car.browserFocus()}>
+                    去受控窗口
+                  </button>
+                </div>
+              </div>
+            )}
             {/* T-FV-2：任务进程条（原型 summaryPanel 同构——胶囊头 spinner/秒表/N 后台/展开策略三态 +
                 任务行 [bash|子代理] 类型徽标/停止按钮/输出尾部；底注 = 语义口径） */}
             {(busy || taskRows.length > 0) && (

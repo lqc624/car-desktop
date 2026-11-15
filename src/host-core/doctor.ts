@@ -11,6 +11,7 @@ import { probePoolMember, type PoolMember } from '@lqc123qwe/car-runtime'
 import { probeSeam } from './probe.ts'
 import { credentialPresence } from './model.ts'
 import { ABORTED_AT_LABEL, FAILURE_KIND_LABEL } from '../shared/failure-kinds.ts'
+import type { SettlementLite } from '../shared/settlement-rows.ts'
 
 export interface DoctorRow {
   label: string
@@ -87,6 +88,31 @@ export function summarizeRecentFailures(turnEnds: readonly TurnEndLite[]): { lab
     return `${label}（${reason}${abortedAt ? `/${abortedAt}` : ''}）`
   })
   return { label: '近期失败细类', ok: false, detail: `${parts.join('；')}（处置动作随标签；完整事实在审计链）` }
+}
+
+/**
+ * ⑥ W-2（D-B2-9）：近期结算行——settlement 回执聚合（内核 1.24；hasUnknownOutcomes = 红行
+ * fail-visible——「取消后结果不明的工具显式记账」进医生面）。老链（1.23 及更早）或无新 turn
+ * = 无事件（绿行缺席事实，非缺陷——禁静默改写历史链形态）。
+ */
+export function summarizeRecentSettlements(settlements: readonly SettlementLite[]): { label: string; ok: boolean; detail: string } {
+  if (!settlements.length) {
+    return { label: '近期结算', ok: true, detail: '最近会话无 settlement 事件（1.23 及更早链或无新 turn——非缺陷）' }
+  }
+  const unknown = settlements.filter((s) => s.tool.hasUnknownOutcomes)
+  const denials = settlements.reduce((n, s) => n + s.tool.permissionDenialCount, 0)
+  const interrupted = settlements.filter((s) => s.outcome !== 'complete').length
+  const parts: string[] = [`${settlements.length} turn`]
+  if (interrupted) parts.push(`${interrupted} 非正常收口`)
+  if (denials) parts.push(`授权拒 ${denials}`)
+  if (unknown.length) {
+    return {
+      label: '近期结算',
+      ok: false,
+      detail: `${parts.join(' · ')} · ${unknown.length} turn 存在结果不明工具（hasUnknownOutcomes——副作用状态见审计链）`,
+    }
+  }
+  return { label: '近期结算', ok: true, detail: `${parts.join(' · ')}（无结果不明记账）` }
 }
 
 export async function runDoctor(input: DoctorInput): Promise<{ rows: DoctorRow[] }> {

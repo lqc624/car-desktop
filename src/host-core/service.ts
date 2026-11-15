@@ -46,6 +46,7 @@ import { SubagentManager, childSessionIds, recoverChildSessions, type ChildModel
 import { BashTaskManager } from './bashTasks.ts'
 import { BrowserTasks, BROWSER_CDP_PORT } from './browserTasks.ts'
 import { createBrowserStore } from './browserStore.ts'
+import { createBrowserGrantsStore } from './browserGrants.ts'
 import {
   assertSafeId,
   listSessions,
@@ -64,7 +65,8 @@ import { listCapabilities, writeCapability, editCapability, deleteCapability, lo
 import { skillMdToCapability } from './skill-import.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
-import { runDoctor, summarizeRecentFailures, type TurnEndLite, type DoctorRow } from './doctor.ts'
+import { runDoctor, summarizeRecentFailures, summarizeRecentSettlements, type TurnEndLite, type DoctorRow } from './doctor.ts'
+import type { SettlementLite } from '../shared/settlement-rows.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools, fsReadTool } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
@@ -735,6 +737,10 @@ export function createHostService(opts: HostServiceOptions): HostService {
       emitEvent: (sessionId, event) => emit(IpcPushTopic.SessionEvent, { workspaceId, sessionId, event }),
       emitAuthzPending: (p) => emit(IpcPushTopic.AuthzPending, p),
       emitAuthzResolved: (p) => emit(IpcPushTopic.AuthzResolved, p),
+      // B-2：浏览器 HITL 接管推送 + 窗口重建触发 + consent grants 持久化（§4.7）
+      emitBrowserHitl: (p) => emit(IpcPushTopic.BrowserHitl, p),
+      emitBrowserNeedWindow: () => emit(IpcPushTopic.BrowserNeedWindow, { ts: Date.now() }),
+      browserGrants,
       waitAuthzDecision: (_sessionId: string, requestId: string) =>
         new Promise<AuthzResponse>((resolve) => {
           authzWaiters.set(requestId, resolve)
@@ -928,15 +934,23 @@ export function createHostService(opts: HostServiceOptions): HostService {
   }
 
   /**
-   * C3-B1：受控浏览器工具面装配——**缺省关**（D-V10-2 / 提案 T-B5：browserEnabled 设置 + 宿主
-   * 重启生效的 CDP 端口）；启用态挂 browser_open/browser_read（网络轴在 authorize ⓪″；落链
-   * browser/* 由 manager 承载）。partition 'persist:car-browser'（Q-B4 单分片——账号体系接入
-   * 后扩展分片键，登记）；受控窗口 = main 进程创建（宿主启动时、设置启用态）。
+   * C3-B1/B-2：受控浏览器工具面装配——**缺省关**（D-V10-2 / 提案 T-B5：browserEnabled 设置 + 宿主
+   * 重启生效的 CDP 端口）；启用态挂 browser_open/browser_read/browser_act（网络轴 authorize ⓪″ +
+   * act 运行面 pre/post 双检；高危门 ⓪‴；HITL 接管协议；落链 browser/* 由 manager 承载）。
+   * partition 'persist:car-browser'（Q-B4 单分片——账号体系接入后扩展分片键，登记）；
+   * 受控窗口 = main 进程创建（宿主启动时、设置启用态、need-window 中继重建）。
+   * B-2 §4.7：browser grants 持久化 store（会话×域名分片——authorize 派发前现读盘）。
    */
   const browserStore = createBrowserStore(opts.userDataDir)
+  const browserGrants = createBrowserGrantsStore(join(opts.userDataDir, 'browser-grants.json'))
   function attachBrowserFor(handle: SessionHandle): void {
     if (!browserStore.get().browserEnabled) return
     handle.attachBrowserTasks(new BrowserTasks({ parentLog: handle.log, userDataDir: opts.userDataDir, cdpPort: BROWSER_CDP_PORT }))
+  }
+  /** B-2 §4.7 revoke 语义：设置页「清除浏览器授权记录」动作（清空落盘 = 撤销立即生效） */
+  function revokeBrowserGrants(): void {
+    browserGrants.revokeAll()
+    console.error('[host] browser grants 已清除（revoke——派发前重查即失效）')
   }
 
   /**
@@ -1013,6 +1027,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         let configError: string | null = null
         let poolMembers: Array<{ id: string; baseUrl: string; model: string; adapterId: 'openai-compat' | 'anthropic' }> = []
         let failureRow: DoctorRow | null = null
+        let settlementRowResult: DoctorRow | null = null
         if (workspaceId) {
           try {
             const root = registry.pathOf(workspaceId)
@@ -1042,16 +1057,20 @@ export function createHostService(opts: HostServiceOptions): HostService {
               .sort((a, b) => b.m - a.m)
               .slice(0, 3)
             const turnEnds: TurnEndLite[] = []
+            const settlements: SettlementLite[] = []
             for (const { f } of files) {
               const lines = readFileSync(join(dir, f), 'utf8').split('\n')
               for (const line of lines.slice(-200)) {
                 try {
-                  const e = JSON.parse(line) as { kind?: string; ts?: number; meta?: Record<string, unknown> }
+                  const e = JSON.parse(line) as { kind?: string; ts?: number; meta?: Record<string, unknown>; payload?: { type?: string } }
                   if (e.kind === 'turnEnd') turnEnds.push({ ts: e.ts ?? 0, meta: e.meta ?? null })
+                  // W-2（D-B2-9）：settlement 回执同扫描收集（1.23 及更早链无此事件 = 空表容错）
+                  else if (e.kind === 'system' && e.payload?.type === 'settlement') settlements.push(e.payload as unknown as SettlementLite)
                 } catch { /* 半行容错 */ }
               }
             }
             failureRow = summarizeRecentFailures(turnEnds)
+            settlementRowResult = summarizeRecentSettlements(settlements)
           } catch { /* 会话目录不可读 = 无此行（医生面不因扫描失败而红） */ }
         }
         const rows = [
@@ -1081,6 +1100,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
               : { label: '压缩武装', ok: false, detail: '未武装（锚点模型无窗口声明——禁估算；端点面板补窗口 k 或 car.config 显式 thresholdTokens）' }
           })(),
           ...(failureRow ? [failureRow] : []),
+          ...(settlementRowResult ? [settlementRowResult] : []),
         ]
         return { rows }
       }
@@ -1109,6 +1129,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
       case IpcChannel.HostProbe: {
         const probe = probeSeam()
         return probe satisfies HostProbeResult
+      }
+      // B-2 §4.7 revoke：浏览器网络授权记录清除（consent 存储单写者 = 宿主——控制面留痕）
+      case IpcChannel.BrowserRevokeGrants: {
+        revokeBrowserGrants()
+        return { ok: true }
       }
       case IpcChannel.WorkspaceRegister: {
         const info = await registry.register(requireString(p.path, 'path'))

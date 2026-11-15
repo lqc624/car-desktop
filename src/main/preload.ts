@@ -94,6 +94,9 @@ const bridge: CarBridge = {
   browserGet: () => ipcRenderer.invoke(IpcChannel.BrowserGet),
   browserSet: (enabled) => ipcRenderer.invoke(IpcChannel.BrowserSet, { enabled }),
   browserClearData: (cookies, cache) => ipcRenderer.invoke(IpcChannel.BrowserClearData, { cookies, cache }),
+  // —— C3-B2：HITL 接管卡动作（前置受控窗口）+ consent 授权记录清除（宿主 revoke） ——
+  browserFocus: () => ipcRenderer.invoke(IpcChannel.BrowserFocus),
+  browserRevokeGrants: () => ipcRenderer.invoke(IpcChannel.BrowserRevokeGrants),
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),
@@ -127,6 +130,8 @@ const bridge: CarBridge = {
   onSessionDelta: (cb) => subscribe(IpcPushTopic.SessionDelta, cb),
   onAuthzPending: (cb) => subscribe(IpcPushTopic.AuthzPending, cb),
   onAuthzResolved: (cb) => subscribe(IpcPushTopic.AuthzResolved, cb),
+  // B-2：HITL 接管卡（detect/resolved/timeout/aborted 四相）
+  onBrowserHitl: (cb) => subscribe(IpcPushTopic.BrowserHitl, cb),
   // —— T-23：自动更新（main 侧能力；状态经 onUpdateStatus 推送） ——
   checkUpdate: () => ipcRenderer.invoke(IpcChannel.UpdateCheck),
   downloadUpdate: () => ipcRenderer.invoke(IpcChannel.UpdateDownload),

@@ -85,6 +85,10 @@ export const IpcChannel = {
   BrowserSet: 'browser:set',
   /** 清除面（T-B3：清除受控 partition Cookie/缓存——双动作显式） */
   BrowserClearData: 'browser:clear-data',
+  /** B-2：前置受控浏览器窗口（HITL 接管卡「去受控窗口」按钮） */
+  BrowserFocus: 'browser:focus',
+  /** B-2 §4.7 revoke：清除浏览器网络授权记录（宿主 consent 存储单写者） */
+  BrowserRevokeGrants: 'browser:revoke-grants',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -213,6 +217,16 @@ export const IpcPushTopic = {
   UpdateStatus: 'push:update-status',
   /** RepoWiki 生成进度（workspaceId 过滤——多工作区并行互不阻塞） */
   RepoWiki: 'push:repo-wiki',
+  /**
+   * B-2（D-B2-4）：HITL 接管卡（detect/resolved/timeout/aborted 四相——检测到登录页/验证码/
+   * 扫码确定性特征时推送；用户在受控窗口人工完成后 resolved 收卡）
+   */
+  BrowserHitl: 'push:browser-hitl',
+  /**
+   * B-2（D-B2-6）：受控窗口重建触发（宿主 target 发现失败 → main 中继重建窗口）。
+   * 渲染层无订阅者（纯 main 侧动作主题——推过中继即被 main 拦截执行）
+   */
+  BrowserNeedWindow: 'push:browser-need-window',
 } as const
 
 export type IpcPushTopicName = (typeof IpcPushTopic)[keyof typeof IpcPushTopic]
@@ -507,6 +521,15 @@ export interface BrowserSettingsDTO {
   /** 已启用但本进程启动时未启用（须重启宿主生效） */
   restartRequired: boolean
   cdpPort: number
+}
+
+/** B-2（D-B2-4）：HITL 接管推送（接管卡生命周期——detect 建/其余收卡） */
+export interface BrowserHitlPush {
+  phase: 'detect' | 'resolved' | 'timeout' | 'aborted'
+  url: string
+  reason?: string
+  /** 接管窗口截止时刻（detect 相携带——倒计时展示口径） */
+  deadlineTs?: number
 }
 
 /** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
@@ -892,6 +915,8 @@ export interface IpcRequestMap {
   [IpcChannel.BrowserGet]: undefined
   [IpcChannel.BrowserSet]: { enabled: boolean }
   [IpcChannel.BrowserClearData]: { cookies?: boolean; cache?: boolean }
+  [IpcChannel.BrowserFocus]: undefined
+  [IpcChannel.BrowserRevokeGrants]: undefined
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -1002,6 +1027,12 @@ export interface CarBridge {
   browserGet(): Promise<BrowserSettingsDTO>
   browserSet(enabled: boolean): Promise<BrowserSettingsDTO>
   browserClearData(cookies: boolean, cache: boolean): Promise<{ ok: boolean; cleared: string[] }>
+  /** B-2：前置受控浏览器窗口（main 侧按 title 找窗——show + focus） */
+  browserFocus(): Promise<{ ok: boolean }>
+  /** B-2 §4.7：清除浏览器网络授权记录（宿主 revoke——派发前重查即失效） */
+  browserRevokeGrants(): Promise<{ ok: boolean }>
+  /** B-2：HITL 接管卡订阅（detect/resolved/timeout/aborted） */
+  onBrowserHitl(cb: (p: BrowserHitlPush) => void): () => void
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   attachmentPick(): Promise<string[] | null>

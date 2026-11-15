@@ -43,7 +43,9 @@ import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts
 import type { HostModelFn, HostToolDef } from './types.ts'
 import type { SubagentManager } from './subagent.ts'
 import type { BashTaskManager, BashOutputResult } from './bashTasks.ts'
-import type { BrowserTasks } from './browserTasks.ts'
+import type { BrowserHitlPayload, BrowserNetGateResult, BrowserTasks } from './browserTasks.ts'
+import { classifyActRisk, describeActTarget } from './browserTasks.ts'
+import { domainOfUrl, type BrowserGrantsStore } from './browserGrants.ts'
 import { buildPersonaText, type PersonalizationState } from '../shared/personalization.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
@@ -94,6 +96,12 @@ export interface SessionHandleDeps {
   emitEvent: (sessionId: string, event: SessionEventDTO) => void
   emitAuthzPending: (p: AuthzPendingPush) => void
   emitAuthzResolved: (p: AuthzResolvedPush) => void
+  /** B-2（D-B2-4）：HITL 接管推送（service emit → push:browser-hitl → 渲染层接管卡）；缺省 = 无推送（测试形态） */
+  emitBrowserHitl?: (p: BrowserHitlPayload) => void
+  /** B-2（D-B2-6）：受控窗口重建触发（service emit → push:browser-need-window → main 中继重建）；缺省 = 不触发 */
+  emitBrowserNeedWindow?: () => void
+  /** B-2（§4.7 consent 硬化）：浏览器网络授权 grants 持久化（派发前重查 + 按会话×域名分片）；缺省 = 仅内存 grants */
+  browserGrants?: BrowserGrantsStore
   /** 授权决策来源（生产 = 渲染层 authz:respond 等待；测试 = 脚本直答） */
   waitAuthzDecision: (sessionId: string, requestId: string) => Promise<AuthzResponse>
   /** 文件安全引擎（S3-S2；service 装配单例——规则面 > grant 面 > 人审门 编排入口） */
@@ -283,13 +291,60 @@ export class SessionHandle {
   }
 
   /**
-   * C3-B1：受控浏览器工具面接线——browser_open/browser_read 入会话工具注册表（本 turn 起模型
-   * 可见；提案 §4.2 首版前台原子工具）。网络轴判定在 authorize ⓪″（browser_open 目标 url 过
-   * decideNetwork——Q-B3 readonly+网络轴与远程 MCP 同口径）；落链叙事 browser/* 由 manager 承载。
+   * C3-B1/B-2：受控浏览器工具面接线——browser_open/browser_read/browser_act 入会话工具注册表
+   * （本 turn 起模型可见；提案 §4.2 前台原子工具）。网络轴判定在 authorize ⓪″（browser_open
+   * 目标 url 过 decideNetwork——Q-B3 readonly+网络轴与远程 MCP 同口径）+ act 运行面 pre/post
+   * 双检（browserNetGate 注入）；高危确认门 ⓪‴；HITL 接管协议（emitHitl + isAborted）；
+   * 窗口重建钩子（ensureWindow → push:browser-need-window 中继）；落链叙事 browser/* 由 manager 承载。
    */
   attachBrowserTasks(m: BrowserTasks): void {
     this.browserTasks = m
     this.tools.push(...m.tools())
+    // B-2：会话级钩子晚绑定（deps 由 service 注入——缺省形态测试零推送零重建）
+    m.hooks({
+      browserNetGate: (callId, url, phase) => this.browserNetGate(callId, url, phase),
+      isAborted: () => this.abort.aborted,
+      emitHitl: (p) => this.deps.emitBrowserHitl?.(p),
+      ensureWindow: () => this.deps.emitBrowserNeedWindow?.(),
+    })
+  }
+
+  /**
+   * B-2（D-B2-3）：browser_act 导航网络轴（pre/post 双相——decideNetwork 规则面 + policy 语义
+   * 与 authorize 编排同源；审计落 authz 链 kind='turnEnd' turnId='authz:*' 同款）。
+   * pre 相（锚点 href 预检）：规则命中即判；未命中 = 拒（跨域导航请 browser_open 重走网络轴——防绕过）；
+   * 只读策略白名单外恒拒。post 相（act 已引发导航）：规则命中即判；未命中 = 只读拒（导航已发生
+   * 不可撤销——审计留痕 + 工具报错）、非只读 APPROVED 留痕 + note 标注（结果 crossNav）。
+   */
+  private browserNetGate(callId: string, url: string, phase: 'pre' | 'post'): BrowserNetGateResult {
+    if (!this.fileSecurity) return { tier: 'allow' } // 无规则引擎（测试形态）→ 不拦（登记）
+    const nd = this.fileSecurity.decideNetwork(url)
+    if (nd) {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:net-rule:browser-act-${phase}:${callId}`, actor: 'user', capability: 'mcp', resource: url },
+        { decision: nd.tier === 'allow' ? 'APPROVED' : 'DENIED', reason: `net-rule:${nd.rule.id} ${nd.tier} browser_act ${phase}` },
+      )
+      return { tier: nd.tier === 'allow' ? 'allow' : 'deny' }
+    }
+    if (this.policy === 'readonly') {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:net-policy-ro:browser-act-${phase}:${callId}`, actor: 'user', capability: 'mcp', resource: url },
+        { decision: 'DENIED', reason: `session-policy:readonly deny browser_act ${phase} 导航（网络轴未命中白名单——提案 §4.3 只读硬拒）` },
+      )
+      return { tier: 'deny' }
+    }
+    if (phase === 'pre') {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:net-pre:browser-act:${callId}`, actor: 'user', capability: 'mcp', resource: url },
+        { decision: 'DENIED', reason: 'browser-act:pre-nav 未命中网络白名单——跨域导航请 browser_open 重走网络轴（防绕过）' },
+      )
+      return { tier: 'deny' }
+    }
+    this.authz.decideByRule(
+      { authorizationId: `${this.sessionId}:net-post:browser-act:${callId}`, actor: 'user', capability: 'mcp', resource: url },
+      { decision: 'APPROVED', reason: 'browser-act:post-nav 已发生导航审计留痕（未命中白名单——不可撤销性登记）' },
+    )
+    return { tier: 'allow', note: 'post-nav-unadjudicated' }
   }
 
   /** T-FV-2：用户/渲染层任务控制面（宿主动作不过授权门——与 turn:abort 同口径；manager 落链） */
@@ -801,8 +856,18 @@ export class SessionHandle {
           )
           return false
         }
-        // 未命中且非只读策略 → 落 grant 面 / 人审门（首次某域人审，同域后续会话 grant 免审）
+        // 未命中且非只读策略 → 落 grant 面（B-2 = 域名粒度持久化）/ 人审门（首次某域人审，同域后续免审）
       }
+    }
+    // ⓪‴（B-2 / D-B2-2）：browser_act 高危子集恒走人审门——会话策略「会话内放行」与 grants
+    // 不短路（提案 §4.3 第 2 条「即便『完全』策略下也弹确认卡」；确定性风险分类器 classifyActRisk）
+    if (call.tool === 'browser_act' && classifyActRisk(call.args)) {
+      return await this.humanGate(
+        call,
+        capability,
+        `browser_act 高危动作（${describeActTarget(call.args)}）`,
+        `${this.sessionId}:${this.currentTurnIdValue}:browser-act-risk:${call.id}`,
+      )
     }
     // ①规则面
     if (action && this.fileSecurity) {
@@ -843,8 +908,33 @@ export class SessionHandle {
       })
       return true
     }
-    // ②会话 grant 面（按工具）：命中走 decideBySessionPolicy 幂等落链
-    if (this.grants.has(call.tool)) {
+    // ②会话 grant 面：browser_open = 域名粒度持久化（B-2 / §4.7 consent 硬化——派发前现读盘，
+    // 撤销立即生效；存储失败 = 拒绝授权与派发绝不降级）；其余工具维持工具粒度内存 grant（B-1 形态）
+    if (call.tool === 'browser_open' && this.deps.browserGrants) {
+      const url = typeof call.args['url'] === 'string' ? String(call.args['url']) : ''
+      const domain = url ? domainOfUrl(url) : null
+      if (domain) {
+        let granted: boolean
+        try {
+          granted = this.deps.browserGrants.has(this.sessionId, `browser_open@${domain}`)
+        } catch (e) {
+          this.authz.decideByRule(
+            { authorizationId: `${this.sessionId}:grants-store-error:${call.tool}:${call.id}`, actor: 'user', capability, resource: url },
+            { decision: 'DENIED', reason: `browser-grants store error（fail-visible——${e instanceof Error ? e.message : '存储失败'}，清除授权记录可修复）` },
+          )
+          return false
+        }
+        if (granted) {
+          this.authz.decideBySessionPolicy({
+            authorizationId: `${this.sessionId}:policy:browser_open@${domain}:${call.id}`,
+            actor: 'user',
+            capability,
+            resource: url,
+          })
+          return true
+        }
+      }
+    } else if (call.tool !== 'browser_open' && this.grants.has(call.tool)) {
       this.authz.decideBySessionPolicy({
         authorizationId: `${this.sessionId}:policy:${call.tool}:${call.id}`,
         actor: 'user',
@@ -853,8 +943,26 @@ export class SessionHandle {
       })
       return true
     }
-    // ③人审门（现行 S2 流程原样）
-    const authorizationId = `${this.sessionId}:${this.currentTurnIdValue}:${call.tool}:${call.id}`
+    // ③人审门（现行 S2 流程原样；browser_act 高危子集经 ⓪‴ 直入此门）
+    return await this.humanGate(
+      call,
+      capability,
+      resource,
+      `${this.sessionId}:${this.currentTurnIdValue}:${call.tool}:${call.id}`,
+    )
+  }
+
+  /**
+   * ③人审门（B-2 从 authorize 编排提取共用——正常门与高危门同源）：内核 decideByUser 120s
+   * 超时默认拒绝；三档响应。session 档授予面：browser_open = 域名粒度持久化（§4.7——写失败
+   * 不阻断本次已批准授权，下次派发重查自然缺失 = 再次人审）；其余工具 = 工具粒度内存 grant。
+   */
+  private async humanGate(
+    call: { id: string; tool: string; args: Record<string, unknown> },
+    capability: AuthzRequest['capability'],
+    resource: string,
+    authorizationId: string,
+  ): Promise<boolean> {
     let responded: AuthzResponse | null = null
     const decision = await this.authz.decideByUser(
       { authorizationId, actor: 'user', capability, resource },
@@ -871,7 +979,22 @@ export class SessionHandle {
           ts: Date.now(),
         })
         responded = await this.deps.waitAuthzDecision(this.sessionId, authorizationId)
-        if (responded === 'session') this.grants.add(call.tool)
+        if (responded === 'session') {
+          if (call.tool === 'browser_open') {
+            const url = typeof call.args['url'] === 'string' ? String(call.args['url']) : ''
+            const domain = url ? domainOfUrl(url) : null
+            if (domain) {
+              try {
+                this.deps.browserGrants?.grant(this.sessionId, `browser_open@${domain}`)
+              } catch (e) {
+                console.error(`[host] browser grant 持久化失败（${domain}）：`, e instanceof Error ? e.message : e)
+              }
+            }
+            // 无域名可解析（畸形 url）→ 不授予——下次派发仍人审（fail-visible）
+          } else {
+            this.grants.add(call.tool)
+          }
+        }
         return responded === 'once' || responded === 'session'
       },
     )

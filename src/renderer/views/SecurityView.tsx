@@ -59,6 +59,17 @@ export function SecurityView() {
     }
   }
 
+  // B-2 §4.7 revoke：浏览器网络授权记录清除（宿主 revoke——派发前现读盘即失效）
+  const revokeGrants = async (): Promise<void> => {
+    setBrowserError(null)
+    try {
+      await window.car.browserRevokeGrants()
+      setStatus('浏览器网络授权记录已清除（下次 browser_open 一律重新人审）')
+    } catch (e) {
+      setBrowserError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const load = useCallback(async () => {
     setError(null)
     try {
@@ -304,8 +315,10 @@ export function SecurityView() {
       <h3>受控浏览器（缺省关）</h3>
       <p className="dim">
         Agent 操控受控浏览器窗口（与日常浏览器隔离——专属 partition 登录态持久复用/按账号分片）；工具
-        browser_open/browser_read 均过授权门：目标域名过网络轴（白名单外首次人审 + 会话内免审），只读策略下白名单外硬拒；
-        browser/* 全落审计链。CDP 仅绑 127.0.0.1（启动期开关——切换后重启宿主生效）。
+        browser_open/browser_read/browser_act 均过授权门：目标域名过网络轴（白名单外首次人审 +
+        同域免审——域名粒度授权记录跨宿主重启存活、派发前现读盘撤销立即生效），只读策略下白名单外硬拒；
+        browser_act 高危动作（提交/支付/发送/删除类）恒弹人工确认卡；登录页/验证码/扫码触发 HITL 接管
+        （确定性特征探测，5 分钟超时转 waiting）；browser/* 全落审计链。CDP 仅绑 127.0.0.1（启动期开关——切换后重启宿主生效）。
       </p>
       {browserError && (
         <div className="error" role="alert">
@@ -335,6 +348,14 @@ export function SecurityView() {
         </button>
         <button className="btn" disabled={!browserState?.enabled} onClick={() => void clearBrowser(false, true)} title="清除受控 partition 缓存">
           清除缓存
+        </button>
+        <button
+          className="btn"
+          disabled={!browserState?.enabled}
+          onClick={() => void revokeGrants()}
+          title="清除浏览器网络授权记录（revoke——派发前现读盘，撤销立即生效；已派发输入不可撤销）"
+        >
+          清除授权记录
         </button>
       </div>
     </section>
