@@ -22,6 +22,7 @@ import {
   type SessionInfo,
   type SessionOpenResult,
   type SessionUsageResult,
+  type ToolSourceHotStateDTO,
   type WorkspaceInfo,
 } from '../shared/ipc-contract.ts'
 import { classifyPreviewFile } from '../shared/file-preview.ts'
@@ -54,7 +55,9 @@ import {
 } from './sessions.ts'
 import { sessionAuditReport, exportSessionForensics } from './auditReport.ts'
 import { nullPriceProvider, workspaceMeteringSummary, type PriceProvider } from './metering.ts'
-import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState } from './toolSources.ts'
+import { pluginRegistryStore, loadPlugins, createMcpFace, mergeToolSources, type McpFace, type PluginState, type PluginLoadResult } from './toolSources.ts'
+import { createHotReload, fsWatchDef, type HotReloadHandle, type HotWatcherDef } from './hotReload.ts'
+import { createHotReloadStore } from './hotReloadStore.ts'
 import { listCapabilities, writeCapability, editCapability, deleteCapability, loadCapability, type CapabilityEntry } from './capabilities.ts'
 import { skillMdToCapability } from './skill-import.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
@@ -140,10 +143,12 @@ export function createHostService(opts: HostServiceOptions): HostService {
     mcpFaces.set(workspaceId, { fp, face })
     return face
   }
-  /** 工具源装载（S3-S2 builtin + S4 插件/MCP）——session:create / resume 共用 */
+  /** 工具源装载（S3-S2 builtin + S4 插件/MCP）——session:create / resume 共用；
+   *  C1（W-4）：热更新缺省关（D-V10-2）——开启且 last-good 在位时插件源取热快照（MCP 面不变） */
   async function loadExtraTools(workspaceId: string, root: string): Promise<{ extraTools: HostToolDef[]; mcpToolUrl: Map<string, string>; pluginStates: PluginState[] }> {
     const face = await ensureMcpFace(workspaceId, root)
-    const pluginLoad = await loadPlugins(pluginRegistry.get())
+    const hotSnap = hotHandle?.get().value ?? null
+    const pluginLoad = hotSnap ?? (await loadPlugins(pluginRegistry.get()))
     lastPluginLoad = pluginLoad.states
     const extraTools = [...pluginLoad.tools, ...face.tools()]
     const mcpToolUrl = new Map<string, string>()
@@ -152,6 +157,46 @@ export function createHostService(opts: HostServiceOptions): HostService {
       if (u) mcpToolUrl.set(t.name, u)
     }
     return { extraTools, mcpToolUrl, pluginStates: pluginLoad.states }
+  }
+
+  // —— C1：工具源热更新（W-4 last-good 快照语义；缺省关 D-V10-2）——
+  // 能力库登记：读径即热（每请求闭包重读盘，loadCapabilities 闭包即时 listCapabilities）——
+  // 无冻结快照面，W-4 能力库缺口在本架构不存在，热引擎只作用于插件工具源
+  const hotStore = createHotReloadStore(opts.userDataDir)
+  let hotHandle: HotReloadHandle<PluginLoadResult> | null = null
+  /** watcher 定义：登记文件（目录监听滤 plugin-paths.json——原子写 rename-over 后目录监听仍活）+ 各插件文件 */
+  const hotWatcherDefs = (): HotWatcherDef[] => [
+    fsWatchDef('plugin-paths.json', opts.userDataDir, (fn) => fn === null || fn === 'plugin-paths.json'),
+    ...pluginRegistry.get().map((r) => fsWatchDef(`plugin:${r.id}`, r.file)),
+  ]
+  async function ensureHotHandle(): Promise<HotReloadHandle<PluginLoadResult> | null> {
+    if (!hotStore.get().toolSourcesHot) return null
+    if (!hotHandle) {
+      hotHandle = createHotReload<PluginLoadResult>({ label: 'tool-sources', rebuild: () => loadPlugins(pluginRegistry.get()) })
+      hotHandle.arm(hotWatcherDefs())
+    }
+    await hotHandle.refresh('ensure')
+    lastPluginLoad = hotHandle.get().value?.states ?? lastPluginLoad
+    return hotHandle
+  }
+  /** 登记变更后重挂 watcher（新插件文件集）+ 立即重建（states 即时新鲜——修旧账：register 后 states 曾陈旧至下次会话创建） */
+  async function hotRefreshAfterRegistryChange(): Promise<void> {
+    const h = await ensureHotHandle()
+    if (!h) return
+    h.arm(hotWatcherDefs())
+    await h.refresh('registry-change')
+    lastPluginLoad = h.get().value?.states ?? lastPluginLoad
+  }
+  function toolSourceHotState(): ToolSourceHotStateDTO {
+    const snap = hotHandle?.get()
+    return {
+      enabled: hotStore.get().toolSourcesHot,
+      degraded: hotHandle?.degraded() ?? false,
+      hasSnapshot: snap?.value != null,
+      lastCommitAt: snap?.committedAt ?? null,
+      loadErrors: snap?.loadErrors ?? [],
+      watching: hotHandle?.watching() ?? [],
+    }
   }
   const handles = new Map<string, SessionHandle>()
   const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
@@ -1501,10 +1546,27 @@ export function createHostService(opts: HostServiceOptions): HostService {
           throw new Error('CAR-E-DESKTOP: plugins.add 缺少 manifest（{ name, version }）')
         }
         pluginRegistry.add({ file, manifest: p.manifest })
+        // C1：热更新开启时登记变更即刷新（states 不再陈旧至下次会话创建；关闭态维持原样）
+        if (hotStore.get().toolSourcesHot) await hotRefreshAfterRegistryChange()
         return { registrations: pluginRegistry.get(), states: lastPluginLoad ?? [] }
       }
-      case IpcChannel.PluginsRemove:
-        return { registrations: pluginRegistry.remove(requireString(p.id, 'id')), states: lastPluginLoad ?? [] }
+      case IpcChannel.PluginsRemove: {
+        pluginRegistry.remove(requireString(p.id, 'id'))
+        if (hotStore.get().toolSourcesHot) await hotRefreshAfterRegistryChange()
+        return { registrations: pluginRegistry.get(), states: lastPluginLoad ?? [] }
+      }
+      // —— C1：工具源热更新开关（缺省关——D-V10-2；Set 即时生效 start/stop，状态面呈现 degraded/loadErrors） ——
+      case IpcChannel.ToolSourceHotGet:
+        return toolSourceHotState()
+      case IpcChannel.ToolSourceHotSet: {
+        hotStore.set({ toolSourcesHot: p.enabled === true })
+        if (hotStore.get().toolSourcesHot) await ensureHotHandle()
+        else {
+          hotHandle?.stop()
+          hotHandle = null
+        }
+        return toolSourceHotState()
+      }
       case IpcChannel.McpList: {
         const wid = requireString(p.workspaceId, 'workspaceId')
         const face = await ensureMcpFace(wid, registry.pathOf(wid))
@@ -1527,6 +1589,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
       // 测试/收口面：MCP stdio 子进程收口（不收口 = 存活流钉住事件环）
       for (const [, entry] of mcpFaces) entry.face.close()
       mcpFaces.clear()
+      // C1：热更新 watcher 收口（fs.watch 句柄不收口 = 钉住事件环，同 MCP 先例）
+      hotHandle?.stop()
+      hotHandle = null
       // T-ME：auto 进化复核超时计时器全清（收口后 handle 查无即 no-op，此处防悬挂句柄）
       for (const t of evolveTimers.values()) clearTimeout(t)
       evolveTimers.clear()

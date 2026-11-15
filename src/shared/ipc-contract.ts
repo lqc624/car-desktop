@@ -73,6 +73,11 @@ export const IpcChannel = {
   CapabilityImport: 'capability:import',
   /** C4 导入向导（先收集后计划）：只读预览——解析 + id 冲突预测，零写盘零落链（执行仍走 CapabilityImport） */
   CapabilityImportPreview: 'capability:import-preview',
+  // —— C1：工具源热更新（W-4 last-good 快照——缺省关 D-V10-2；能力库读径即热无需此面） ——
+  /** 热更新状态面（enabled/degraded/lastCommitAt/loadErrors/watching） */
+  ToolSourceHotGet: 'tool-source-hot:get',
+  /** 开关切换（即时生效 start/stop watcher；返回切换后状态） */
+  ToolSourceHotSet: 'tool-source-hot:set',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -472,6 +477,21 @@ export interface CapabilityImportPreview {
   results: CapabilityImportPreviewRow[]
 }
 
+/** C1 工具源热更新状态面（W-4 last-good 快照——loadErrors 显式暴露禁静默吞） */
+export interface ToolSourceHotStateDTO {
+  /** 开关（缺省关——D-V10-2） */
+  enabled: boolean
+  /** watcher 故障降级态（true = 热更新已停，主功能不受影响——W-4 能力可降级语义） */
+  degraded: boolean
+  /** last-good 快照在位（false = 尚无成功提交，会话创建回退急装载） */
+  hasSnapshot: boolean
+  lastCommitAt: number | null
+  /** 最近重建失败/watcher 故障原因（fail-visible 显式暴露） */
+  loadErrors: string[]
+  /** 当前监听对象标签（诊断呈现） */
+  watching: string[]
+}
+
 /** T-25：附件登记行（mode = fulltext 文本全文 / path-ref 路径登记——PRD C-3 双形态） */
 export interface AttachmentRowDTO {
   path: string
@@ -850,6 +870,8 @@ export interface IpcRequestMap {
   [IpcChannel.CapabilityImportPick]: undefined
   [IpcChannel.CapabilityImport]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.CapabilityImportPreview]: { workspaceId: string; sessionId: string; paths: string[] }
+  [IpcChannel.ToolSourceHotGet]: undefined
+  [IpcChannel.ToolSourceHotSet]: { enabled: boolean }
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -953,6 +975,9 @@ export interface CarBridge {
   capabilityImport(workspaceId: string, sessionId: string, paths: string[]): Promise<CapabilityImportResult>
   /** C4 导入向导：只读预览（解析 + id 冲突预测——零写盘零落链；执行走 capabilityImport） */
   capabilityImportPreview(workspaceId: string, sessionId: string, paths: string[]): Promise<CapabilityImportPreview>
+  // —— C1：工具源热更新（缺省关 D-V10-2；Set 即时生效） ——
+  toolSourceHotGet(): Promise<ToolSourceHotStateDTO>
+  toolSourceHotSet(enabled: boolean): Promise<ToolSourceHotStateDTO>
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   attachmentPick(): Promise<string[] | null>

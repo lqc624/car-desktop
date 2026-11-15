@@ -87,6 +87,9 @@ const bridge: CarBridge = {
   capabilityImportPick: () => ipcRenderer.invoke(IpcChannel.CapabilityImportPick),
   capabilityImport: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.CapabilityImport, { workspaceId, sessionId, paths }),
   capabilityImportPreview: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.CapabilityImportPreview, { workspaceId, sessionId, paths }),
+  // —— C1：工具源热更新开关（缺省关；Set 即时生效） ——
+  toolSourceHotGet: () => ipcRenderer.invoke(IpcChannel.ToolSourceHotGet),
+  toolSourceHotSet: (enabled) => ipcRenderer.invoke(IpcChannel.ToolSourceHotSet, { enabled }),
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),

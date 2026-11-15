@@ -150,6 +150,9 @@ function registerIpc(): void {
   // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链；preview = C4 向导只读预览） ——
   ipcMain.handle(IpcChannel.CapabilityImport, (_event, payload: unknown) => callHost(IpcChannel.CapabilityImport, payload))
   ipcMain.handle(IpcChannel.CapabilityImportPreview, (_event, payload: unknown) => callHost(IpcChannel.CapabilityImportPreview, payload))
+  // —— C1：工具源热更新开关（宿主侧 start/stop watcher——缺省关） ——
+  ipcMain.handle(IpcChannel.ToolSourceHotGet, () => callHost(IpcChannel.ToolSourceHotGet))
+  ipcMain.handle(IpcChannel.ToolSourceHotSet, (_event, payload: unknown) => callHost(IpcChannel.ToolSourceHotSet, payload))
   ipcMain.handle(IpcChannel.AttachmentAdd, (_event, payload: unknown) => callHost(IpcChannel.AttachmentAdd, payload))
   ipcMain.handle(IpcChannel.AttachmentRemove, (_event, payload: unknown) => callHost(IpcChannel.AttachmentRemove, payload))
   // —— S3：文件安全设置面 / 安全中心设置 / 会话策略（宿主持久化与校验） ——

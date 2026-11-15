@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { PluginStateDTO, WorkspaceInfo } from '../../shared/ipc-contract'
+import type { PluginStateDTO, ToolSourceHotStateDTO, WorkspaceInfo } from '../../shared/ipc-contract'
 
 /**
  * S4-S1 插件装载面（只读呈现——立项书 F-D4）：登记管理（userData/plugin-paths.json）+
@@ -15,6 +15,8 @@ export function PluginsView({ selected }: { selected: WorkspaceInfo | null }) {
   const [version, setVersion] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
+  // C1 工具源热更新（W-4 last-good——缺省关 D-V10-2）
+  const [hot, setHot] = useState<ToolSourceHotStateDTO | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -22,6 +24,7 @@ export function PluginsView({ selected }: { selected: WorkspaceInfo | null }) {
       const r = await window.car.pluginsList()
       setRegistrations(r.registrations)
       setStates(r.states)
+      setHot(await window.car.toolSourceHotGet())
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -30,6 +33,18 @@ export function PluginsView({ selected }: { selected: WorkspaceInfo | null }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  const toggleHot = async (): Promise<void> => {
+    setError(null)
+    try {
+      const next = await window.car.toolSourceHotSet(!(hot?.enabled ?? false))
+      setHot(next)
+      await load()
+      setStatus(next.enabled ? `工具源热更新已开启${next.degraded ? '（watcher 降级——主功能不受影响）' : next.hasSnapshot ? '（last-good 快照已就绪）' : ''}` : '工具源热更新已关闭（回退会话创建时急装载）')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const add = async () => {
     setError(null)
@@ -72,6 +87,31 @@ export function PluginsView({ selected }: { selected: WorkspaceInfo | null }) {
         </div>
       )}
       {status && <div className="status">{status}</div>}
+
+      <h3>工具源热更新（W-4 last-good 快照）</h3>
+      <div className="row wrap" style={{ margin: '8px 0' }}>
+        <button className={`btn ${hot?.enabled ? 'danger' : 'primary'}`} onClick={() => void toggleHot()}>
+          {hot?.enabled ? '关闭热更新' : '开启热更新'}
+        </button>
+        <span className="dim">
+          缺省关（设置显式开）· 开启后：插件文件/登记变更 → 200ms 去抖 → 完整快照重建一次性提交 →
+          重建失败保 last-good（loadErrors 显式呈现）· watcher 故障只降热更新，主功能不受影响 ·
+          能力库为读径即热（每请求重读盘）无需此面
+        </span>
+      </div>
+      {hot && (
+        <div className={`banner ${hot.enabled ? (hot.degraded ? 'err' : 'ok') : ''}`} style={{ margin: '6px 0' }}>
+          <b>{hot.enabled ? '已开启' : '已关闭'}</b>
+          {hot.enabled && (
+            <>
+              {' · '}
+              {hot.degraded ? <span>⚠ watcher 降级（热更新已停，重开开关恢复）</span> : hot.hasSnapshot ? <span>last-good 快照就绪（{new Date(hot.lastCommitAt ?? 0).toLocaleTimeString()}）</span> : <span>快照待首次构建</span>}
+              {hot.loadErrors.length > 0 && <div className="dim">loadErrors：{hot.loadErrors.join('；')}</div>}
+              {hot.watching.length > 0 && <div className="dim">监听：{hot.watching.join('、')}</div>}
+            </>
+          )}
+        </div>
+      )}
 
       <h3>登记插件</h3>
       <div className="row wrap">
