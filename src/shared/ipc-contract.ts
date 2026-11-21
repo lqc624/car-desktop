@@ -269,6 +269,12 @@ export interface SessionInfo {
   title: string
   /** K2（1.16 子 Agent）：子链的父会话 id（session-start 载荷；普通会话 = null——列表面「子 Agent」徽标数据源） */
   parentSessionId?: string | null
+  /**
+   * Z-1 延伸（0.15.0 / D-Z15-2）：分叉谱系（值 = 源会话 id；普通会话 = 缺省——谱系面板构树
+   * 数据源）。索引 SessionIndexEntry.forkedFrom 的 DTO 透传；执行拓扑（parentSessionId）与
+   * 分叉叙事（forkedFrom）两域不混——本键只服务 Z-1 谱系。
+   */
+  forkedFrom?: string | null
   /** 上下文窗口（tokens）——模型元数据表/端点声明；无值 = null（渲染层不显示百分比，D-C5） */
   contextWindow?: number | null
   /**

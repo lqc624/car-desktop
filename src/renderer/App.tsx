@@ -32,6 +32,8 @@ import { PluginsView } from './views/PluginsView'
 import { SecurityView } from './views/SecurityView'
 import { SettingsView } from './views/SettingsView'
 import { FileViewer, type ViewerTarget } from './FileViewer'
+import { LineagePanel } from './LineagePanel'
+import { forkPointFromEvents, type ForkPoint } from './lineage'
 import { resolveViewerPath } from '../shared/file-preview'
 import { taskRowsFrom, formatDuration, type TaskRow } from './task-rows'
 
@@ -388,6 +390,9 @@ export function App() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [showCtx, setShowCtx] = useState(false)
+  // Z-1 延伸（0.15.0 / D-Z15-1）：谱系抽屉开关 + 当前会话 fork-in 分叉点（open 返回 events 零额外请求提取）
+  const [showLineage, setShowLineage] = useState(false)
+  const [openForkPoint, setOpenForkPoint] = useState<ForkPoint | null>(null)
   const [showModelMenu, setShowModelMenu] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
   const [view, setView] = useState<'chat' | 'audit' | 'dash' | 'security' | 'plugins' | 'mcp' | 'settings' | 'memory' | 'caps' | 'persona' | 'repowiki' | 'deploy'>('chat')
@@ -647,6 +652,8 @@ export function App() {
       setOpenId(sessionId)
       setEvents(r.events)
       setStream(null) // 1.19.0：换会话清流式缓冲（回放/重开会话不带上一会话临时态）
+      // Z-1 延伸（0.15.0 / D-Z15-3）：子会话头分叉点行——fork-in 标记就在 open 返回 events 里，零额外请求
+      setOpenForkPoint(forkPointFromEvents(r.events))
       setSessionModel(r.model)
       setContextWindow(r.contextWindow ?? null)
       // 会话策略 = 链上最近一次 session/policy，无则回退安全中心默认值
@@ -1287,6 +1294,11 @@ export function App() {
                 </div>
               )}
               {busy && <span className="live">● turn 进行中</span>}
+              {openForkPoint && (
+                <div className="forkpoint-line" data-testid="forkpoint-line" role="status">
+                  ⎇ 从父会话第 {openForkPoint.upToSeq} 条消息分出（源 {openForkPoint.fromSessionId}——公共历史 = 分叉点之前；父链分叉后仍可写）
+                </div>
+              )}
               {pendingCount > 0 && (
                 <div className="steer-banner" role="status">
                   引导会话，消息将被发出但模型不会中断——待执行 {pendingCount} 条（当前 turn 收口后 FIFO 续跑）
@@ -1351,6 +1363,17 @@ export function App() {
                   </div>
                 )}
               </div>
+            )}
+            {showLineage && selected && (
+              <LineagePanel
+                sessions={sessionsByWs[selected.id] ?? []}
+                currentId={openId}
+                onClose={() => setShowLineage(false)}
+                onJump={(sid) => {
+                  setShowLineage(false)
+                  void openSessionById(selected, sid)
+                }}
+              />
             )}
             {authzSel.size > 0 && (
               <div className="authz batch" data-testid="authz-batch-bar">
@@ -1747,6 +1770,18 @@ export function App() {
                       title="分叉会话（整链复制为新会话——回到起点重新问/换模型重试，原链不动；子会话标题 ⎇ 谱系后缀）"
                     >
                       ⎇ 分叉
+                    </button>
+                  </div>
+                )}
+                {openId && (
+                  <div className="cluster-item">
+                    <button
+                      className={`pill${showLineage ? ' on' : ''}`}
+                      data-testid="lineage-btn"
+                      onClick={() => setShowLineage((v) => !v)}
+                      title="分叉谱系（工作区级树——分叉点/子会话数/同父分支对比；D-Z15-1）"
+                    >
+                      ⎇ 谱系
                     </button>
                   </div>
                 )}

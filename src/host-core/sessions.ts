@@ -110,5 +110,7 @@ export function sessionInfo(workspaceRoot: string, workspaceId: string, sessionI
     eventCount: lines.length,
     title: idx.sessions[sessionId]?.title ?? '未命名会话',
     ...(parentSessionId ? { parentSessionId } : {}),
+    // Z-1 延伸（0.15.0 / D-Z15-2）：分叉谱系透传（索引镜像——谱系面板构树数据源；无 = 缺省）
+    ...(idx.sessions[sessionId]?.forkedFrom ? { forkedFrom: idx.sessions[sessionId]!.forkedFrom } : {}),
   }
 }
