@@ -21,17 +21,20 @@ import { copyFileSync, mkdirSync, readFileSync } from 'node:fs'
 const nodeTarget = 'node22.19'
 mkdirSync('dist-electron', { recursive: true })
 
-/** CJS bundle 的 import.meta.url 改写（内核 runCode.js worker 入口——见头注） */
+/** CJS bundle 的 import.meta.url 改写（内核 runCode.js / repl.js worker 入口——见头注；0.14.0 泛化双文件） */
 const importMetaUrlCjsPlugin = {
   name: 'import-meta-url-cjs',
   setup(b) {
-    b.onLoad({ filter: /node_modules[\\/]+@lqc123qwe[\\/]car-runtime[\\/]+dist[\\/]+ptc[\\/]runCode\.js$/ }, async (args) => ({
-      contents: readFileSync(args.path, 'utf8').replace(
-        'fileURLToPath(import.meta.url)',
-        `fileURLToPath(require("node:url").pathToFileURL(require.resolve("@lqc123qwe/car-runtime/package.json")).href.replace(/package\\.json$/, 'dist/ptc/runCode.js'))`,
-      ),
-      loader: 'js',
-    }))
+    b.onLoad({ filter: /node_modules[\\/]+@lqc123qwe[\\/]car-runtime[\\/]+dist[\\/]+ptc[\\/](runCode|repl)\.js$/ }, async (args) => {
+      const base = args.path.split(/[\\/]/).pop() || ''
+      return {
+        contents: readFileSync(args.path, 'utf8').replace(
+          'fileURLToPath(import.meta.url)',
+          `fileURLToPath(require("node:url").pathToFileURL(require.resolve("@lqc123qwe/car-runtime/package.json")).href.replace(/package\\.json$/, 'dist/ptc/${base}'))`,
+        ),
+        loader: 'js',
+      }
+    })
   },
 }
 
