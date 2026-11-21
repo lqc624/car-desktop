@@ -55,10 +55,12 @@ export function taskRowsFrom(events: ReadonlyArray<{ kind: string; ts: number; p
     if (p['type'] === 'subagent/spawn' && typeof p['subagentId'] === 'string') {
       const id = p['subagentId']
       const c = closed.get(id)
+      // 0.14.0（Z-3）：类型徽标（payload.subagentType——readonly 缺省不落键；判别符 p['type'] 不可占）
+      const subagentType = typeof p['subagentType'] === 'string' ? p['subagentType'] : null
       rows.push({
         kind: 'subagent',
         id,
-        title: String(p['task'] ?? ''),
+        title: String(p['task'] ?? '') + (subagentType ? `〔${subagentType}〕` : ''),
         state: c?.state ?? 'active',
         startedTs: e.ts,
         durationMs: c ? c.ts - e.ts : null,

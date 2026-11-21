@@ -29,15 +29,19 @@ import {
   AuthzService,
   SessionFileStore,
   SessionLog,
+  bindReplToTool,
+  createPtcRepl,
   loadSessionLog,
   recoverInterrupted,
   runTurn,
   type AuthzRequest,
+  type PtcReplHandle,
   type SubagentConfig,
 } from '@lqc123qwe/car-runtime'
 import { parseEventLine } from './model.ts'
 import { fsReadTool } from './tools.ts'
 import { assertSafeId } from './sessions.ts'
+import { resolveSubagentType } from './subagentTypes.ts'
 import { usageOver } from './session-handle.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 import type { FileSecurityEngine } from './fileSecurity.ts'
@@ -113,6 +117,10 @@ interface ChildEntry {
   closed: boolean
   /** 在途人审的取消出口（kill/级联 abort 时即时 cancelled——不放任等超时） */
   cancelAuthz: (() => void) | null
+  /** 0.14.0（Z-3 / D-QD1-2）：ptc 型专属——持久 REPL（release = join/kill/abort 三路 + closeAll 兜底） */
+  repl: PtcReplHandle | null
+  /** 类型声明档 id（spawn 叙事/行面呈现——缺省 readonly） */
+  type: string
 }
 
 export class SubagentManager {
@@ -164,7 +172,9 @@ export class SubagentManager {
 
   // ── T-K2-1：编排动作（父链编排事件 + 子链生命周期） ──
 
-  spawn(task: string, id?: string): { ok: true; subagentId: string; state: 'running'; note: string } {
+  spawn(task: string, id?: string, type?: string): { ok: true; subagentId: string; state: 'running'; note: string } {
+    // 0.14.0（Z-3 / D-QD1-1）：类型声明档——缺省 readonly（现行为零变化）；未知 id fail-visible
+    const spec = resolveSubagentType(type)
     const active = this.activeCount()
     if (active >= this.maxConcurrent) {
       throw new Error(`CAR-E-SUBAGENT-CONC: 并发子 Agent 超上限（${active} ≥ ${this.maxConcurrent}）——护栏 fail-visible，禁静默排队`)
@@ -196,8 +206,9 @@ export class SubagentManager {
       parentTurnId: turnId,
       task,
       model,
+      ...(spec.id !== 'readonly' ? { subagentType: spec.id } : {}),
       guards: { maxConcurrent: this.maxConcurrent, maxCumulative: this.maxCumulative, active: active + 1, cumulative: cumulative + 1 },
-      whitelist: [...SUBAGENT_TOOL_WHITELIST],
+      whitelist: [...spec.toolface],
     })
     const log = new SessionLog(subagentId)
     const store = new SessionFileStore(join(this.deps.sessionsDir, subagentId + '.jsonl'))
@@ -212,9 +223,22 @@ export class SubagentManager {
       parentTurnId: turnId,
       task,
       model,
-      whitelist: [...SUBAGENT_TOOL_WHITELIST],
+      ...(spec.id !== 'readonly' ? { subagentType: spec.id } : {}),
+      whitelist: [...spec.toolface],
     })
     log.append('user', 'user', 'T1', task)
+    // 0.14.0（Z-3 / D-QD1-1）：类型声明档装配——spec.toolface → 子面 defs（fs_read 直挂；run_code =
+    // bindReplToTool(REPL 实例)）。装配序：child 先建（authz/log 真值）→ ptc 型挂 REPL → runTurn。
+    const specDefs: HostToolDef[] = []
+    for (const name of spec.toolface) {
+      if (name === 'fs_read') {
+        specDefs.push(fsReadTool(this.deps.workspaceRoot, this.deps.fileSecurity ?? undefined))
+      } else if (name === 'run_code') {
+        // run_code 定义延后（child 建好后绑 REPL 实例——见下）
+      } else {
+        throw new Error(`CAR-E-SUBAGENT-WHITELIST: 白名单条目未接线（${name}）——子面工具定义缺失`)
+      }
+    }
     const child: ChildEntry = {
       sessionId: subagentId,
       task,
@@ -231,16 +255,40 @@ export class SubagentManager {
       usageSummarized: false,
       closed: false,
       cancelAuthz: null,
+      repl: null,
+      type: spec.id,
+    }
+    if (spec.id === 'ptc') {
+      // 0.14.0（D-QD1-2）：ptc 型专属持久 REPL——生命周期 = spawn 创建 → join/kill/abort 三路 release
+      // + closeAll 兜底（D-QD1-8）；REPL 程序内子调用逐次过门（D-QD1-5：bridge 重入 childAuthorize
+      // 全编排链——规则面/人审门弹卡父会话与 bash 同形态，审计落子链）
+      const repl = createPtcRepl({
+        tools: new Map(
+          specDefs.map((d) => [d.name, { run: async (args: unknown) => {
+            const ok = await this.childAuthorize(child)({ id: 'br-' + Math.random().toString(36).slice(2), tool: d.name, args: (args ?? {}) as Record<string, unknown> })
+            if (!ok) throw new Error('authorization-denied (ptc bridge)——程序内子调用授权拒绝落审计')
+            return d.run((args ?? {}) as Record<string, unknown>)
+          } }]),
+        ),
+        audit: (d) => log.append('runtime', 'system', 'T1', { type: 'ptc/' + d['kind'], ...d }),
+      })
+      child.repl = repl
+      specDefs.push({
+        name: 'run_code',
+        declaredSideEffect: 'write',
+        description: '执行一段 erasable TS 程序（持久 REPL——跨调用绑定续写；inspect-only 输出契约：用打印显式输出，末表达式丢弃）。参数：code + description 双必填。',
+        run: bindReplToTool(repl).run,
+      })
     }
     const childModelFn = this.deps.makeChildModelFn({
       log,
       signal: child.abort,
       currentTurnId: () => 'T1',
       currentModel: () => child.model,
-      toolDefs: this.whitelistDefs,
+      toolDefs: specDefs,
       sessionId: subagentId,
     })
-    const tools = new Map(this.whitelistDefs.map((t) => [t.name, t]))
+    const tools = new Map(specDefs.map((t) => [t.name, t]))
     child.done = runTurn({
       log,
       turnId: 'T1',
@@ -312,6 +360,7 @@ export class SubagentManager {
     }
     child.abort.aborted = true
     child.cancelAuthz?.()
+    child.repl?.release() // 0.14.0（D-QD1-8）：kill 即时 release（不等收口——REPL 状态随终止销毁）
     this.deps.parentLog.append('runtime', 'system', this.deps.parentCurrentTurnId(), {
       type: 'subagent/kill',
       subagentId,
@@ -326,6 +375,7 @@ export class SubagentManager {
       if (c.settled) continue
       c.abort.aborted = true
       c.cancelAuthz?.()
+      c.repl?.release() // 0.14.0（D-QD1-8）：级联 abort 释放 ptc REPL
     }
   }
 
@@ -342,6 +392,8 @@ export class SubagentManager {
     if (child.closed) return
     child.closed = true
     child.store.close()
+    // 0.14.0（D-QD1-8）：ptc 型 REPL release（join/级联 close 路径单点收敛）
+    child.repl?.release()
   }
 
   // ── T-K2-2：子链授权门（代理父授权编排；决策审计落子链） ──
@@ -470,6 +522,7 @@ export class SubagentManager {
         properties: {
           task: { type: 'string', description: '子 Agent 要完成的任务（自包含——子链独立上下文，看不到本会话历史）' },
           id: { type: 'string', description: '可选引用 id（join/kill 时定位；缺省自动生成）' },
+          type: { type: 'string', description: '可选类型声明档（0.14.0：readonly=只读扇出缺省档 / ptc=程序化工具调用持久 REPL——未知类型 fail-visible）' },
         },
         required: ['task'],
       },
@@ -479,7 +532,8 @@ export class SubagentManager {
           throw new Error('CAR-E-SUBAGENT-ARGS: subagent_spawn 缺少 task（string）')
         }
         const id = typeof args['id'] === 'string' && args['id'].length ? String(args['id']) : undefined
-        return this.spawn(task, id)
+        const type = typeof args['type'] === 'string' && args['type'].length ? String(args['type']) : undefined
+        return this.spawn(task, id, type)
       },
     }
   }
