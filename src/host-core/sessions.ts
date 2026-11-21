@@ -23,6 +23,8 @@ export interface SessionIndexEntry {
   deleted?: boolean
   /** T-K2-4：随父删除级联标记（值 = 父会话 id——审计定位「为什么不见了」） */
   deletedWithParent?: string
+  /** 0.13.0（Z-1 / D-Z13-4）：分叉谱系（值 = 源会话 id——fork-in/out 标记的索引侧镜像） */
+  forkedFrom?: string
 }
 
 export interface SessionIndexFile {

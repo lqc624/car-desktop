@@ -30,6 +30,9 @@ const bridge: CarBridge = {
   abortTurn: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.TurnAbort, { workspaceId, sessionId }),
   /** Z-7（D-V12-2）：FileViewer 反向感知上报（渲染层 → main 单向；main 持态防抖写 viewer-state.json） */
   fileviewerReport: (state) => ipcRenderer.invoke(IpcChannel.FileviewerReport, state),
+  /** Z-1（0.13.0 / D-Z13-3）：会话内分叉（upToSeq 缺省 = 整链——宿主侧派生） */
+  sessionFork: (workspaceId, sessionId, upToSeq) =>
+    ipcRenderer.invoke(IpcChannel.SessionFork, { workspaceId, sessionId, ...(typeof upToSeq === 'number' ? { upToSeq } : {}) }),
   respondAuthz: (workspaceId, sessionId, requestId, decision, note) =>
     ipcRenderer.invoke(IpcChannel.AuthzRespond, { workspaceId, sessionId, requestId, decision, ...(typeof note === 'string' && note.trim() ? { note: note.slice(0, 500) } : {}) }),
   sessionUsage: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionUsage, { workspaceId, sessionId }),

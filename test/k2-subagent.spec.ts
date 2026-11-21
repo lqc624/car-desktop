@@ -544,8 +544,8 @@ test('K2: spawn 子链文件已存在 = CAR-E-SUBAGENT-DUP fail-visible（跨会
 
 test('K2/K3: seam 门禁——1.16.0 运行时符号面无 subagent 加法（版本 + 计数 + 方向断言）', () => {
   const probe = probeSeam()
-  assert.equal(probe.seamVersion, '1.25.1', '1.25.1 消费基线（Z-11 附注键 D-V12-1 + 1.25.0 召回层 43→45——buildMemoryIndex/recallMemories）')
-  assert.equal(probe.symbolCount, 45, '运行时符号计数与基线一致（1.25.0 +buildMemoryIndex/+recallMemories——seam 只增不删）')
+  assert.equal(probe.seamVersion, '1.26.0', '1.26.0 消费基线（Z-1 会话内分叉 D-Z13-1~2——forkInSession；+1.25.1 附注键 + 1.25.0 召回层）')
+  assert.equal(probe.symbolCount, 46, '运行时符号计数与基线一致（1.26.0 +forkInSession——seam 只增不删）')
   assert.ok(
     !probe.symbols.some((s) => /subagent/i.test(s)),
     'seam 无 subagent* 运行时符号（编排 = 宿主侧组合；若此处红 = 内核加了法但未走发布纪律）',

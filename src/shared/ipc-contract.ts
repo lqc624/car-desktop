@@ -40,6 +40,8 @@ export const IpcChannel = {
   SessionUsage: 'session:usage',
   /** 会话重命名（rename 事件落链留痕） */
   SessionRename: 'session:rename',
+  /** Z-1（0.13.0 / D-Z13-1~3）：会话内分叉（消息边界——子链落盘 + 双向 fork 标记 + 索引谱系登记） */
+  SessionFork: 'session:fork',
   /** 会话删除（delete 事件落链留痕；JSONL 文件保留不销毁——审计红线） */
   SessionDelete: 'session:delete',
   /** 会话级模型切换（model/set 事件落链——D-S2-3） */
@@ -903,6 +905,7 @@ export interface IpcRequestMap {
   [IpcChannel.FileviewerReport]: ViewerStateDTO
   [IpcChannel.SessionUsage]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionRename]: { workspaceId: string; sessionId: string; title: string }
+  [IpcChannel.SessionFork]: { workspaceId: string; sessionId: string; upToSeq?: number }
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionSetModel]: { workspaceId: string; sessionId: string; model: string; contextWindow?: number; reasoningEffort?: 'off' | 'low' | 'medium' | 'high' }
   [IpcChannel.SessionCompact]: { workspaceId: string; sessionId: string }
@@ -992,6 +995,8 @@ export interface CarBridge {
   respondAuthz(workspaceId: string, sessionId: string, requestId: string, decision: AuthzDecisionInput, note?: string): Promise<{ outcome: string }>
   sessionUsage(workspaceId: string, sessionId: string): Promise<SessionUsageResult>
   renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionInfo>
+  /** Z-1（0.13.0 / D-Z13-1~3）：会话内分叉——upToSeq 缺省 = 整链（会话头入口）；成功后子会话已落盘 + 索引登记（标题 ⎇ 后缀 + forkedFrom） */
+  sessionFork(workspaceId: string, sessionId: string, upToSeq?: number): Promise<{ childSessionId: string; migrated: number }>
   deleteSession(workspaceId: string, sessionId: string): Promise<void>
   setSessionModel(workspaceId: string, sessionId: string, model: string, contextWindow?: number, reasoningEffort?: 'off' | 'low' | 'medium' | 'high'): Promise<void>
   /** S5（D-S5-2）：立即压缩（append-only compact 事件；无区间 = CAR-E-COMPACT-NORANGE fail-visible） */

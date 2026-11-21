@@ -980,3 +980,7 @@ body {
 .authz-note:focus { outline: none; border-color: #2f6fd6; }
 .authz-sel { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .authz-sel input[type='checkbox'] { accent-color: #2f6fd6; }
+
+/* ── 0.13.0 Z-1 会话内分叉（D-Z13-3）：消息行 ⎇ 入口（hover 显影） ── */
+.msg .fork-btn { display: none; margin-left: 8px; }
+.msg:hover .fork-btn, .msg .fork-btn:focus-visible { display: inline-flex; }

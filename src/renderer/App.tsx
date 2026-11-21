@@ -64,7 +64,7 @@ interface ToolCard {
 const FS_TOOLS = new Set(['fs_read', 'fs_write', 'fs_delete'])
 
 type ChatItem =
-  | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean }
+  | { kind: 'msg'; role: 'user' | 'agent'; text: string; pending?: boolean; seq?: number }
   | { kind: 'tool'; card: ToolCard }
   | { kind: 'line'; tone: 'dim' | 'ok' | 'warn'; text: string; subagentLink?: string; auditJump?: true }
 
@@ -154,7 +154,8 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
     const payload = e.payload
     const p = (payload ?? {}) as Record<string, unknown>
     if (e.kind === 'user') {
-      items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: (pendingTurnIds.has(e.turnId) && e.turnId !== runningTurnId) || undefined })
+      // 0.13.0（Z-1 / D-Z13-3）：user 行携带链 seq（fork 入口绑定链 seq 非显示序——R-3 防错位）
+      items.push({ kind: 'msg', role: 'user', text: String(payload ?? ''), pending: (pendingTurnIds.has(e.turnId) && e.turnId !== runningTurnId) || undefined, seq: e.seq })
     } else if (e.kind === 'assistant') {
       items.push({ kind: 'msg', role: 'agent', text: String(payload ?? '') })
     } else if (e.kind === 'thinking') {
@@ -619,6 +620,19 @@ export function App() {
       updateExpanded([...base, w.id])
       if (!sessionsByWs[w.id]) void refreshSessions(w.id).catch(fail)
       if (selected?.id !== w.id) await selectWorkspace(w)
+    }
+  }
+
+  // Z-1（0.13.0 / D-Z13-3）：会话内分叉——upToSeq 缺省 = 整链（会话头入口）；成功后刷新侧栏 + 自动打开子会话
+  const forkSession = async (upToSeq?: number) => {
+    if (!selected || !openId) return
+    try {
+      const r = await window.car.sessionFork(selected.id, openId, upToSeq)
+      await refreshSessions(selected.id)
+      setStatus(`已分叉 → ${r.childSessionId}（迁移 ${r.migrated} 件——父链 fork-out 已落链；子会话回到分叉点重新问，原链不动）`)
+      await openSessionById(selected, r.childSessionId)
+    } catch (e) {
+      fail(e)
     }
   }
 
@@ -1526,6 +1540,16 @@ export function App() {
                       <div className="who">
                         {it.role === 'user' ? '我' : 'CR'}
                         {it.pending && <span className="pending-badge">待执行</span>}
+                        {it.role === 'user' && it.seq !== undefined && (
+                          <button
+                            className="mini fork-btn"
+                            data-testid={`fork-at-${it.seq}`}
+                            title="从此分叉（子会话回到这条消息之前——重新问/改问法，原链不动；⎇ 谱系后缀自动）"
+                            onClick={() => void forkSession(it.seq)}
+                          >
+                            ⎇ 分叉
+                          </button>
+                        )}
                       </div>
                       <div className="bubble">{it.text}</div>
                     </div>
@@ -1711,6 +1735,18 @@ export function App() {
                       title="会话级记忆注入开关（端侧偏好，不落链）——注入发生在会话首轮，须在首条消息前设定"
                     >
                       记忆·{memoryInjectOn ? '开' : '关'}
+                    </button>
+                  </div>
+                )}
+                {openId && (
+                  <div className="cluster-item">
+                    <button
+                      className="pill"
+                      data-testid="fork-session-btn"
+                      onClick={() => void forkSession()}
+                      title="分叉会话（整链复制为新会话——回到起点重新问/换模型重试，原链不动；子会话标题 ⎇ 谱系后缀）"
+                    >
+                      ⎇ 分叉
                     </button>
                   </div>
                 )}

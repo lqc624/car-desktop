@@ -9,7 +9,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
+import { forkInSession, loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
   IpcPushTopic,
@@ -1325,6 +1325,24 @@ export function createHostService(opts: HostServiceOptions): HostService {
         idx.sessions[sessionId] = { ...idx.sessions[sessionId], title }
         writeSessionIndex(root, idx)
         return sessionInfo(root, workspaceId, sessionId)
+      }
+      case IpcChannel.SessionFork: {
+        // Z-1（0.13.0 / D-Z13-1~4）：会话内分叉——内核 forkInSession（断链/越界 fail-visible）
+        // → 子链 JSONL 落盘（SessionFileStore 同形态单文件，桌面不另设事实源）→ 索引谱系登记
+        const workspaceId = requireString(p.workspaceId, 'workspaceId')
+        const sessionId = requireString(p.sessionId, 'sessionId')
+        const handle = requireAliveHandle(workspaceId, sessionId)
+        const upToSeq = typeof p.upToSeq === 'number' && Number.isInteger(p.upToSeq) ? p.upToSeq : handle.log.events.length
+        const root = registry.pathOf(workspaceId)
+        const childId = 'S-' + Date.now().toString(36) + '-' + randomBytes(2).toString('hex')
+        const fork = forkInSession(handle.log, childId, { upToSeq })
+        mkdirSync(sessionsDirFor(root), { recursive: true })
+        writeFileSync(join(sessionsDirFor(root), childId + '.jsonl'), fork.log.exportJSONL(), 'utf8')
+        const idx = readSessionIndex(root)
+        const parentTitle = idx.sessions[sessionId]?.title ?? '未命名会话'
+        idx.sessions[childId] = { title: parentTitle + ' ⎇', forkedFrom: sessionId }
+        writeSessionIndex(root, idx)
+        return { childSessionId: childId, migrated: fork.migrated }
       }
       case IpcChannel.SessionDelete: {
         const workspaceId = requireString(p.workspaceId, 'workspaceId')

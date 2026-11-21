@@ -253,6 +253,9 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SessionRename, (_event, payload: { workspaceId: string; sessionId: string; title: string }) =>
     callHost(IpcChannel.SessionRename, payload),
   )
+  ipcMain.handle(IpcChannel.SessionFork, (_event, payload: { workspaceId: string; sessionId: string; upToSeq?: number }) =>
+    callHost(IpcChannel.SessionFork, payload),
+  )
   ipcMain.handle(IpcChannel.SessionDelete, (_event, payload: { workspaceId: string; sessionId: string }) =>
     callHost(IpcChannel.SessionDelete, payload),
   )
