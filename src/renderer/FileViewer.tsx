@@ -10,7 +10,7 @@
  *  - 打开动作落链（file/preview、file/open——shell 成功后调用，留痕 = 已发生事实）；
  *    回放会话 logged:false → 弹层注记「动作未落链」。
  */
-import { useEffect, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import {
@@ -21,7 +21,7 @@ import {
   previewCsvDelimiter,
   previewIconOf,
 } from '../shared/file-preview'
-import type { FilePreviewResultDTO } from '../shared/ipc-contract'
+import type { FilePreviewResultDTO, ViewerStateDTO } from '../shared/ipc-contract'
 
 export interface ViewerTarget {
   workspaceId: string
@@ -107,6 +107,54 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose:
   const [data, setData] = useState<FilePreviewResultDTO | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  // ── Z-7 反向感知（0.12.0 / D-V12-2）：选区 + 滚动上报（main 持态防抖写盘 → fileviewer_get_view 数据源）──
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  const reportTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const reportNow = useCallback(
+    (viewOpen: boolean, extra?: { scrollPercent?: number; selectionText?: string }): void => {
+      void window.car
+        .fileviewerReport({
+          viewOpen,
+          ...(viewOpen ? { path: target.path } : {}),
+          ...(extra?.scrollPercent !== undefined ? { scrollPercent: extra.scrollPercent } : {}),
+          ...(extra?.selectionText ? { selectionText: extra.selectionText.slice(0, 2000), selectionChars: Math.min(extra.selectionText.length, 2000) } : {}),
+          updatedAt: Date.now(),
+        } satisfies ViewerStateDTO)
+        .catch(() => { /* 上报失败静默——反向感知是增强面非功能面（fail-visible 红线不涉） */ })
+    },
+    [target.path],
+  )
+
+  const scheduleReport = useCallback(
+    (extra?: { scrollPercent?: number; selectionText?: string }): void => {
+      if (reportTimer.current) clearTimeout(reportTimer.current)
+      reportTimer.current = setTimeout(() => reportNow(true, extra), 300)
+    },
+    [reportNow],
+  )
+
+  useEffect(() => {
+    reportNow(true)
+    const body = bodyRef.current
+    const onScroll = (): void => {
+      if (!body) return
+      const span = body.scrollHeight - body.clientHeight
+      scheduleReport({ scrollPercent: span > 0 ? Math.round((body.scrollTop / span) * 100) : 0 })
+    }
+    const onSelect = (): void => {
+      const sel = window.getSelection()?.toString() ?? ''
+      scheduleReport({ selectionText: sel.length ? sel.slice(0, 2000) : undefined })
+    }
+    body?.addEventListener('scroll', onScroll, { passive: true })
+    document.addEventListener('selectionchange', onSelect)
+    return () => {
+      body?.removeEventListener('scroll', onScroll)
+      document.removeEventListener('selectionchange', onSelect)
+      if (reportTimer.current) clearTimeout(reportTimer.current)
+      reportNow(false) // 关闭/切换 = 清态（main 写空态——host 工具见 viewOpen:false）
+    }
+  }, [reportNow, scheduleReport])
 
   useEffect(() => {
     let alive = true
@@ -178,7 +226,7 @@ export function FileViewer({ target, onClose }: { target: ViewerTarget; onClose:
             ✕
           </button>
         </div>
-        <div className="fv-body">
+        <div className="fv-body" ref={bodyRef}>
           {error != null ? (
             <p className="fv-err">{error}</p>
           ) : data == null ? (

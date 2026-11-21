@@ -79,7 +79,8 @@ export interface SubagentManagerDeps {
   emitEvent: (sessionId: string, event: SessionEventDTO) => void
   emitAuthzPending: (p: AuthzPendingPush) => void
   emitAuthzResolved: (p: AuthzResolvedPush) => void
-  waitAuthzDecision: (sessionId: string, requestId: string) => Promise<'once' | 'session' | 'deny' | 'cancelled'>
+  /** 0.12.0（D-V12-3）：附注随决策返回（对象形态——内核 1.25.1 落链） */
+  waitAuthzDecision: (sessionId: string, requestId: string) => Promise<{ response: 'once' | 'session' | 'deny' | 'cancelled'; note?: string }>
   makeChildModelFn: (o: ChildModelFnOpts) => HostModelFn
   /** 子会话索引登记（spawn 时落 title——列表面徽标/parent 列数据源） */
   registerChildSession: (sessionId: string, title: string) => void
@@ -402,8 +403,10 @@ export class SubagentManager {
         return true
       }
       // ③ 人审门：弹窗在父（pending 携父 sessionId）、决策审计落子链（子 authz #commit 绑子链）
+      // 0.12.0（D-V12-3）：waitAuthzDecision 对象形态 { response, note? }——附注随子链决策落链（内核 1.25.1）；
+      // holder 形态（闭包 let 变量的 CFA 窄化在 decideByUser await 边界会把外层读点判成 never——属性读不受影响）
       const authorizationId = `${child.sessionId}:T1:${call.tool}:${call.id}`
-      let responded: 'once' | 'session' | 'deny' | 'cancelled' | null = null
+      const answered: { v: { response: 'once' | 'session' | 'deny' | 'cancelled'; note?: string } | null } = { v: null }
       const decision = await child.authz.decideByUser(
         { authorizationId, actor: 'user', capability, resource },
         async () => {
@@ -418,23 +421,26 @@ export class SubagentManager {
             timeoutMs: this.deps.authzTimeoutMs,
             ts: Date.now(),
           })
-          responded = await Promise.race([
+          answered.v = await Promise.race([
             this.deps.waitAuthzDecision(child.sessionId, authorizationId),
-            new Promise<'cancelled'>((resolve) => {
-              child.cancelAuthz = () => resolve('cancelled')
+            new Promise<{ response: 'cancelled' }>((resolve) => {
+              child.cancelAuthz = () => resolve({ response: 'cancelled' })
             }),
           ])
           child.cancelAuthz = null
-          if (responded === 'session') child.grants.add(call.tool)
-          return responded === 'once' || responded === 'session'
+          if (answered.v?.response === 'session') child.grants.add(call.tool)
+          return {
+            approve: answered.v?.response === 'once' || answered.v?.response === 'session',
+            ...(typeof answered.v?.note === 'string' && answered.v.note.trim() ? { note: answered.v.note.trim().slice(0, 500) } : {}),
+          }
         },
       )
       const outcome: AuthzResolvedPush['outcome'] =
-        responded === 'once' || responded === 'session'
+        answered.v?.response === 'once' || answered.v?.response === 'session'
           ? 'approved'
-          : responded === 'deny'
+          : answered.v?.response === 'deny'
             ? 'denied'
-            : responded === 'cancelled'
+            : answered.v?.response === 'cancelled'
               ? 'cancelled'
               : 'timeout'
       this.deps.emitAuthzResolved({

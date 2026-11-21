@@ -32,8 +32,10 @@ export const IpcChannel = {
   TurnSend: 'turn:send',
   /** 中断在途 turn（内核 abort 收口 + 未派发调用补记成对事件） */
   TurnAbort: 'turn:abort',
-  /** 授权门响应（once = 批准本次 / session = 会话内始终允许 / deny = 拒绝） */
+  /** 授权门响应（once = 批准本次 / session = 会话内始终允许 / deny = 拒绝；0.12.0 note 附注随决策落链） */
   AuthzRespond: 'authz:respond',
+  /** Z-7（D-V12-2）：FileViewer 反向感知上报（渲染层 → main 单向——main 持态写 viewer-state.json 文件交接） */
+  FileviewerReport: 'fileviewer:report',
   /** 会话用量聚合（usage 事件真实值，禁估算——D-S2-4） */
   SessionUsage: 'session:usage',
   /** 会话重命名（rename 事件落链留痕） */
@@ -412,6 +414,12 @@ export interface MemoryEntryDTO {
   id: string
   text: string
   tags?: string[]
+  /** 0.12.0（D-V12-8，内核 1.25 Z-5）：类型标注（user/feedback/project/reference——MEMORY_TYPES 四型可裁剪） */
+  type?: string
+  /** 钩子句（索引行展示面；缺席 = 正文首行截断 fallback） */
+  description?: string
+  /** 召回触发词（与 tags 并集 = 匹配键面） */
+  keywords?: string[]
   createdAt: number
   updatedAt: number
   sourceSession?: string
@@ -670,6 +678,16 @@ export interface SessionUsageResult {
 /** 授权门响应载荷（AuthzRespond 通道） */
 export type AuthzDecisionInput = 'once' | 'session' | 'deny'
 
+/** Z-7（D-V12-2）：FileViewer 反向感知态（渲染层上报 → main 持态 → userData/viewer-state.json 交接 → host 工具读） */
+export interface ViewerStateDTO {
+  viewOpen: boolean
+  path?: string
+  scrollPercent?: number
+  selectionText?: string
+  selectionChars?: number
+  updatedAt: number
+}
+
 // ── 文件安全设置面（S3-S2；设计：桌面端文件安全设计.md §5/§8.2） ──────────
 
 export type FileTierDTO = 'allow' | 'ask' | 'deny'
@@ -881,7 +899,8 @@ export interface IpcRequestMap {
   [IpcChannel.SessionOpen]: { workspaceId: string; sessionId: string }
   [IpcChannel.TurnSend]: { workspaceId: string; sessionId: string; text: string; memoryInject?: boolean }
   [IpcChannel.TurnAbort]: { workspaceId: string; sessionId: string }
-  [IpcChannel.AuthzRespond]: { workspaceId: string; sessionId: string; requestId: string; decision: AuthzDecisionInput }
+  [IpcChannel.AuthzRespond]: { workspaceId: string; sessionId: string; requestId: string; decision: AuthzDecisionInput; note?: string }
+  [IpcChannel.FileviewerReport]: ViewerStateDTO
   [IpcChannel.SessionUsage]: { workspaceId: string; sessionId: string }
   [IpcChannel.SessionRename]: { workspaceId: string; sessionId: string; title: string }
   [IpcChannel.SessionDelete]: { workspaceId: string; sessionId: string }
@@ -968,7 +987,9 @@ export interface CarBridge {
   openSession(workspaceId: string, sessionId: string): Promise<SessionOpenResult>
   sendTurn(workspaceId: string, sessionId: string, text: string, memoryInject?: boolean): Promise<TurnSendResult>
   abortTurn(workspaceId: string, sessionId: string): Promise<void>
-  respondAuthz(workspaceId: string, sessionId: string, requestId: string, decision: AuthzDecisionInput): Promise<{ outcome: string }>
+  /** Z-7（D-V12-2）：FileViewer 反向感知上报（渲染层 → main 单向；main 持态防抖写 viewer-state.json） */
+  fileviewerReport(state: ViewerStateDTO): Promise<{ ok: boolean }>
+  respondAuthz(workspaceId: string, sessionId: string, requestId: string, decision: AuthzDecisionInput, note?: string): Promise<{ outcome: string }>
   sessionUsage(workspaceId: string, sessionId: string): Promise<SessionUsageResult>
   renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionInfo>
   deleteSession(workspaceId: string, sessionId: string): Promise<void>
@@ -979,9 +1000,9 @@ export interface CarBridge {
   /** 记忆列表（只读，无会话可查；updatedAt 降序） */
   memoryList(workspaceId: string): Promise<MemoryEntryDTO[]>
   /** 创建（id 缺省内核派生；需活跃会话——无句柄 = 宿主显式拒绝） */
-  memoryWrite(workspaceId: string, sessionId: string, input: { id?: string; text: string; tags?: string[] }): Promise<MemoryEntryDTO>
+  memoryWrite(workspaceId: string, sessionId: string, input: { id?: string; text: string; tags?: string[]; type?: string; description?: string; keywords?: string[] }): Promise<MemoryEntryDTO>
   /** 修改（需活跃会话） */
-  memoryEdit(workspaceId: string, sessionId: string, id: string, text: string, tags?: string[]): Promise<MemoryEntryDTO>
+  memoryEdit(workspaceId: string, sessionId: string, id: string, text: string, tags?: string[], meta?: { type?: string | null; description?: string; keywords?: string[] }): Promise<MemoryEntryDTO>
   /** 删除（需活跃会话） */
   memoryRemove(workspaceId: string, sessionId: string, id: string): Promise<void>
   /** 回滚（undo 栈单步；返回 null = 已回退到删除态） */

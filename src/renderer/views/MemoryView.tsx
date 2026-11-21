@@ -29,6 +29,16 @@ import {
 
 const fmtTime = (ts: number): string => new Date(ts).toLocaleString()
 
+/** 0.12.0（D-V12-8）：键面拆分（tags/keywords 共用——逗号/分号/空白分隔，去空） */
+const splitKeys = (s: string): string[] =>
+  s
+    .split(/[,，;；\s]+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+
+/** 0.12.0（D-V12-8）：索引注入态（链派生——最近一条 memory-index system 事件；重启可重建） */
+const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const
+
 /** 进化模式 = 端侧偏好（不落审计链——★默认模型同款读写形态） */
 const EVOLVE_MODE_KEY = 'car-desktop.memoryEvolveMode'
 function readEvolveMode(): 'manual' | 'auto' {
@@ -63,8 +73,15 @@ export function MemoryView({
   const [entries, setEntries] = useState<MemoryEntryDTO[] | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
+  // 0.12.0（D-V12-8，内核 1.25 Z-5）：三字段编辑面——type（四型）/description（钩子句）/keywords（召回触发词）
+  const [editType, setEditType] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const [editKeywords, setEditKeywords] = useState('')
   const [newText, setNewText] = useState('')
   const [newTags, setNewTags] = useState('')
+  const [newType, setNewType] = useState('')
+  const [newDesc, setNewDesc] = useState('')
+  const [newKeywords, setNewKeywords] = useState('')
   const [creating, setCreating] = useState(false)
   /** 已删除条目（本次面板会话内）——delete 后列表行消失，undelete 入口靠此留存（rollback 恢复链上删除前正文） */
   const [tombstones, setTombstones] = useState<string[]>([])
@@ -127,15 +144,22 @@ export function MemoryView({
   const create = async (): Promise<void> => {
     if (!selected || !openId || !newText.trim()) return
     try {
-      const tags = newTags
-        .split(/[,，;；\s]+/)
-        .map((t) => t.trim())
-        .filter(Boolean)
-      const e = await window.car.memoryWrite(selected.id, openId, { text: newText.trim(), ...(tags.length ? { tags } : {}) })
+      const tags = splitKeys(newTags)
+      const keywords = splitKeys(newKeywords)
+      const e = await window.car.memoryWrite(selected.id, openId, {
+        text: newText.trim(),
+        ...(tags.length ? { tags } : {}),
+        ...(newType ? { type: newType } : {}),
+        ...(newDesc.trim() ? { description: newDesc.trim() } : {}),
+        ...(keywords.length ? { keywords } : {}),
+      })
       setNewText('')
       setNewTags('')
+      setNewType('')
+      setNewDesc('')
+      setNewKeywords('')
       setCreating(false)
-      onStatus(`记忆已创建（${e.id}）——memory/write 已落当前会话链`)
+      onStatus(`记忆已创建（${e.id}${newType ? ` · ${newType}` : ''}）——memory/write 已落当前会话链（召回键面 = tags ∪ keywords）`)
       await load()
     } catch (err) {
       onFail(err)
@@ -145,9 +169,15 @@ export function MemoryView({
   const saveEdit = async (id: string): Promise<void> => {
     if (!selected || !openId) return
     try {
-      await window.car.memoryEdit(selected.id, openId, id, editText)
+      // meta 三键语义（内核 edit meta 同构）：表单预填当前值整表替换——空 = 清空（null/''/[]）
+      const meta = {
+        type: editType || null,
+        description: editDesc.trim(),
+        keywords: splitKeys(editKeywords),
+      }
+      await window.car.memoryEdit(selected.id, openId, id, editText, undefined, meta)
       setEditingId(null)
-      onStatus(`记忆已修改（${id}）——memory/edit 落链（before/after 全文 = rollback 数据源）`)
+      onStatus(`记忆已修改（${id}）——memory/edit 落链（before/after 全文 = rollback 数据源；索引行随 CRUD 同步重写）`)
       await load()
     } catch (err) {
       onFail(err)
@@ -230,6 +260,10 @@ export function MemoryView({
 
   const pressure = memoryPressureOf(entries ?? [])
 
+  // 0.12.0（D-V12-8）：索引态行（链派生——driftRepaired 可见禁静默；无索引行 = 尚未注入）
+  const lastIndexRow = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory-index')
+  const lastIndexMeta = lastIndexRow ? (lastIndexRow.meta as Record<string, unknown> | null) : null
+
   return (
     <section className="card viewcard">
       <h2>记忆（白盒）</h2>
@@ -239,6 +273,24 @@ export function MemoryView({
         事件 payload）· 注入 = 会话首轮 system 行（ctx-pop 可见）· 自动抽取/向量检索登记不做（D-V02-4）。
       </p>
       {!selected && <p className="dim">先在侧栏选择工作区（记忆按工作区分片隔离）。</p>}
+      {selected && (
+        <p className="dim mem-index-row" data-testid="memory-index-row">
+          索引态（内核 1.25 召回层）：{' '}
+          {lastIndexMeta ? (
+            <>
+              本会话已注入索引 <b>{String(lastIndexMeta['count'] ?? '?')} 条</b>（{String(lastIndexMeta['chars'] ?? '?')} 字符 · first-turn-once）
+              {lastIndexMeta['driftRepaired'] ? (
+                <b className="ev-timer hot"> · 索引{lastIndexMeta['driftRepaired'] === 'absent' ? '首建' : '漂移重建'}（driftRepaired 可见）</b>
+              ) : (
+                ' · 对拍命中零修复'
+              )}
+              · 每 turn 召回 = tags ∪ keywords ≥2 字符子串匹配（依据随 meta.hits 落链）
+            </>
+          ) : (
+            '本会话尚未注入索引（memoryInject 开启后首个 turn 首建/装载——.car/memory/index.md 派生投影 + 读时对拍修复）'
+          )}
+        </p>
+      )}
       {selected && entries !== null && entries.length > 0 && (
         <div className="ev-pressure">
           <div className="ev-pressure-head">
@@ -264,7 +316,19 @@ export function MemoryView({
                   autoFocus
                   onChange={(e) => setNewText(e.target.value)}
                 />
-                <input className="mem-tags" placeholder="标签（可选，逗号分隔）" value={newTags} onChange={(e) => setNewTags(e.target.value)} />
+                <input className="mem-tags" placeholder="标签（可选，逗号分隔——参与召回键面）" value={newTags} onChange={(e) => setNewTags(e.target.value)} />
+                <div className="mem-ops">
+                  <select className="mem-tags" value={newType} onChange={(e) => setNewType(e.target.value)} title="类型标注（内核 MEMORY_TYPES 四型可裁剪；无类型 = 缺席）">
+                    <option value="">类型：无</option>
+                    {MEMORY_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        类型：{t}
+                      </option>
+                    ))}
+                  </select>
+                  <input className="mem-tags" placeholder="钩子句 description（可选——索引行展示面）" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} />
+                </div>
+                <input className="mem-tags" placeholder="召回触发词 keywords（可选，逗号分隔——≥2 字符参与子串匹配）" value={newKeywords} onChange={(e) => setNewKeywords(e.target.value)} />
                 <div className="mem-ops">
                   <button className="btn primary" disabled={!newText.trim() || writeBlocked} onClick={() => void create()}>
                     落链保存
@@ -301,21 +365,43 @@ export function MemoryView({
                     </td>
                     <td>
                       {editingId === m.id ? (
-                        <textarea
-                          className="mem-textarea"
-                          value={editText}
-                          autoFocus
-                          onChange={(e) => setEditText(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void saveEdit(m.id)
-                            if (e.key === 'Escape') setEditingId(null)
-                          }}
-                        />
+                        <div>
+                          <textarea
+                            className="mem-textarea"
+                            value={editText}
+                            autoFocus
+                            onChange={(e) => setEditText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void saveEdit(m.id)
+                              if (e.key === 'Escape') setEditingId(null)
+                            }}
+                          />
+                          <div className="mem-ops">
+                            <select className="mem-tags" value={editType} onChange={(e) => setEditType(e.target.value)}>
+                              <option value="">类型：无</option>
+                              {MEMORY_TYPES.map((t) => (
+                                <option key={t} value={t}>
+                                  类型：{t}
+                                </option>
+                              ))}
+                            </select>
+                            <input className="mem-tags" placeholder="钩子句 description（空 = 清空）" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+                            <input className="mem-tags" placeholder="召回触发词 keywords（逗号分隔，空 = 清空）" value={editKeywords} onChange={(e) => setEditKeywords(e.target.value)} />
+                          </div>
+                        </div>
                       ) : (
-                        <span className="mem-text">{m.text}</span>
+                        <span className="mem-text">
+                          {m.type && <span className={`ev-opbadge update`} style={{ marginRight: 6 }}>{m.type}</span>}
+                          {m.description && <span className="dim2" title="钩子句（索引行展示面）">「{m.description}」 </span>}
+                          {m.text}
+                        </span>
                       )}
                     </td>
-                    <td className="dim2">{m.tags?.length ? m.tags.join('、') : '—'}</td>
+                    <td className="dim2">
+                      {m.tags?.length ? m.tags.join('、') : ''}
+                      {m.keywords?.length ? <span title="召回触发词（与 tags 并集 = 匹配键面）">{' · kw: ' + m.keywords.join('、')}</span> : ''}
+                      {!m.tags?.length && !m.keywords?.length ? '—' : ''}
+                    </td>
                     <td className="dim2">{fmtTime(m.updatedAt)}</td>
                     <td>
                       <span className="mem-ops">
@@ -337,6 +423,9 @@ export function MemoryView({
                               onClick={() => {
                                 setEditingId(m.id)
                                 setEditText(m.text)
+                                setEditType(m.type ?? '')
+                                setEditDesc(m.description ?? '')
+                                setEditKeywords((m.keywords ?? []).join('、'))
                               }}
                             >
                               ✎

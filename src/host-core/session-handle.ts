@@ -26,7 +26,8 @@ import {
   shouldCompact,
   applyCompaction,
   recoverInterrupted,
-  loadMemoryForInjection,
+  buildMemoryIndex,
+  recallMemories,
   pendingSteerTurns,
   type AuthzRequest,
   type CompactionConfig,
@@ -102,8 +103,10 @@ export interface SessionHandleDeps {
   emitBrowserNeedWindow?: () => void
   /** B-2（§4.7 consent 硬化）：浏览器网络授权 grants 持久化（派发前重查 + 按会话×域名分片）；缺省 = 仅内存 grants */
   browserGrants?: BrowserGrantsStore
-  /** 授权决策来源（生产 = 渲染层 authz:respond 等待；测试 = 脚本直答） */
-  waitAuthzDecision: (sessionId: string, requestId: string) => Promise<AuthzResponse>
+  /** 授权决策来源（生产 = 渲染层 authz:respond 等待；测试 = 脚本直答）；0.12.0（D-V12-3）：附注随决策返回 */
+  waitAuthzDecision: (sessionId: string, requestId: string) => Promise<{ response: AuthzResponse; note?: string }>
+  /** Z-7（D-V12-2）：userData 目录（viewer-state.json 文件交接面——main 写入、fileviewer_get_view 读）；缺省 = 工具不注册 */
+  userDataDir?: string
   /** 文件安全引擎（S3-S2；service 装配单例——规则面 > grant 面 > 人审门 编排入口） */
   fileSecurity?: FileSecurityEngine
   /** 安全设置读取（S3-S3：新建会话默认策略 + 备份开关/上限即时读） */
@@ -204,6 +207,7 @@ export class SessionHandle {
         init.workspaceRoot,
         init.deps.fileSecurity,
         init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
+        init.deps.userDataDir,
       ),
       init.deps.extraTools ?? [],
     )
@@ -455,20 +459,38 @@ export class SessionHandle {
           '内核适配器 resolve 未透传 llm.allowEnvFallback，接线缺口已登记）',
       )
     }
-    // S6（D-S6-2）：记忆注入装配——会话首轮一次（链上已有注入行 = resume 会话不重注，
-    // append-only 链的注入刷新语义登记 v0.3 评估）；开关 = 渲染层每次发送显式携带（端侧偏好
-    // localStorage，默认开）；超预算 = 内核 fail-visible 异常同步抛出（渲染层红条——禁静默截断）。
-    // **置于 busy=true 之前**：throw 时 turn 未开、busy 未置（否则预算红条后用户再发会被
-    // busy 分流吞进引导队列——S6M-4 实证的死锁形态）。
+    // S6（D-S6-2）→ 0.12.0（D-V12-7，内核 1.25 召回层消费）：记忆面装配 = **首轮索引常驻 +
+    // 每 turn 确定性召回**（buildMemoryIndex/recallMemories——legacy 全量注入退役不再调用）。
+    // 首轮判重 = chainHasMemoryInjection 双 meta 键（'memory' | 'memory-index'——旧会话升级防双注入）；
+    // 召回零命中 = 零注入零落链（缺席无需取证）；预算 fail-visible 同步抛出（渲染层红条——禁静默截断）。
+    // **置于 busy=true 之前**：throw 时 turn 未开、busy 未置（S6M-4 死锁形态防线不动）。
     // T-24（C-5）：能力引用注入先行——返回实际字符数，记忆面按合并预算的剩余额度装载。
     const capabilityChars = this.injectCapabilityRefs()
     // T-25（C-3/C-5）：附件全文注入次之（fulltext 态未注入者）——路径登记形态不注入（fs_read 按需读）。
     const attachmentChars = this.injectAttachments((this.deps.memoryBudgetChars ?? 8000) - capabilityChars)
-    if (opts.memoryInject && this.deps.memoryStore && !this.chainHasMemoryInjection()) {
+    if (opts.memoryInject && this.deps.memoryStore) {
       const budget = this.deps.memoryBudgetChars ?? 8000
-      const inj = loadMemoryForInjection(this.deps.memoryStore, { budgetChars: budget - capabilityChars - attachmentChars })
-      if (inj.count > 0) {
-        this.log.append('user', 'system', 'system', inj.rendered, { injection: 'memory', count: inj.count, chars: inj.totalChars })
+      const pool = budget - capabilityChars - attachmentChars
+      if (!this.chainHasMemoryInjection()) {
+        const idx = buildMemoryIndex(this.deps.memoryStore, { budgetChars: pool })
+        if (idx.count > 0) {
+          this.log.append('user', 'system', 'system', idx.rendered, {
+            injection: 'memory-index',
+            count: idx.count,
+            chars: idx.totalChars,
+            ...(idx.driftRepaired ? { driftRepaired: idx.driftRepaired } : {}),
+          })
+        }
+      }
+      // 每 turn 召回（D-Z5-3）：tags ∪ keywords ≥2 字符确定性子串匹配（内核 1.25——禁 LLM 禁估算）
+      const rec = recallMemories(this.deps.memoryStore, text, { budgetChars: pool })
+      if (rec.count > 0) {
+        this.log.append('user', 'system', 'system', rec.rendered, {
+          injection: 'memory-recall',
+          hits: rec.hits,
+          count: rec.count,
+          chars: rec.totalChars,
+        })
       }
     }
     this.busy = true
@@ -501,9 +523,13 @@ export class SessionHandle {
     return { turnId }
   }
 
-  /** 链上是否已有记忆注入行（meta.injection==='memory' 的 system 事件） */
+  /** 链上是否已有记忆注入行（0.12.0 D-V12-7：双 meta 键判重——legacy 'memory' 与索引 'memory-index' 皆算已注入，旧会话升级防双注入） */
   chainHasMemoryInjection(): boolean {
-    return this.log.events.some((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
+    return this.log.events.some((e) => {
+      if (e.kind !== 'system') return false
+      const inj = (e.meta as Record<string, unknown> | null)?.['injection']
+      return inj === 'memory' || inj === 'memory-index'
+    })
   }
 
   /**
@@ -782,6 +808,16 @@ export class SessionHandle {
    * capability 按工具分派（K-FS-3：fs-read/fs-write/fs-delete；未知工具按最高约束 fs-write——T-22）。
    */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
+    // ⓪⁼（0.12.0 / D-V12-6）：readonly 工具面直判——fileviewer_get_view（本地查看器态读面，零副作用
+    // 零网络轴零敏感目录语义）policy 直判落链（审计可回答「为什么没问人」——decideByRule 同口径）；
+    // 会话策略「只读」亦放行（读面语义）。选区内容过 redact 在工具 run 内承担（D-V12-6 双护栏）。
+    if (call.tool === 'fileviewer_get_view') {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:ro-tool:${call.tool}:${call.id}`, actor: 'user', capability: 'fs-read', resource: 'viewer-state（userData/viewer-state.json 交接投影）' },
+        { decision: 'APPROVED', reason: 'readonly toolface auto-approve（fileviewer_get_view——本地查看器态，redact 在 run 内承担）' },
+      )
+      return true
+    }
     const action = fileActionOf(call.tool)
     // capability 分派：fs 三件按动作（K-FS-3）；MCP 工具 = 'mcp'；browser_* = 'mcp'（Q-B3 同口径——
     // readonly 声明 + 网络轴）；未知工具按最高约束 fs-write（T-22）
@@ -963,7 +999,9 @@ export class SessionHandle {
     resource: string,
     authorizationId: string,
   ): Promise<boolean> {
-    let responded: AuthzResponse | null = null
+    // 0.12.0（D-V12-3）：holder 形态——闭包 let 变量在 decideByUser await 边界的 CFA 窄化会把外层读点
+    // 判成 never（属性读不受影响）；对象形态实答 = 附注随决策落链（内核 1.25.1，批准/拒绝两档皆可带）
+    const answered: { v: { response: AuthzResponse; note?: string } | null } = { v: null }
     const decision = await this.authz.decideByUser(
       { authorizationId, actor: 'user', capability, resource },
       async () => {
@@ -978,8 +1016,8 @@ export class SessionHandle {
           timeoutMs: this.deps.authzTimeoutMs,
           ts: Date.now(),
         })
-        responded = await this.deps.waitAuthzDecision(this.sessionId, authorizationId)
-        if (responded === 'session') {
+        answered.v = await this.deps.waitAuthzDecision(this.sessionId, authorizationId)
+        if (answered.v.response === 'session') {
           if (call.tool === 'browser_open') {
             const url = typeof call.args['url'] === 'string' ? String(call.args['url']) : ''
             const domain = url ? domainOfUrl(url) : null
@@ -995,17 +1033,21 @@ export class SessionHandle {
             this.grants.add(call.tool)
           }
         }
-        return responded === 'once' || responded === 'session'
+        // cancelled = 会话关闭取消，归 false 无附注——决策 EXPIRED 同既有语义
+        return {
+          approve: answered.v.response === 'once' || answered.v.response === 'session',
+          ...(typeof answered.v.note === 'string' && answered.v.note.trim() ? { note: answered.v.note.trim().slice(0, 500) } : {}),
+        }
       },
     )
     // 内核 decideByUser 对「用户拒绝」与「超时」都记 EXPIRED/timeout——桌面以回调实答区分展示口径，
     // 链上记录以内核为真值（不旁路不改写）
     const outcome: AuthzResolvedPush['outcome'] =
-      responded === 'once' || responded === 'session'
+      answered.v?.response === 'once' || answered.v?.response === 'session'
         ? 'approved'
-        : responded === 'deny'
+        : answered.v?.response === 'deny'
           ? 'denied'
-          : responded === 'cancelled'
+          : answered.v?.response === 'cancelled'
             ? 'cancelled'
             : 'timeout'
     this.deps.emitAuthzResolved({

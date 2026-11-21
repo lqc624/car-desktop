@@ -964,3 +964,19 @@ body {
 .dy-envs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
 .dy-env { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; border: 1px solid var(--border, #e4e4ea); border-radius: 8px; padding: 8px 10px; }
 .dy-env b { font-size: 12.5px; }
+
+/* ── 0.12.0 Z-11 同意面结构化（D-V12-3）：批量条 + 逐卡附注 + 勾选 ── */
+.authz.batch { border-color: #e0a63f; background: #fffaf0; }
+.authz-note {
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border, #e4e4ea);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.authz-note:focus { outline: none; border-color: #2f6fd6; }
+.authz-sel { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.authz-sel input[type='checkbox'] { accent-color: #2f6fd6; }

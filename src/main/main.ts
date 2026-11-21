@@ -13,12 +13,12 @@
  * webContents.send，主题白名单 = IpcPushTopic）。
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, session, utilityProcess } from 'electron'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { activateEndpoint, clearEndpoint, listEndpoints, loadEndpointMeta, removeEndpoint, revealEndpointKey, saveEndpoint } from './credentials.ts'
 import { checkForUpdates, downloadUpdate, initUpdater, installUpdate, openReleases } from './updater.ts'
-import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type WorkspaceInfo } from '../shared/ipc-contract.ts'
+import { IpcChannel, IpcPushTopic, type IpcPushTopicName, type ViewerStateDTO, type WorkspaceInfo } from '../shared/ipc-contract.ts'
 import { isExecutableOpenBlocked } from '../shared/file-preview.ts'
 import { fetchReleases } from './deployInfo.ts'
 import { createBrowserStore } from '../host-core/browserStore.ts'
@@ -36,6 +36,25 @@ const browserEnabledAtBoot = browserStore.get().browserEnabled
 if (browserEnabledAtBoot) app.commandLine.appendSwitch('remote-debugging-port', String(BROWSER_CDP_PORT))
 
 const browserTargetFile = (): string => path.join(app.getPath('userData'), 'browser-target.json')
+
+// ── Z-7 反向感知（D-V12-2，0.12.0）：FileViewer 态持面 ─────────────────────────
+// main 是唯一写者（browser-target.json 同款文件交接——host=utilityProcess 不能直调 main）：
+// 渲染层上报（ipc 单向）→ main 持态 + 防抖 300ms 原子写 userData/viewer-state.json →
+// host 工具 fileviewer_get_view 读态（readonly）。文件 = 交接投影非事实源，坏态读侧降级。
+const viewerStateFile = (): string => path.join(app.getPath('userData'), 'viewer-state.json')
+let viewerState: ViewerStateDTO = { viewOpen: false, updatedAt: 0 }
+let viewerWriteTimer: ReturnType<typeof setTimeout> | null = null
+
+function writeViewerStateFile(): void {
+  try {
+    const file = viewerStateFile()
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(viewerState), 'utf8')
+    renameSync(tmp, file)
+  } catch (e) {
+    console.error('[main] viewer-state 写盘失败（交接投影半态由下次上报自愈）：', e instanceof Error ? e.message : e)
+  }
+}
 
 /** 受控 BrowserWindow 创建（partition persist:car-browser——Q-B4 单分片；登录态落盘持久复用 T-B2）；
  *  target 发现文件 = debugger.getTargetInfo（targetId 跨导航稳定——host 侧主路径发现源）。
@@ -177,6 +196,21 @@ function callHost<T>(channel: string, payload?: unknown): Promise<T> {
 
 function registerIpc(): void {
   ipcMain.handle(IpcChannel.HostProbe, () => callHost(IpcChannel.HostProbe))
+
+  // Z-7（D-V12-2）：FileViewer 反向感知上报——main 持态 + 防抖 300ms 原子写（纯 main 侧面，不经宿主）
+  ipcMain.handle(IpcChannel.FileviewerReport, (_event, state: ViewerStateDTO) => {
+    if (!state || typeof state !== 'object') return { ok: false }
+    viewerState = {
+      viewOpen: state.viewOpen === true,
+      ...(typeof state.path === 'string' ? { path: state.path } : {}),
+      ...(typeof state.scrollPercent === 'number' && Number.isFinite(state.scrollPercent) ? { scrollPercent: state.scrollPercent } : {}),
+      ...(typeof state.selectionText === 'string' && state.selectionText.length ? { selectionText: state.selectionText.slice(0, 2000), selectionChars: Math.min(state.selectionText.length, 2000) } : {}),
+      updatedAt: typeof state.updatedAt === 'number' ? state.updatedAt : Date.now(),
+    }
+    if (viewerWriteTimer) clearTimeout(viewerWriteTimer)
+    viewerWriteTimer = setTimeout(writeViewerStateFile, 300)
+    return { ok: true }
+  })
 
   // 系统目录选择器属 main 侧能力（host-core 零 Electron 纪律）；选中后转宿主装载校验
   ipcMain.handle(IpcChannel.WorkspacePick, async (event): Promise<WorkspaceInfo | null> => {

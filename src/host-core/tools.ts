@@ -172,6 +172,53 @@ export function fileActionOf(tool: string): FileAction | null {
 }
 
 /** S3 工具集：三件套（文件安全面 + 自动备份接线）；插件/MCP 工具源 S4 接入位 */
-export function builtinTools(workspaceRoot: string, fileSecurity?: FileSecurityEngine, backup?: BackupWiring): HostToolDef[] {
-  return [fsReadTool(workspaceRoot, fileSecurity), fsWriteTool(workspaceRoot, fileSecurity, backup), fsDeleteTool(workspaceRoot, fileSecurity, backup)]
+export function builtinTools(workspaceRoot: string, fileSecurity?: FileSecurityEngine, backup?: BackupWiring, viewerStateDir?: string): HostToolDef[] {
+  const tools = [fsReadTool(workspaceRoot, fileSecurity), fsWriteTool(workspaceRoot, fileSecurity, backup), fsDeleteTool(workspaceRoot, fileSecurity, backup)]
+  if (viewerStateDir) tools.push(fileviewerGetViewTool(viewerStateDir))
+  return tools
+}
+
+/**
+ * Z-7 反向感知（0.12.0 / D-V12-2）：FileViewer 态读面——用户正在看的文件 + 选区 + 滚动位置。
+ * 数据流 = 渲染层上报 → main 持态原子写 userData/viewer-state.json → 本工具读（文件交接形态，
+ * host=utilityProcess 不能直调 main 的架构约束下 browser-target.json 同款）。
+ * 缺文件/坏 JSON = `{ viewOpen: false }` 正常态降级（main 是唯一写者，半态由下次上报自愈——
+ * 读面非写面，禁 fail-visible 误伤指代消解）；selectionText 过内核 redact（fs_read 同纪律——
+ * 文件内容可能含密钥，链上/返回面只进脱敏形态）。
+ */
+export function fileviewerGetViewTool(userDataDir: string): HostToolDef {
+  return {
+    name: 'fileviewer_get_view',
+    declaredSideEffect: 'readonly',
+    description:
+      '读取用户当前在文件查看器中打开的文件、可视滚动位置与选区文本（指代消解——「这个文件这里」）。' +
+      '无查看器打开时返回 viewOpen:false。参数：无。',
+    parameters: { type: 'object', properties: {} },
+    run: async () => {
+      const file = path.join(userDataDir, 'viewer-state.json')
+      let raw: string | null = null
+      try {
+        raw = readFileSync(file, 'utf8')
+      } catch {
+        return { viewOpen: false } // 缺文件 = 无查看器态（正常态非错误）
+      }
+      let state: Record<string, unknown>
+      try {
+        state = JSON.parse(raw) as Record<string, unknown>
+      } catch {
+        return { viewOpen: false, note: 'viewer-state 坏 JSON 降级（main 唯一写者——下次上报自愈）' }
+      }
+      const out: Record<string, unknown> = { viewOpen: state['viewOpen'] === true }
+      if (typeof state['path'] === 'string') out['path'] = state['path']
+      if (typeof state['scrollPercent'] === 'number') out['scrollPercent'] = state['scrollPercent']
+      if (typeof state['selectionText'] === 'string' && state['selectionText'].length) {
+        const r = redact(state['selectionText'])
+        out['selectionText'] = r.redacted
+        out['selectionChars'] = state['selectionChars'] ?? r.redacted.length
+        if (r.redactedCount > 0) out['redactedCount'] = r.redactedCount
+      }
+      if (typeof state['updatedAt'] === 'number') out['updatedAt'] = state['updatedAt']
+      return out
+    },
+  }
 }

@@ -28,8 +28,10 @@ const bridge: CarBridge = {
   sendTurn: (workspaceId, sessionId, text, memoryInject) =>
     ipcRenderer.invoke(IpcChannel.TurnSend, { workspaceId, sessionId, text, ...(memoryInject !== undefined ? { memoryInject } : {}) }),
   abortTurn: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.TurnAbort, { workspaceId, sessionId }),
-  respondAuthz: (workspaceId, sessionId, requestId, decision) =>
-    ipcRenderer.invoke(IpcChannel.AuthzRespond, { workspaceId, sessionId, requestId, decision }),
+  /** Z-7（D-V12-2）：FileViewer 反向感知上报（渲染层 → main 单向；main 持态防抖写 viewer-state.json） */
+  fileviewerReport: (state) => ipcRenderer.invoke(IpcChannel.FileviewerReport, state),
+  respondAuthz: (workspaceId, sessionId, requestId, decision, note) =>
+    ipcRenderer.invoke(IpcChannel.AuthzRespond, { workspaceId, sessionId, requestId, decision, ...(typeof note === 'string' && note.trim() ? { note: note.slice(0, 500) } : {}) }),
   sessionUsage: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionUsage, { workspaceId, sessionId }),
   renameSession: (workspaceId, sessionId, title) =>
     ipcRenderer.invoke(IpcChannel.SessionRename, { workspaceId, sessionId, title }),
@@ -72,8 +74,8 @@ const bridge: CarBridge = {
   // —— S6：白盒记忆面（K-MEM-1 消费面） ——
   memoryList: (workspaceId) => ipcRenderer.invoke(IpcChannel.MemoryList, { workspaceId }),
   memoryWrite: (workspaceId, sessionId, input) => ipcRenderer.invoke(IpcChannel.MemoryWrite, { workspaceId, sessionId, ...input }),
-  memoryEdit: (workspaceId, sessionId, id, text, tags) =>
-    ipcRenderer.invoke(IpcChannel.MemoryEdit, { workspaceId, sessionId, id, text, ...(tags !== undefined ? { tags } : {}) }),
+  memoryEdit: (workspaceId, sessionId, id, text, tags, meta) =>
+    ipcRenderer.invoke(IpcChannel.MemoryEdit, { workspaceId, sessionId, id, text, ...(tags !== undefined ? { tags } : {}), ...(meta ? { meta } : {}) }),
   memoryRemove: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRemove, { workspaceId, sessionId, id }),
   memoryRollback: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.MemoryRollback, { workspaceId, sessionId, id }),
   // —— T-24：能力库条目面（能力库视图 + 引用菜单） ——

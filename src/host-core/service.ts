@@ -203,7 +203,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
     }
   }
   const handles = new Map<string, SessionHandle>()
-  const authzWaiters = new Map<string, (d: AuthzResponse) => void>()
+  const authzWaiters = new Map<string, (d: { response: AuthzResponse; note?: string }) => void>()
   const pushHandlers = new Set<(m: PushMessage) => void>()
 
   const key = (workspaceId: string, sessionId: string): string => workspaceId + '::' + sessionId
@@ -742,13 +742,15 @@ export function createHostService(opts: HostServiceOptions): HostService {
       emitBrowserNeedWindow: () => emit(IpcPushTopic.BrowserNeedWindow, { ts: Date.now() }),
       browserGrants,
       waitAuthzDecision: (_sessionId: string, requestId: string) =>
-        new Promise<AuthzResponse>((resolve) => {
+        new Promise<{ response: AuthzResponse; note?: string }>((resolve) => {
           authzWaiters.set(requestId, resolve)
         }),
       fileSecurity,
       securitySettings: () => securitySettings.get(),
       backup,
       contextWindow,
+      // Z-7（D-V12-2）：userData 目录（viewer-state.json 交接——fileviewer_get_view 工具注册前提）
+      userDataDir: opts.userDataDir,
       // S6（D-S6-1）：工作区记忆存储注入（per-workspace 懒创建——<workspaceRoot>/.car/memory/）
       memoryStore: getMemoryStore(workspaceRoot),
       // T-24（PRD C-1）：能力库读取面（<workspaceRoot>/.car/capabilities/ 白盒目录）
@@ -766,7 +768,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
       authzWaiters.delete(requestId)
       const h = [...handles.values()].find((x) => x.sessionId === sessionId)
       const workspaceId = h?.workspaceId
-      resolve('cancelled')
+      resolve({ response: 'cancelled' })
       emit(IpcPushTopic.AuthzResolved, {
         kind: 'resolved', sessionId, requestId, outcome: 'cancelled', decidedBy: 'host',
         ...(workspaceId ? { workspaceId } : {}),
@@ -912,7 +914,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         emitAuthzPending: (p) => emit(IpcPushTopic.AuthzPending, p),
         emitAuthzResolved: (p) => emit(IpcPushTopic.AuthzResolved, p),
         waitAuthzDecision: (_sessionId: string, requestId: string) =>
-          new Promise<AuthzResponse>((resolve) => {
+          new Promise<{ response: AuthzResponse; note?: string }>((resolve) => {
             authzWaiters.set(requestId, resolve)
           }),
         makeChildModelFn,
@@ -1292,10 +1294,12 @@ export function createHostService(opts: HostServiceOptions): HostService {
         if (decision !== 'once' && decision !== 'session' && decision !== 'deny') {
           throw new Error(`CAR-E-DESKTOP: 非法授权决策（${decision}）——仅 once/session/deny`)
         }
+        // 0.12.0（D-V12-3）：附注随决策（≤500 字符 trim——空串/非串 = 不带；内核 1.25.1 落链）
+        const rawNote = typeof p.note === 'string' ? p.note.trim().slice(0, 500) : ''
         const w = authzWaiters.get(requestId)
         if (!w) throw new Error(`CAR-E-DESKTOP: 授权请求不存在或已决（${requestId}）`)
         authzWaiters.delete(requestId)
-        w(decision as AuthzDecisionInput)
+        w({ response: decision as AuthzDecisionInput, ...(rawNote ? { note: rawNote } : {}) })
         return { outcome: decision }
       }
       case IpcChannel.SessionUsage: {
@@ -1375,16 +1379,30 @@ export function createHostService(opts: HostServiceOptions): HostService {
         const text = requireString(p.text, 'text')
         const id = typeof p.id === 'string' && p.id.length ? p.id : undefined
         const tags = Array.isArray(p.tags) ? (p.tags as string[]) : undefined
+        // 0.12.0（D-V12-8）：type/description/keywords 编辑面（type 走内核 MEMORY_TYPES 校验 fail-visible）
+        const memType = typeof p.type === 'string' && p.type.length ? (p.type as never) : undefined
+        const description = typeof p.description === 'string' && p.description.length ? p.description : undefined
+        const keywords = Array.isArray(p.keywords) ? (p.keywords as string[]) : undefined
         return getMemoryStore(handle.workspaceRoot).write(handle.log, {
           ...(id ? { id } : {}),
           text,
           ...(tags ? { tags } : {}),
+          ...(memType ? { type: memType } : {}),
+          ...(description ? { description } : {}),
+          ...(keywords ? { keywords } : {}),
           sourceSession: handle.sessionId,
         })
       }
       case IpcChannel.MemoryEdit: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
-        return getMemoryStore(handle.workspaceRoot).edit(handle.log, requireString(p.id, 'id'), requireString(p.text, 'text'), Array.isArray(p.tags) ? (p.tags as string[]) : undefined)
+        // 0.12.0（D-V12-8）：meta 三键语义（undefined=不变/null·''·[]=清空——内核 edit meta 同构）
+        const m = (p.meta ?? {}) as { type?: string | null; description?: string; keywords?: string[] }
+        const meta = {
+          ...(m.type !== undefined ? { type: (m.type === null ? null : String(m.type)) as never } : {}),
+          ...(m.description !== undefined ? { description: String(m.description) } : {}),
+          ...(m.keywords !== undefined ? { keywords: Array.isArray(m.keywords) ? m.keywords.map(String) : [] } : {}),
+        }
+        return getMemoryStore(handle.workspaceRoot).edit(handle.log, requireString(p.id, 'id'), requireString(p.text, 'text'), Array.isArray(p.tags) ? (p.tags as string[]) : undefined, Object.keys(meta).length ? meta : undefined)
       }
       case IpcChannel.MemoryRemove: {
         const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))

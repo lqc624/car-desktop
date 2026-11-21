@@ -136,47 +136,48 @@ test('S6M-2 落链承载 = 活跃会话：无活跃句柄的写操作显式拒�
   }
 })
 
-test('S6M-3 注入装配：首轮一次（count/chars 真值落 meta）+ 第二 turn 不重注 + 开关 false 不注入', async () => {
+test('S6M-3 注入装配（0.12.0 召回形态 D-V12-7）：首轮索引一行（count/chars 落 meta）+ 二轮不重注 + 开关 false 全跳过', async () => {
   const env = await makeEnv()
   try {
     await env.svc.dispatch('memory:write', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, id: 'mem-a', text: '记忆甲' })
     await env.svc.dispatch('memory:write', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, id: 'mem-b', text: '记忆乙' })
-    // turn 1：memoryInject=true
+    // turn 1：memoryInject=true（「问 1」无键面命中——纯索引面；召回零命中零事件由 z5 spec 专测）
     const r1 = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '问 1', memoryInject: true })) as { turnId: string }
     await waitForTurnEnd(env, r1.turnId)
-    const inj1 = eventsOf(env).filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
-    assert.equal(inj1.length, 1, '注入行恰一条（首轮）')
+    const inj1 = eventsOf(env).filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory-index')
+    assert.equal(inj1.length, 1, '索引行恰一条（首轮 first-turn-once）')
     assert.equal((inj1[0]!.meta as Record<string, unknown>)['count'], 2, 'count = 记忆条数')
     assert.ok(Number((inj1[0]!.meta as Record<string, unknown>)['chars']) > 0, 'chars = 拼装实长')
-    assert.ok(String(inj1[0]!.payload).includes('记忆甲'), '注入正文含记忆内容（Model-visible means logged）')
-    // turn 2：memoryInject=true 再发——不重注（append-only 链，注入行恒一）
+    assert.ok(String(inj1[0]!.payload).includes('记忆甲'), '索引行含记忆钩子（一行一记忆——Model-visible means logged）')
+    // turn 2：memoryInject=true 再发——索引不重注（双键判重 chainHasMemoryInjection）
     const r2 = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '问 2', memoryInject: true })) as { turnId: string }
     await waitForTurnEnd(env, r2.turnId)
-    const inj2 = eventsOf(env).filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
-    assert.equal(inj2.length, 1, '第二 turn 不重注（链上注入行恒一）')
-    // turn 3：开关 false——无新注入（本就一条，断言恒一 + 无新增语义由 inject 行数锁定）
+    assert.equal(eventsOf(env).filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory-index').length, 1, '第二 turn 不重注（链上索引行恒一）')
+    // turn 3：开关 false——索引与召回全跳过
     const r3 = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '问 3' })) as { turnId: string }
     await waitForTurnEnd(env, r3.turnId)
-    assert.equal(eventsOf(env).filter((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory').length, 1)
+    assert.equal(eventsOf(env).filter((e) => e.kind === 'system' && String((e.meta as Record<string, unknown> | null)?.['injection'] ?? '').startsWith('memory')).length, 1, '开关 false = 记忆面全跳过（legacy/索引/召回任一形态不再新增）')
   } finally {
     env.svc.closeAll?.()
   }
 })
 
-test('S6M-4 预算超限 = fail-visible 同步抛出（禁静默截断，sendTurn 不开 turn）', async () => {
+test('S6M-4 索引超预算 = fail-visible 同步抛出（0.12.0 形态——一行一记忆是最小不可再分面，禁静默截断）', async () => {
   const env = await makeEnv()
   try {
-    // 预算 8000 字符（handle 缺省）——写入超预算正文
-    await env.svc.dispatch('memory:write', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, id: 'mem-big', text: '长'.repeat(9000) })
+    // 预算 8000 字符（handle 缺省）——索引面超限：120 条 × ~90 字符索引行 ≈ 1.1 万字符（正文长短不再决定预算——钩子面恒载）
+    for (let i = 0; i < 120; i++) {
+      await env.svc.dispatch('memory:write', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, id: `mem-big-${i}`, text: `第${i}条 ${'长'.repeat(80)}` })
+    }
     const before = eventsOf(env).filter((e) => e.kind === 'user' && /^T\d+$/.test(e.turnId)).length
     await assert.rejects(
       () => env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '问', memoryInject: true }),
       /CAR-E-MEM-BUDGET/,
-      '超预算 = CAR-E-MEM-BUDGET fail-visible（渲染层红条语义）',
+      '索引超预算 = CAR-E-MEM-BUDGET fail-visible（渲染层红条语义——删减/归档记忆）',
     )
     const after = eventsOf(env).filter((e) => e.kind === 'user' && /^T\d+$/.test(e.turnId)).length
     assert.equal(after, before, 'throw 发生在 user append 前——turn 未开（无半包）')
-    // 关开关后同文可发（注入跳过 = 不受预算约束）
+    // 关开关后可发（注入跳过 = 不受预算约束）
     const r = (await env.svc.dispatch('turn:send', { workspaceId: env.ws.id, sessionId: env.sess.sessionId, text: '问（无注入）' })) as { turnId: string }
     await waitForTurnEnd(env, r.turnId)
   } finally {

@@ -369,6 +369,10 @@ export function App() {
   // R-K2-1：授权 pending 改队列（K2 并发子 Agent——多请求并发在途，单槽会顶掉先到的弹窗，
   // 用户只见最新一条、其余静默等超时默认拒；队列化后各弹窗独立倒计时、按 requestId 应答）
   const [pendings, setPendings] = useState<AuthzPendingPush[]>([])
+  // 0.12.0（D-V12-3）：同意面结构化——批量勾选集 + 逐卡附注 + 批量共享附注（≤500 字符，内核 1.25.1 落链）
+  const [authzSel, setAuthzSel] = useState<Set<string>>(new Set())
+  const [authzNotes, setAuthzNotes] = useState<Record<string, string>>({})
+  const [authzBatchNote, setAuthzBatchNote] = useState('')
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [update, setUpdate] = useState<UpdateStatusPush | null>(null)
   /** B-2（D-B2-4）：HITL 接管卡（detect 建 / resolved/timeout/aborted 收——受控窗口人工完成语义） */
@@ -756,14 +760,35 @@ export function App() {
     }
   }
 
-  const respond = async (decision: 'once' | 'session' | 'deny', requestId: string) => {
+  const respond = async (decision: 'once' | 'session' | 'deny', requestId: string, note?: string) => {
     if (!selected || !openId) return
     try {
-      await window.car.respondAuthz(selected.id, openId, requestId, decision)
+      // 0.12.0（D-V12-3）：附注随决策（内核 1.25.1 决策事件 payload +note 单事件审计面）
+      await window.car.respondAuthz(selected.id, openId, requestId, decision, note)
       setPendings((prev) => prev.filter((x) => x.requestId !== requestId))
+      setAuthzSel((prev) => { const n = new Set(prev); n.delete(requestId); return n })
+      setAuthzNotes((prev) => { const n = { ...prev }; delete n[requestId]; return n })
     } catch (e) {
       fail(e)
     }
+  }
+
+  // 0.12.0（D-V12-3）：批量多选扇出——单会话队列内勾选，逐卡顺序 respondAuthz（链上恒逐卡决策事件）；
+  // 首败 fail-visible 停扇红条（剩余卡保持 pending 逐卡重决）
+  const respondBatch = async (decision: 'once' | 'session' | 'deny') => {
+    if (!selected || !openId || authzSel.size === 0) return
+    const ids = pendings.filter((p) => authzSel.has(p.requestId)).map((p) => p.requestId)
+    const note = authzBatchNote.trim() ? authzBatchNote.trim().slice(0, 500) : undefined
+    for (const id of ids) {
+      try {
+        await respond(decision, id, note)
+      } catch (e) {
+        fail(e)
+        return
+      }
+    }
+    setAuthzBatchNote('')
+    setAuthzSel(new Set())
   }
 
   const [sessionReasoning, setSessionReasoning] = useState<'off' | 'low' | 'medium' | 'high' | null>(null)
@@ -1313,25 +1338,72 @@ export function App() {
                 )}
               </div>
             )}
+            {authzSel.size > 0 && (
+              <div className="authz batch" data-testid="authz-batch-bar">
+                <div className="authz-head">
+                  <b>批量决策（{authzSel.size} 项已选）</b>
+                  <button className="btn sm" onClick={() => setAuthzSel(new Set())}>清除勾选</button>
+                </div>
+                <input
+                  className="authz-note"
+                  placeholder="批量附注（可选，≤500 字符——随每卡决策落审计链）"
+                  maxLength={500}
+                  value={authzBatchNote}
+                  onChange={(e) => setAuthzBatchNote(e.target.value)}
+                />
+                <div className="authz-actions">
+                  <button className="btn primary" onClick={() => void respondBatch('once')}>
+                    批准所选（本次）
+                  </button>
+                  <button className="btn" onClick={() => void respondBatch('session')}>
+                    批准所选（会话内）
+                  </button>
+                  <button className="btn danger" onClick={() => void respondBatch('deny')}>
+                    拒绝所选
+                  </button>
+                </div>
+              </div>
+            )}
             {pendings.map((p) => {
               const cd = Math.max(0, Math.ceil((p.ts + p.timeoutMs - nowTick) / 1000))
               return (
                 <div className="authz" key={p.requestId}>
                   <div className="authz-head">
-                    <b>M3 授权门</b>
+                    <label className="authz-sel">
+                      <input
+                        type="checkbox"
+                        checked={authzSel.has(p.requestId)}
+                        onChange={(e) => {
+                          setAuthzSel((prev) => {
+                            const n = new Set(prev)
+                            if (e.target.checked) n.add(p.requestId)
+                            else n.delete(p.requestId)
+                            return n
+                          })
+                        }}
+                      />
+                      <b>M3 授权门</b>
+                    </label>
                     <span className={`timer ${cd <= 10 ? 'hot' : ''}`}>{cd}s 后超时默认拒绝</span>
                   </div>
                   <div className="authz-body">
                     工具 <code>{p.tool}</code> · 目标 <code>{p.resource}</code>（{p.capability}）
                   </div>
+                  <input
+                    className="authz-note"
+                    placeholder="附注（可选，≤500 字符——批准/拒绝理由随决策落审计链）"
+                    maxLength={500}
+                    value={authzNotes[p.requestId] ?? ''}
+                    onChange={(e) => setAuthzNotes((prev) => ({ ...prev, [p.requestId]: e.target.value }))}
+                  />
                   <div className="authz-actions">
-                    <button className="btn primary" onClick={() => void respond('once', p.requestId)}>
+                    <button className="btn primary" onClick={() => void respond('once', p.requestId, authzNotes[p.requestId])}>
                       批准本次
                     </button>
-                    <button className="btn" onClick={() => void respond('session', p.requestId)}>
+                    <button className="btn" onClick={() => void respond('session', p.requestId, authzNotes[p.requestId])}>
                       本次会话内始终允许
                     </button>
-                    <button className="btn danger" onClick={() => void respond('deny', p.requestId)}>
+                    <button className="btn danger" onClick={() => void respond('deny', p.requestId, authzNotes[p.requestId])}>
                       拒绝
                     </button>
                   </div>
