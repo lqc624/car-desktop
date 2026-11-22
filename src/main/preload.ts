@@ -133,6 +133,9 @@ const bridge: CarBridge = {
   repoWikiStop: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiStop, { workspaceId }),
   // C2（RW-4）：导出（main 侧目录对话框注入 dir——渲染层只传 workspaceId/sessionId）
   repoWikiExport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.RepoWikiExport, { workspaceId, sessionId }),
+  // —— C7（AD-2）：后台任务完成接回设置（自动唤醒缺省关 deny-by-default） ——
+  bashWakeupGet: () => ipcRenderer.invoke(IpcChannel.BashWakeupGet),
+  bashWakeupSet: (autoWakeup) => ipcRenderer.invoke(IpcChannel.BashWakeupSet, { autoWakeup }),
   onRepoWiki: (cb) => subscribe(IpcPushTopic.RepoWiki, cb),
   // —— T-DY：部署视图数据（main 侧真拉取） ——
   deployInfo: () => ipcRenderer.invoke(IpcChannel.DeployInfo),

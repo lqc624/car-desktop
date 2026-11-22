@@ -12,6 +12,7 @@ import { probeSeam } from './probe.ts'
 import { credentialPresence } from './model.ts'
 import { ABORTED_AT_LABEL, FAILURE_KIND_LABEL } from '../shared/failure-kinds.ts'
 import type { SettlementLite } from '../shared/settlement-rows.ts'
+import type { ChainDiskReconRow } from './reconciliation.ts'
 
 export interface DoctorRow {
   label: string
@@ -113,6 +114,39 @@ export function summarizeRecentSettlements(settlements: readonly SettlementLite[
     }
   }
   return { label: '近期结算', ok: true, detail: `${parts.join(' · ')}（无结果不明记账）` }
+}
+
+/**
+ * ⑦ C6（LF-1 · Q-LF1）：链盘对账行——「链上最近一次成功写入的内容，现在是否还在盘上」三态
+ * 汇总（一致/已删除绿面；漂移红行 fail-visible——对账不判责只陈述）。盲区常驻脚注：bash_run /
+ * 浏览器写动作 / 进程外修改不经 fs 三件套账本。指纹两案（LF-3）：案 B 回执自含 / 案 A 链直推
+ * 重放——reconciliation.ts 承载。无 fs 账面 = 绿行缺席事实（非缺陷）。
+ */
+export function summarizeChainDiskRecon(rows: readonly ChainDiskReconRow[], sessions: number, warnings: readonly string[]): DoctorRow {
+  const blind = '盲区常驻：bash_run/浏览器写/进程外修改不经本对账'
+  const warnPart = warnings.length > 0 ? ` · 告警 ${warnings.length}` : ''
+  if (!rows.length) {
+    return { label: '链盘对账', ok: true, detail: `${sessions} 链无 fs_write/fs_delete 账面（${blind}）${warnPart}` }
+  }
+  const drift = rows.filter((r) => r.state === 'drift')
+  // 红面 = 漂移 + 链上无删除收口的盘缺（D-V171-4——链外消失同漂移关注级）；链上删除收口的盘缺 = 一致面
+  const goneUnexpected = rows.filter((r) => r.state === 'deleted' && r.lastOp === 'fs_write')
+  const goneSanctioned = rows.filter((r) => r.state === 'deleted' && r.lastOp === 'fs_delete')
+  const problems = [...drift, ...goneUnexpected]
+  const match = rows.length - problems.length - goneSanctioned.length
+  const parts = [`${sessions} 链 · ${rows.length} 路径`, `${match} 一致`, `${goneSanctioned.length} 已删除（链上收口）`]
+  if (problems.length > 0) {
+    const top = problems
+      .slice(0, 3)
+      .map((r) => `${r.path.slice(0, 60)}（${r.note.slice(0, 40)}）`)
+      .join('；')
+    return {
+      label: '链盘对账',
+      ok: false,
+      detail: `${parts.join(' · ')} · 待关注 ${problems.length}：${top}${problems.length > 3 ? ' 等' : ''}（对账不判责只陈述；${blind}）${warnPart}`,
+    }
+  }
+  return { label: '链盘对账', ok: true, detail: `${parts.join(' · ')}（${blind}）${warnPart}` }
 }
 
 export async function runDoctor(input: DoctorInput): Promise<{ rows: DoctorRow[] }> {

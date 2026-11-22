@@ -174,8 +174,12 @@ export class SessionHandle {
   private readonly mcpToolUrl: Map<string, string> | null
   private readonly grants = new Set<string>()
   /** 模型可见工具面（活引用）：attachRuntimeModel 以此为 toolDefs——attachSubagents 后置 push
-   *  对每请求可见（R-DRILL-1：此前生产快照分叉致真模型看不见编排三工具） */
-  readonly tools: HostToolDef[]
+   *  对每请求可见（R-DRILL-1：此前生产快照分叉致真模型看不见编排三工具）。
+   *  C3（WB-1）：readonly 策略 = 本数组**原位裁剪**写声明工具（setPolicy 时 splice/rebuild——
+   *  引用稳定 = 活引用语义不破）；执行注册表恒走 allTools（授权门保留：门拦 + 面藏双层） */
+  readonly tools: HostToolDef[] = []
+  /** C3：全量工具注册表（执行面——runTurnFor 派发 map 数据源；含被面藏的 write 声明工具） */
+  private readonly allTools: HostToolDef[] = []
   private modelFn: HostModelFn | null = null
   private readonly waiters = new Map<string, (d: AuthzResponse) => void>()
   private turnSeq = 0
@@ -202,15 +206,20 @@ export class SessionHandle {
     this.policy = init.deps.securitySettings?.().sessionDefaultPolicy ?? 'default'
     this.contextWindow = init.deps.contextWindow ?? null
     this.compactionCfg = init.deps.compactionCfg
-    this.tools = mergeToolSources(
-      builtinTools(
-        init.workspaceRoot,
-        init.deps.fileSecurity,
-        init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
-        init.deps.userDataDir,
+    this.allTools.push(
+      ...mergeToolSources(
+        builtinTools(
+          init.workspaceRoot,
+          init.deps.fileSecurity,
+          init.deps.backup ? { store: init.deps.backup, ctx: { workspaceId: init.workspaceId, sessionId: init.sessionId } } : undefined,
+          init.deps.userDataDir,
+        ),
+        init.deps.extraTools ?? [],
       ),
-      init.deps.extraTools ?? [],
     )
+    this.tools.push(...this.allTools)
+    // C3（WB-1）：出生即 readonly（securitySettings 默认值）时面裁剪立即生效
+    this.applyToolFaceTrim()
     this.mcpToolUrl = init.deps.mcpToolUrl ?? null
     this.fileSecurity = init.deps.fileSecurity ?? null
     this.authz = new AuthzService({ log: this.log, timeoutMs: init.deps.authzTimeoutMs })
@@ -280,7 +289,7 @@ export class SessionHandle {
    */
   attachSubagents(m: SubagentManager): void {
     this.subagents = m
-    this.tools.push(...m.tools())
+    this.attachTools(m.tools())
   }
 
   /**
@@ -290,7 +299,7 @@ export class SessionHandle {
    */
   attachBashTasks(m: BashTaskManager): void {
     this.bashTasks = m
-    this.tools.push(...m.tools())
+    this.attachTools(m.tools())
     m.reapOrphans()
   }
 
@@ -303,7 +312,7 @@ export class SessionHandle {
    */
   attachBrowserTasks(m: BrowserTasks): void {
     this.browserTasks = m
-    this.tools.push(...m.tools())
+    this.attachTools(m.tools())
     // B-2：会话级钩子晚绑定（deps 由 service 注入——缺省形态测试零推送零重建）
     m.hooks({
       browserNetGate: (callId, url, phase) => this.browserNetGate(callId, url, phase),
@@ -391,8 +400,47 @@ export class SessionHandle {
     if (this.policy !== policy) {
       this.policy = policy
       this.appendNarrative('session/policy', { policy })
+      this.applyToolFaceTrim()
     }
     return this.policy
+  }
+
+  /** C3（WB-1 · D-V171-1）：工具接线单点——allTools 恒收全量；readonly 面藏（恢复时自 allTools 重建） */
+  private attachTools(defs: readonly HostToolDef[]): void {
+    this.allTools.push(...defs)
+    if (this.policy === 'readonly') return
+    this.tools.push(...defs)
+  }
+
+  /**
+   * C3（WB-1 · D-V171-1/D-V171-2）声明面裁剪：readonly 策略 = 模型可见面**原位**移除
+   * `declaredSideEffect !== 'readonly'` 工具（未知类按最高约束——声明缺失视为 write）；
+   * 引用稳定（splice/rebuild 不换数组对象——attach 时捕获的活引用语义保持，R-DRILL-1 纪律）；
+   * 执行注册表（runTurnFor）恒走 allTools——授权门保留（纵深双层：门拦 + 面藏，BT-3 判据不动）。
+   */
+  private applyToolFaceTrim(): void {
+    if (this.policy === 'readonly') {
+      for (let i = this.tools.length - 1; i >= 0; i--) {
+        if (this.tools[i]!.declaredSideEffect !== 'readonly') this.tools.splice(i, 1)
+      }
+      return
+    }
+    // 非 readonly：自全量注册表重建（保序——attach 顺序即 allTools 序）
+    if (this.tools.length !== this.allTools.length) {
+      this.tools.length = 0
+      this.tools.push(...this.allTools)
+    }
+  }
+
+  /**
+   * C7（AD-2 · D-V171-5）：后台完成引导 append（不起 run——与 sendTurn busy 路径同形态：
+   * user 事件 `T<n>` 落链 → pendingSteerTurns FIFO 在下一 turn 收口后经 drainPending 消费）。
+   * 空闲期 append = 留待下次 sendTurn 收口后交付（等待语义闭合，不即时烧 token）。
+   */
+  steer(text: string): { turnId: string } {
+    const steerId = 'T' + String(++this.turnSeq)
+    this.log.append('user', 'user', steerId, text)
+    return { turnId: steerId }
   }
 
   /**
@@ -719,9 +767,10 @@ export class SessionHandle {
     return total
   }
 
-  /** 单 turn 执行（turnId 对应的 user 事件由调用方保证已落链——普通 turn 与引导消费共用） */
+  /** 单 turn 执行（turnId 对应的 user 事件由调用方保证已落链——普通 turn 与引导消费共用）。
+   *  C3：执行注册表恒走 allTools 全量（面藏不减执行能力——授权门照常判定，BT-3 判据不动） */
   private runTurnFor(turnId: string): void {
-    const tools = new Map<string, HostToolDef>(this.tools.map((t) => [t.name, t]))
+    const tools = new Map<string, HostToolDef>(this.allTools.map((t) => [t.name, t]))
     // 内核 runTurn 自带全部收口语义（error/aborted/成对补记/turnEnd usage 聚合）——
     // 桌面 catch 仅宿主日志，禁补造任何链上事件。
     // authorizeAll（K-FS-1，1.13.0）：readonly 类（fs_read）同样进授权门——读取规则面可达

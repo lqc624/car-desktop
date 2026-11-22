@@ -128,6 +128,11 @@ export const IpcChannel = {
   PersonalizationGet: 'personalization:get',
   /** 部分更新（toneStyle ∈ 档位表 / customPrompt ≤2000——校验 fail-visible） */
   PersonalizationSet: 'personalization:set',
+  // —— C7（AD-2）：后台任务完成接回设置（自动唤醒缺省关 deny-by-default——Q-AD3 用户批） ——
+  /** 读接回设置（autoWakeup 缺省 false = 徽标提醒档） */
+  BashWakeupGet: 'bashWakeup:get',
+  /** 设自动唤醒开关（true = 任务自然退出后自动 append 引导 user 事件——下一 turn 消费） */
+  BashWakeupSet: 'bashWakeup:set',
   // —— T-RW：RepoWiki（工作区级本地生成——零上传；落链承载 = 该工作区活跃会话） ——
   /** 读 manifest（无则 null——不需会话） */
   RepoWikiGet: 'repoWiki:get',
@@ -631,6 +636,13 @@ export interface MemoryEvolveDecideResultDTO {
   memoryId?: string
 }
 
+/** C7（AD-2）：后台任务完成接回设置（autoWakeup 缺省 false = 徽标提醒档 deny-by-default） */
+export interface BashWakeupSettingsDTO {
+  version: 1
+  updatedAt: number
+  autoWakeup: boolean
+}
+
 /** T-RW：RepoWiki 页面（正文按需读盘——manifest 只载体量事实） */
 export interface RepoWikiPageDTO {
   id: string
@@ -980,6 +992,9 @@ export interface IpcRequestMap {
   [IpcChannel.MemoryEvolveMode]: { workspaceId: string; mode: 'manual' | 'auto' }
   [IpcChannel.PersonalizationGet]: undefined
   [IpcChannel.PersonalizationSet]: { toneStyle?: string; customPrompt?: string }
+  // C7（AD-2）：接回设置（全局 userData 态——无 workspace 维度）
+  [IpcChannel.BashWakeupGet]: undefined
+  [IpcChannel.BashWakeupSet]: { autoWakeup: boolean }
   [IpcChannel.RepoWikiGet]: { workspaceId: string }
   [IpcChannel.RepoWikiGenerate]: { workspaceId: string; sessionId: string }
   [IpcChannel.RepoWikiStop]: { workspaceId: string }
@@ -1092,6 +1107,9 @@ export interface CarBridge {
   repoWikiStop(workspaceId: string): Promise<{ ok: true }>
   /** C2（RW-4）：导出（main 侧目录对话框 → 宿主白名单写盘 + repo-wiki/export 落链；需活跃会话承载） */
   repoWikiExport(workspaceId: string, sessionId: string): Promise<RepoWikiExportResultDTO>
+  // —— C7（AD-2）：后台任务完成接回设置（自动唤醒缺省关 deny-by-default） ——
+  bashWakeupGet(): Promise<BashWakeupSettingsDTO>
+  bashWakeupSet(autoWakeup: boolean): Promise<BashWakeupSettingsDTO>
   /** T-RW：生成进度订阅（按 workspaceId 过滤——多工作区并行） */
   onRepoWiki(cb: (p: RepoWikiPush) => void): () => void
   /** T-DY：部署视图数据（真拉取——main 侧 https） */

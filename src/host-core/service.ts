@@ -51,6 +51,7 @@ import { SubagentManager, childSessionIds, recoverChildSessions, type ChildModel
 import { BashTaskManager } from './bashTasks.ts'
 import { BrowserTasks, BROWSER_CDP_PORT } from './browserTasks.ts'
 import { createBrowserStore } from './browserStore.ts'
+import { createBashWakeupStore, type BashWakeupStore } from './wakeupStore.ts'
 import { createBrowserGrantsStore } from './browserGrants.ts'
 import {
   assertSafeId,
@@ -70,7 +71,8 @@ import { listCapabilities, writeCapability, editCapability, deleteCapability, lo
 import { skillMdToCapability } from './skill-import.ts'
 import { warmCarConfig, loadCarConfig, mergeLlmConfig, type LlmAdapter, type RoutingDecision } from '@lqc123qwe/car-runtime'
 import { MODEL_META, resolveModelMeta } from './modelMeta.ts'
-import { runDoctor, summarizeRecentFailures, summarizeRecentSettlements, type TurnEndLite, type DoctorRow } from './doctor.ts'
+import { runDoctor, summarizeRecentFailures, summarizeRecentSettlements, summarizeChainDiskRecon, type TurnEndLite, type DoctorRow } from './doctor.ts'
+import { collectChainDiskRecon } from './reconciliation.ts'
 import type { SettlementLite } from '../shared/settlement-rows.ts'
 import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts'
 import { builtinTools, fsReadTool } from './tools.ts'
@@ -546,6 +548,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
 
   /** auto 触发（回合收口空闲点）：模式 auto + 无在途 run + 无未决候选 + 压力达阈值 → fire-and-forget */
   function onTurnClosedFor(workspaceId: string, sessionId: string): void {
+    // C7（AD-2）：收口点 = 聚合引导 flush 位（busy 翻 false 后攒批交付——防完成风暴）
+    const closedHandle = handles.get(key(workspaceId, sessionId))
+    if (closedHandle) flushBashWakeup(closedHandle)
     if (evolveModes.get(workspaceId) !== 'auto') return
     const handle = handles.get(key(workspaceId, sessionId))
     if (!handle || evolveInFlight.has(key(workspaceId, sessionId))) return
@@ -1014,7 +1019,14 @@ export function createHostService(opts: HostServiceOptions): HostService {
    * 接线即孤儿收割（重启后链上无收口的 bash/start 补 stopped 收口）。
    */
   function attachBashTasksFor(root: string, handle: SessionHandle): void {
-    handle.attachBashTasks(new BashTaskManager({ parentLog: handle.log, workspaceRoot: root }))
+    handle.attachBashTasks(
+      new BashTaskManager({
+        parentLog: handle.log,
+        workspaceRoot: root,
+        // C7（AD-2）：自然退出接回回调（stopped 不触发——见 bashTasks.ts 收口注记）
+        onTaskComplete: (t) => queueBashWakeup(handle, t),
+      }),
+    )
   }
 
   /**
@@ -1026,7 +1038,31 @@ export function createHostService(opts: HostServiceOptions): HostService {
    * B-2 §4.7：browser grants 持久化 store（会话×域名分片——authorize 派发前现读盘）。
    */
   const browserStore = createBrowserStore(opts.userDataDir)
+  const bashWakeupStore: BashWakeupStore = createBashWakeupStore(opts.userDataDir)
   const browserGrants = createBrowserGrantsStore(join(opts.userDataDir, 'browser-grants.json'))
+  // C7（AD-2）：完成引导聚合缓冲（key = ws::sid——busy 期攒、收口/空闲 flush 单条引导防完成风暴）
+  const pendingWakes = new Map<string, Array<{ taskId: string; exitCode: number | null; outputBytes: number }>>()
+
+  /** C7：完成入队 + 即时 flush 尝试（提醒档 = 零链事件——store 缺省 false deny-by-default） */
+  function queueBashWakeup(handle: SessionHandle, t: { taskId: string; exitCode: number | null; outputBytes: number }): void {
+    if (!bashWakeupStore.get().autoWakeup) return
+    const k = handle.workspaceId + '::' + handle.sessionId
+    const buf = pendingWakes.get(k) ?? []
+    buf.push(t)
+    pendingWakes.set(k, buf)
+    flushBashWakeup(handle)
+  }
+
+  /** C7：flush（busy = 在途攒着——onTurnClosed 收口后二次 flush；空闲 append = FIFO 留待下次 turn 收口交付） */
+  function flushBashWakeup(handle: SessionHandle): void {
+    if (handle.busy) return
+    const k = handle.workspaceId + '::' + handle.sessionId
+    const buf = pendingWakes.get(k)
+    if (!buf || buf.length === 0) return
+    pendingWakes.set(k, [])
+    const lines = buf.map((t) => `${t.taskId}（exit ${t.exitCode ?? '信号'} · 输出 ${t.outputBytes}B）`).join('；')
+    handle.steer(`[后台任务完成通知] ${buf.length === 1 ? '后台任务' : `${buf.length} 个后台任务`}已完成：${lines}。如需结果请用输出查询读取尾部（bash_output）或按任务语义继续。`)
+  }
   function attachBrowserFor(handle: SessionHandle): void {
     if (!browserStore.get().browserEnabled) return
     handle.attachBrowserTasks(new BrowserTasks({ parentLog: handle.log, userDataDir: opts.userDataDir, cdpPort: BROWSER_CDP_PORT }))
@@ -1112,6 +1148,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
         let poolMembers: Array<{ id: string; baseUrl: string; model: string; adapterId: 'openai-compat' | 'anthropic' }> = []
         let failureRow: DoctorRow | null = null
         let settlementRowResult: DoctorRow | null = null
+        let reconRow: DoctorRow | null = null
         if (workspaceId) {
           try {
             const root = registry.pathOf(workspaceId)
@@ -1156,6 +1193,12 @@ export function createHostService(opts: HostServiceOptions): HostService {
             failureRow = summarizeRecentFailures(turnEnds)
             settlementRowResult = summarizeRecentSettlements(settlements)
           } catch { /* 会话目录不可读 = 无此行（医生面不因扫描失败而红） */ }
+          // C6（LF-1 · Q-LF1）：链盘对账——工作区全部链扫描（读取时纯计算不落链；案 B 主/案 A 兜底）
+          try {
+            const reconDir = sessionsDirFor(registry.pathOf(workspaceId))
+            const recon = collectChainDiskRecon(reconDir, registry.pathOf(workspaceId))
+            reconRow = summarizeChainDiskRecon(recon.rows, recon.sessions, recon.warnings)
+          } catch { /* 对账面失败不阻塞医生面（无此行容错） */ }
         }
         const rows = [
           ...(configError
@@ -1185,6 +1228,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           })(),
           ...(failureRow ? [failureRow] : []),
           ...(settlementRowResult ? [settlementRowResult] : []),
+          ...(reconRow ? [reconRow] : []),
         ]
         return { rows }
       }
@@ -1545,6 +1589,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
         return personalizationStore.get()
       case IpcChannel.PersonalizationSet:
         return personalizationStore.set(p)
+      // —— C7（AD-2）：后台完成接回设置（自动唤醒缺省关 deny-by-default——Q-AD3 用户批） ——
+      case IpcChannel.BashWakeupGet:
+        return bashWakeupStore.get()
+      case IpcChannel.BashWakeupSet:
+        return bashWakeupStore.set({ autoWakeup: p['autoWakeup'] === true })
       // ── T-RW：RepoWiki（生成 = fire-and-forget 编排——dispatch 20s 超时面禁同步等待） ──
       case IpcChannel.RepoWikiGet:
         return repoWikiGet(requireString(p.workspaceId, 'workspaceId'))

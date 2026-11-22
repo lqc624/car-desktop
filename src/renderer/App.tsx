@@ -402,6 +402,8 @@ export function App() {
   const [viewer, setViewer] = useState<ViewerTarget | null>(null)
   // T-FV-2：任务进程条（展开策略三态 + auto 态手动覆盖 + bash 输出行单开态）
   const [taskPanelPolicy, setTaskPanelPolicy] = useState<TaskPanelPolicy>(() => readTaskPanelPolicy())
+  // C7（AD-2）：后台完成自动唤醒开关（宿主 userData store——缺省关 deny-by-default；null = 未加载）
+  const [bashWakeup, setBashWakeup] = useState<boolean | null>(null)
   const [taskPanelOpen, setTaskPanelOpen] = useState<boolean | null>(null)
   const [bashOutFor, setBashOutFor] = useState<string | null>(null)
   // T-MP：显示文件修改过程（个性化视图开关——chat 流 fs_write/fs_delete 卡显隐）
@@ -484,6 +486,11 @@ export function App() {
       .modelsMeta()
       .then((r) => { setMeta(r.meta); setPoolMembers(r.pool); setEndpointMeta(r.endpoint) })
       .catch(() => setMeta({}))
+    // C7（AD-2）：接回开关初始态（宿主 store——缺省关 deny-by-default）
+    window.car
+      .bashWakeupGet()
+      .then((s) => setBashWakeup(s.autoWakeup))
+      .catch(() => setBashWakeup(false))
     const offEvent = window.car.onSessionEvent((p: SessionEventPush) => {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
@@ -1506,6 +1513,21 @@ export function App() {
                   >
                     ⛶ {TASK_PANEL_LABEL[taskPanelPolicy]}
                   </button>
+                  <button
+                    className="sp-strategy"
+                    title="后台任务完成自动唤醒（缺省关=徽标提醒档；开启后任务自然退出将自动追加引导，下一回合交付模型消费——花 token 的自动行为显式开关）"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const next = !(bashWakeup === true)
+                      setBashWakeup(next)
+                      window.car
+                        .bashWakeupSet(next)
+                        .then((s) => setBashWakeup(s.autoWakeup))
+                        .catch(fail)
+                    }}
+                  >
+                    {bashWakeup === true ? '自动唤醒 开' : '自动唤醒 关'}
+                  </button>
                   <span className={`sp-caret${taskPanelExpanded ? ' open' : ''}`}>▾</span>
                 </div>
                 {taskPanelExpanded && (
@@ -1525,6 +1547,8 @@ export function App() {
                                   : `已完成 exit=${r.exitCode ?? '—'}${r.durationMs != null ? ` · ${formatDuration(r.durationMs)}` : ''}`}
                         </span>
                         <span className="sp-task" title={r.title}>{r.title.slice(0, 56) || '(无描述)'}</span>
+                        {/* C7（AD-2）：完成徽标（提醒档缺省面——收口后无 user 事件 = 结果待取回） */}
+                        {r.kind === 'bash' && r.state === 'done' && !r.consumed && <span className="tag ok">结果待取回</span>}
                         {r.kind === 'bash' && r.state === 'done' && r.exitCode != null && r.exitCode !== 0 && <span className="dim">exit={r.exitCode}</span>}
                         {r.joinReason && <span className="dim">reason={r.joinReason}</span>}
                         {r.state === 'active' && selected && openId && (

@@ -11,6 +11,7 @@
  *    （K-FS-4——JSONL 不可变链上不得进密钥原文，命中仅记 redactedCount）；
  *  - fs_delete：文件删除默认；目录需显式 recursive:true（fail-visible）——非空目录未带该参数拒绝。
  */
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { redact } from '@lqc123qwe/car-runtime'
@@ -120,7 +121,10 @@ export function fsWriteTool(workspaceRoot: string, fileSecurity?: FileSecurityEn
       const backupRec = backupBefore(backup, target, workspaceRoot)
       mkdirSync(path.dirname(target), { recursive: true })
       writeFileSync(target, content, 'utf8')
-      return { ok: true, path: rawPath, bytes: Buffer.byteLength(content, 'utf8'), ...(backupRec ? { backup: backupRec } : {}) }
+      // C6（LF-3 案 B 主）：回执自含指纹（写入时 content 已在内存，一次 hash——toolResult 落链自动
+      // 携带；链盘对账免重放。老链无此键 = 对账走案 A 链直推重放，见 reconciliation.ts）
+      const sha256 = createHash('sha256').update(content, 'utf8').digest('hex')
+      return { ok: true, path: rawPath, bytes: Buffer.byteLength(content, 'utf8'), sha256, ...(backupRec ? { backup: backupRec } : {}) }
     },
   }
 }
@@ -158,8 +162,24 @@ export function fsDeleteTool(workspaceRoot: string, fileSecurity?: FileSecurityE
       }
       // 先保后变（S3-S3）：删除前备份（文件单件 / 目录整树）——失败 throw 即不删
       const backupRec = backupBefore(backup, target, workspaceRoot)
+      // C6（LF-3）：被删件指纹（文件形态删前现读 hash——对账「已删除」行的链上锚点；读失败 = 不带键禁伪造）
+      let deletedSha256: string | undefined
+      let deletedBytes: number | undefined
+      if (!st.isDirectory()) {
+        try {
+          const raw = readFileSync(target)
+          deletedSha256 = createHash('sha256').update(raw).digest('hex')
+          deletedBytes = raw.length
+        } catch { /* 删前读失败 = 指纹缺席（对账面该行只陈述删除事实） */ }
+      }
       rmSync(target, st.isDirectory() ? { recursive: true } : {})
-      return { ok: true, path: rawPath, ...(st.isDirectory() ? { recursive: true } : {}), ...(backupRec ? { backup: backupRec } : {}) }
+      return {
+        ok: true,
+        path: rawPath,
+        ...(st.isDirectory() ? { recursive: true } : {}),
+        ...(deletedSha256 ? { deletedSha256, deletedBytes } : {}),
+        ...(backupRec ? { backup: backupRec } : {}),
+      }
     },
   }
 }

@@ -16,6 +16,8 @@ export interface TaskRow {
   /** bash 退出码（done 态；信号终止/收割 = null） */
   exitCode: number | null
   joinReason: string | null
+  /** C7（AD-2）：收口后是否已有 user 事件（消费机会已给出——徽标「结果待取回」消隐判据） */
+  consumed: boolean
 }
 
 /** 秒表格式（原型 ts-dur 同款：6s / 1m05s） */
@@ -48,6 +50,8 @@ export function taskRowsFrom(events: ReadonlyArray<{ kind: string; ts: number; p
     else if (type === 'bash/kill') closed.set(id, { state: 'stopped', ts: e.ts, reason: String(p['reason'] ?? '?'), exitCode: null })
   }
   const rows: TaskRow[] = []
+  // C7（AD-2）：收口后消费机会判据 = 链上存在 user 事件 ts ≥ 收口 ts（任一回合启动即给过取回机会）
+  const firstUserAfter = (ts: number): boolean => events.some((x) => x.kind === 'user' && x.ts >= ts)
   for (const e of events) {
     if (e.kind !== 'system') continue
     const p = e.payload as Record<string, unknown> | null
@@ -66,6 +70,7 @@ export function taskRowsFrom(events: ReadonlyArray<{ kind: string; ts: number; p
         durationMs: c ? c.ts - e.ts : null,
         exitCode: null,
         joinReason: c?.state === 'joined' ? c.reason : null,
+        consumed: c != null && firstUserAfter(c.ts),
       })
     } else if (p['type'] === 'bash/start' && typeof p['taskId'] === 'string') {
       const id = p['taskId']
@@ -79,6 +84,7 @@ export function taskRowsFrom(events: ReadonlyArray<{ kind: string; ts: number; p
         durationMs: c ? c.ts - e.ts : null,
         exitCode: c?.exitCode ?? null,
         joinReason: null,
+        consumed: c != null && firstUserAfter(c.ts),
       })
     }
   }

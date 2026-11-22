@@ -46,6 +46,9 @@ export interface BashOutputResult {
 export interface BashManagerDeps {
   parentLog: SessionLog
   workspaceRoot: string
+  /** C7（AD-2 · Q-AD2）：自然退出回调（stopped = false 才回调——用户终止/收割不触发接回；
+   *  宿主聚合缓冲 → steer 引导落链（自动唤醒档）或仅徽标（提醒档）） */
+  onTaskComplete?: (t: { taskId: string; exitCode: number | null; outputBytes: number }) => void
 }
 
 interface TaskEntry {
@@ -170,6 +173,8 @@ export class BashTaskManager {
         outputBytes: entry.outputBytes,
         ...(entry.stopped ? { stopped: true } : {}),
       })
+      // C7（AD-2）：自然退出接回回调（stopped 不触发——用户终止是显式动作，无「等待语义」待闭合）
+      if (!entry.stopped) this.deps.onTaskComplete?.({ taskId, exitCode: entry.exitCode, outputBytes: entry.outputBytes })
     })
     return { ok: true, taskId, state: 'running', note: '后台任务已启动（bash/start 落链）——用输出查询看尾部、停止可终止' }
   }

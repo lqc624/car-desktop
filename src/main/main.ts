@@ -334,6 +334,9 @@ function registerIpc(): void {
   // —— T-MP：个性化设置（宿主 store——端侧偏好不落链） ——
   ipcMain.handle(IpcChannel.PersonalizationGet, () => callHost(IpcChannel.PersonalizationGet))
   ipcMain.handle(IpcChannel.PersonalizationSet, (_event, payload: unknown) => callHost(IpcChannel.PersonalizationSet, payload))
+  // —— C7（AD-2）：后台任务完成接回设置（宿主 userData store——main 仅 passthrough） ——
+  ipcMain.handle(IpcChannel.BashWakeupGet, () => callHost(IpcChannel.BashWakeupGet))
+  ipcMain.handle(IpcChannel.BashWakeupSet, (_event, payload: unknown) => callHost(IpcChannel.BashWakeupSet, payload))
   // —— T-RW：RepoWiki（生成 = 宿主 fire-and-forget 编排；进度经 push:repo-wiki 广播白名单） ——
   ipcMain.handle(IpcChannel.RepoWikiGet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGet, payload))
   ipcMain.handle(IpcChannel.RepoWikiGenerate, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGenerate, payload))
