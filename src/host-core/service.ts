@@ -268,7 +268,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
       // 受管证据目录 carve-out：userData/browser-shots 在出厂 userData deny 面内，但这是
       // 用户自阅面非模型面（模型 fs 面不触碰证据目录——shot_read 受管交接承担）；
       // 其余路径照常走 hardReject（deny/工作区外拒，与 fs_read 同口径）。
-      const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath)
+      // abs 一律 resolve 归一（B-3 真模型演练实证：正斜杠绝对路径 C:/... 不归一时
+      // startsWith(反斜杠 evidenceRoot) 必 miss → carve-out 失效越界误拒）。
+      const abs = resolve(isAbsolute(rawPath) ? rawPath : resolve(root, rawPath))
       const evidenceRoot = resolve(opts.userDataDir, 'browser-shots')
       const inEvidence = abs === evidenceRoot || abs.startsWith(evidenceRoot + sep)
       if (!inEvidence) {

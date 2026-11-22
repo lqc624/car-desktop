@@ -325,6 +325,11 @@ test('ZB3S-5 filePreview 图片分支：classify/mime + dataUrl 返回 + 受管�
     const r2 = (await svc.dispatch('file:preview', { workspaceId: ws.id, sessionId: sess.sessionId, path: join(userData, 'browser-shots', 'shot-evidence.png') })) as Record<string, unknown>
     assert.equal(r2['kind'], 'image')
     assert.match(String(r2['dataUrl']), /^data:image\/png;base64,/)
+    // 正斜杠绝对路径形态（B-3 真模型演练实证：不归一时 startsWith 必 miss → 越界误拒）
+    const fwdAbs = join(userData, 'browser-shots', 'shot-evidence.png').replace(/\\/g, '/')
+    const r3 = (await svc.dispatch('file:preview', { workspaceId: ws.id, sessionId: sess.sessionId, path: fwdAbs })) as Record<string, unknown>
+    assert.equal(r3['kind'], 'image', '正斜杠绝对路径 carve-out 命中（resolve 归一）')
+    assert.match(String(r3['dataUrl']), /^data:image\/png;base64,/)
     const narr = pushes
       .filter((m) => m.topic === 'push:session-event')
       .map((m) => (m.payload as SessionEventPush).event)
