@@ -135,6 +135,8 @@ export const IpcChannel = {
   RepoWikiGenerate: 'repoWiki:generate',
   /** 停止生成（取消旗标——步间检查，随时可停） */
   RepoWikiStop: 'repoWiki:stop',
+  /** C2（RW-4）：导出 RepoWiki（main 侧另存目录对话框 → 宿主白名单写盘 + 落链；dir 由 main 注入，渲染层不可指定） */
+  RepoWikiExport: 'repoWiki:export',
   // —— T-DY：部署视图数据面（main 侧能力——同 backup:open-dir 先例不入宿主 dispatch） ——
   /** 本机版本 + GitHub Releases 真拉取（拉取失败 releasesError 单显——禁假数据） */
   DeployInfo: 'deploy:info',
@@ -396,7 +398,7 @@ export interface SessionOpenResult {
   modelError?: string | null
   /** 上下文窗口（元数据表/端点声明；null = 渲染层不显示百分比——D-C5） */
   contextWindow?: number | null
-  /** 全量回放（R-4：一次批量；此后增量经 IpcPushTopic.SessionEvent） */
+  /** 全量回放（R-4：一次批量；此后增量经 IpcPushTopic.SessionEvent）。C8（AD-3）：请求带 afterSeq 时 = 仅 seq > afterSeq 增量段（eventCount 恒 = 链全长） */
   events: SessionEventDTO[]
   /**
    * T-22（D-S6-7）打开即恢复报告（null = 无恢复动作——alive 句柄 / 只读回放 / 干净链）。
@@ -661,6 +663,35 @@ export interface RepoWikiManifestDTO {
   durationMs: number
   pages: RepoWikiPageDTO[]
   usage?: { input: number; output: number }
+  /** C1（RW-5）：生成基线（滞后对比源——落盘时随 manifest 记；旧 manifest 无此块 = 不报滞后） */
+  baseline?: RepoWikiBaselineDTO
+  /** C1（RW-5）：滞后对比（repoWikiGet 读取时现算——不持久化不落链；无 baseline = 不带键） */
+  stale?: RepoWikiStaleDTO
+}
+
+/** C1（RW-5）：生成基线（语料 stats 快照 + gitHead 快捷判锚；非 git = estimated 估算口径） */
+export interface RepoWikiBaselineDTO {
+  /** git 仓生成时 HEAD（非 git = 不带键） */
+  gitHead?: string
+  /** true = 非 git 工作区（size+mtime 摘要为「估算」口径） */
+  estimated: boolean
+  /** 语料文件 stats 快照（相对路径 → size/mtimeMs） */
+  files: Record<string, { size: number; mtimeMs: number }>
+}
+
+/** C1（RW-5）：滞后对比结果（确定性零 LLM 零副作用） */
+export interface RepoWikiStaleDTO {
+  /** 变更文件相对路径清单（size/mtime 不符或盘上缺失；gitHead 前移 = 全语料列变更） */
+  files: string[]
+  estimated: boolean
+}
+
+/** C2（RW-4）：导出结果（cancelled = 用户未选目录；失败 fail-visible 走错误通道） */
+export interface RepoWikiExportResultDTO {
+  ok: boolean
+  cancelled?: true
+  dir?: string
+  fileCount?: number
 }
 
 /** 会话用量聚合（usage 事件真实值求和；无 usage 的 turn 计入分母不估算——D-S2-4） */
@@ -898,8 +929,25 @@ export interface MeteringSummary {
   dailyBars: MeteringDayBar[]
   byModel: MeteringModelRow[]
   turns: MeteringTurnRow[]
+  /** C5（DB-5）：按会话链细分（bot 维——主链/forkedFrom 子链谱系；仅在宿主提供谱系面时携带） */
+  byChain?: MeteringChainRow[]
   /** 解析失败跳过的会话告警（fail-visible 显性化） */
   warnings: string[]
+}
+
+/** C5（DB-5）：按会话链计量行（usage 事实按 sessionId 聚合——链级归属天然存在，事件本体无归属字段） */
+export interface MeteringChainRow {
+  sessionId: string
+  /** 谱系（main = 主链 / forked = forkedFrom 子链——session:list 同源索引） */
+  lineage: 'main' | 'forked'
+  /** 该链出现过的模型（multi-model 链如实并列——禁归一） */
+  models: string[]
+  input: number
+  output: number
+  cacheRead: number
+  requests: number
+  /** 链内任一 fact 缺价目 = null（禁部分现算混算——byModel 同口径） */
+  cost: number | null
 }
 
 /** 各通道请求载荷（宿主 dispatch 校验面） */
@@ -910,7 +958,8 @@ export interface IpcRequestMap {
   [IpcChannel.WorkspaceList]: undefined
   [IpcChannel.SessionCreate]: { workspaceId: string }
   [IpcChannel.SessionList]: { workspaceId: string }
-  [IpcChannel.SessionOpen]: { workspaceId: string; sessionId: string }
+  // C8（AD-3）：afterSeq 提供时 = 仅返回 seq > afterSeq 增量段（游标装载——eventCount 恒 = 链全长）
+  [IpcChannel.SessionOpen]: { workspaceId: string; sessionId: string; afterSeq?: number }
   [IpcChannel.TurnSend]: { workspaceId: string; sessionId: string; text: string; memoryInject?: boolean }
   [IpcChannel.TurnAbort]: { workspaceId: string; sessionId: string }
   [IpcChannel.AuthzRespond]: { workspaceId: string; sessionId: string; requestId: string; decision: AuthzDecisionInput; note?: string }
@@ -934,6 +983,8 @@ export interface IpcRequestMap {
   [IpcChannel.RepoWikiGet]: { workspaceId: string }
   [IpcChannel.RepoWikiGenerate]: { workspaceId: string; sessionId: string }
   [IpcChannel.RepoWikiStop]: { workspaceId: string }
+  // C2（RW-4）：dir 由 main 侧对话框注入（渲染层载荷不含 dir——防任意目录写）
+  [IpcChannel.RepoWikiExport]: { workspaceId: string; sessionId: string; dir: string }
   [IpcChannel.DeployInfo]: undefined
   [IpcChannel.CapabilityList]: { workspaceId: string }
   [IpcChannel.CapabilityWrite]: { workspaceId: string; sessionId: string; entry: CapabilityEntryInput }
@@ -1000,7 +1051,8 @@ export interface CarBridge {
   listWorkspaces(): Promise<WorkspaceInfo[]>
   createSession(workspaceId: string): Promise<SessionInfo>
   listSessions(workspaceId: string): Promise<SessionInfo[]>
-  openSession(workspaceId: string, sessionId: string): Promise<SessionOpenResult>
+  /** C8（AD-3）：afterSeq 提供时 = 仅装载 seq > afterSeq 增量段（渲染层持投影缓存游标——首装全量） */
+  openSession(workspaceId: string, sessionId: string, afterSeq?: number): Promise<SessionOpenResult>
   sendTurn(workspaceId: string, sessionId: string, text: string, memoryInject?: boolean): Promise<TurnSendResult>
   abortTurn(workspaceId: string, sessionId: string): Promise<void>
   /** Z-7（D-V12-2）：FileViewer 反向感知上报（渲染层 → main 单向；main 持态防抖写 viewer-state.json） */
@@ -1038,6 +1090,8 @@ export interface CarBridge {
   repoWikiGet(workspaceId: string): Promise<RepoWikiManifestDTO | null>
   repoWikiGenerate(workspaceId: string, sessionId: string): Promise<{ runId: string }>
   repoWikiStop(workspaceId: string): Promise<{ ok: true }>
+  /** C2（RW-4）：导出（main 侧目录对话框 → 宿主白名单写盘 + repo-wiki/export 落链；需活跃会话承载） */
+  repoWikiExport(workspaceId: string, sessionId: string): Promise<RepoWikiExportResultDTO>
   /** T-RW：生成进度订阅（按 workspaceId 过滤——多工作区并行） */
   onRepoWiki(cb: (p: RepoWikiPush) => void): () => void
   /** T-DY：部署视图数据（真拉取——main 侧 https） */

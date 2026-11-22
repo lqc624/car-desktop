@@ -105,6 +105,24 @@ export function RepoWikiView({
     }
   }
 
+  // C2（RW-4 · Q-R4）：导出（main 侧目录对话框 → 宿主白名单写盘 + repo-wiki/export 落链；共享 = 用户自行 push）
+  const exportWiki = async (wid: string): Promise<void> => {
+    if (!openId) {
+      onFail(new Error('导出 RepoWiki 需要打开该工作区的会话（落链承载 = 活跃会话）——先在侧栏打开/新建会话'))
+      return
+    }
+    try {
+      const r = await window.car.repoWikiExport(wid, openId)
+      if (!r.ok) {
+        onStatus('已取消导出（未选目录）')
+        return
+      }
+      onStatus(`RepoWiki 已导出 ${r.fileCount} 件 → ${r.dir}（repo-wiki/export 落链；共享 = 自行 push，零自动上传）`)
+    } catch (e) {
+      onFail(e)
+    }
+  }
+
   return (
     <section className="card viewcard">
       <h2>RepoWiki</h2>
@@ -128,6 +146,24 @@ export function RepoWikiView({
               <span className="dim">未生成——生成全程本地，零上传</span>
             )}
           </div>
+          {/* C1（RW-5 · Q-R1）：滞后检测提醒（读取时确定性对比——零 LLM 零副作用；重生成后自动消隐） */}
+          {selManifest?.stale && selManifest.stale.files.length > 0 && (
+            <div className="rw-stale">
+              <span className="tag err">
+                ⏳ 滞后：{selManifest.stale.files.length} 文件已变更{selManifest.stale.estimated ? '（估算口径）' : ''}——文档可能滞后于代码
+              </span>
+              <details>
+                <summary className="dim2">变更清单</summary>
+                <ul className="rw-stale-list">
+                  {selManifest.stale.files.map((f) => (
+                    <li key={f}>
+                      <code className="mono">{f}</code>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </div>
+          )}
           {selProgress && generating(selected.id) && (
             <div className="rw-progress">
               <div className="rw-bar">
@@ -151,6 +187,16 @@ export function RepoWikiView({
             {generating(selected.id) && (
               <button className="btn danger" onClick={() => void stop(selected.id)}>
                 ■ 停止
+              </button>
+            )}
+            {selManifest && (
+              <button
+                className="btn"
+                disabled={!openId || generating(selected.id)}
+                onClick={() => void exportWiki(selected.id)}
+                title="另存对话框选目标目录 → pages/*.md + manifest 副本（白名单写盘；共享 = 自行 push）"
+              >
+                ⇩ 导出
               </button>
             )}
             {!openId && <span className="dim">⚠ 生成需要打开该工作区的会话（落链承载）——先在侧栏打开/新建会话</span>}

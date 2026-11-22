@@ -8,7 +8,8 @@
  *  - 大纲 ≤6 页；页 id 走 assertSafeId 同规（防 LLM 产出 slug 拼路径穿越）；
  *  - 解析容错三段式照抄 memoryEvolve（原文 → fence → 首 `[` 末 `]` 截取）。
  */
-import { readdirSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
 export const REPO_WIKI_MAX_FILES = 200
@@ -26,7 +27,8 @@ export interface WikiOutlinePage {
   focus: string
 }
 
-const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+/** 页 id 安全面（防 LLM 产出 slug 拼路径穿越——C2 导出名单校验复用） */
+export const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 export interface WorkspaceScan {
   /** 相对路径清单（排序——确定性，测试可断言） */
@@ -130,6 +132,74 @@ export function parseOutlineResponse(text: string, knownFiles: ReadonlySet<strin
 export interface WikiCorpusFile {
   path: string
   content: string
+}
+
+// ── C1（RW-5 · Q-R1）：滞后检测基线（生成落盘时随 manifest 记；repoWikiGet 读取时现算对比） ──
+
+/** 生成基线（语料 stats 快照 + gitHead 快捷判锚；非 git = estimated 估算口径） */
+export interface WikiBaseline {
+  /** git 仓生成时 HEAD（非 git / git 不可用 = 不带键） */
+  gitHead?: string
+  /** true = 非 git 工作区（size+mtime 摘要为「估算」口径） */
+  estimated: boolean
+  /** 语料文件 stats 快照（相对路径 → size/mtimeMs） */
+  files: Record<string, { size: number; mtimeMs: number }>
+}
+
+export interface WikiStale {
+  /** 变更文件相对路径清单（size/mtime 不符或盘上缺失；gitHead 前移 = 全语料列变更） */
+  files: string[]
+  estimated: boolean
+}
+
+/** git HEAD 读取（非 git / git 不可用 = null——禁抛；生成与对比两侧同源） */
+export function readGitHead(root: string): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] })
+    const s = out.toString().trim()
+    return s.length > 0 ? s : null
+  } catch {
+    return null
+  }
+}
+
+/** 语料基线快照（生成落盘时构建——stats 现读；生成瞬间已消失的语料文件不入基线） */
+export function buildBaseline(root: string, corpusPaths: ReadonlyArray<string>): WikiBaseline {
+  const files: WikiBaseline['files'] = {}
+  for (const rel of corpusPaths) {
+    try {
+      const st = statSync(join(root, rel))
+      files[rel] = { size: st.size, mtimeMs: st.mtimeMs }
+    } catch {
+      /* 生成瞬间已消失——不入基线（对比面不含幻影文件） */
+    }
+  }
+  const gitHead = readGitHead(root)
+  return { ...(gitHead ? { gitHead } : {}), estimated: gitHead == null, files }
+}
+
+/**
+ * 滞后对比（读取时确定性计算——零 LLM 零副作用不落链；RW-5 口径）：
+ *  - gitHead 前移 = 仓库状态已变（提交面滞后事实）→ 全语料列变更（页级细化留增量批 RW-1）；
+ *  - HEAD 未变（或非 git）→ 逐文件 size+mtime 对比（抓未提交编辑；删除也是滞后事实）；
+ *  - 基线只覆盖生成语料面——生成后新增文件不触发滞后（N-R2 语义：wiki 只对「已入文档的源」负责）。
+ */
+export function staleBaseline(baseline: WikiBaseline, currentGitHead: string | null, root: string): WikiStale {
+  if (baseline.gitHead != null && currentGitHead != null && currentGitHead !== baseline.gitHead) {
+    return { files: [...Object.keys(baseline.files)], estimated: baseline.estimated }
+  }
+  const files: string[] = []
+  for (const [rel, snap] of Object.entries(baseline.files)) {
+    let cur: { size: number; mtimeMs: number } | null = null
+    try {
+      const st = statSync(join(root, rel))
+      cur = { size: st.size, mtimeMs: st.mtimeMs }
+    } catch {
+      cur = null
+    }
+    if (!cur || cur.size !== snap.size || cur.mtimeMs !== snap.mtimeMs) files.push(rel)
+  }
+  return { files, estimated: baseline.estimated }
 }
 
 /** 页面提示词：本页 files 语料拼装（单页语料 ≤ 24k 字符——超页预算截断标注） */

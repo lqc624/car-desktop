@@ -7,7 +7,7 @@
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { forkInSession, loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
 import {
@@ -18,6 +18,7 @@ import {
   type FilePreviewResultDTO,
   type HostProbeResult,
   type MemoryEvolveResultDTO,
+  type RepoWikiExportResultDTO,
   type RepoWikiManifestDTO,
   type SessionInfo,
   type SessionOpenResult,
@@ -29,13 +30,17 @@ import { IMAGE_PREVIEW_MAX_BYTES, classifyPreviewFile, imageMimeOf } from '../sh
 import { memoryPressureOf, EVOLVE_AUTO_PCT, EVOLVE_REVIEW_TIMEOUT_MS, type EvolutionCandidate } from '../shared/memory-evolution.ts'
 import { buildEvolvePrompt, parseEvolveResponse } from './memoryEvolve.ts'
 import {
+  buildBaseline,
   buildOutlinePrompt,
   buildPagePrompt,
   parseOutlineResponse,
+  readGitHead,
   scanWorkspace,
+  staleBaseline,
   stripFences,
   REPO_WIKI_CHAR_BUDGET,
   REPO_WIKI_MAX_FILES,
+  SAFE_ID_RE,
   type WikiCorpusFile,
   type WikiOutlinePage,
 } from './repoWiki.ts'
@@ -570,28 +575,63 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return join(opts.userDataDir, 'repo-wiki', workspaceId)
   }
 
-  function repoWikiGet(workspaceId: string): RepoWikiManifestDTO | null {
-    const dir = repoWikiDir(workspaceId)
-    const file = join(dir, 'manifest.json')
+  /** C2：manifest 原始读取（无 stale 计算、无 md 随取——导出面复用） */
+  function repoWikiGetRaw(workspaceId: string): RepoWikiManifestDTO | null {
+    const file = join(repoWikiDir(workspaceId), 'manifest.json')
     if (!existsSync(file)) return null
     try {
-      const m = JSON.parse(readFileSync(file, 'utf8')) as RepoWikiManifestDTO
-      // 页面正文随取（≤6 页全量可承受——渲染层双栏直用，免二次 IPC）
-      return {
-        ...m,
-        pages: m.pages.map((p) => {
-          const pf = join(dir, 'pages', p.id + '.md')
-          return { ...p, ...(existsSync(pf) ? { md: readFileSync(pf, 'utf8') } : {}) }
-        }),
-      }
+      return JSON.parse(readFileSync(file, 'utf8')) as RepoWikiManifestDTO
     } catch {
       return null
+    }
+  }
+
+  function repoWikiGet(workspaceId: string): RepoWikiManifestDTO | null {
+    const m = repoWikiGetRaw(workspaceId)
+    if (!m) return null
+    const dir = repoWikiDir(workspaceId)
+    // C1（RW-5）：滞后对比读取时现算（不落盘不落链——确定性零 LLM；旧 manifest 无 baseline = 不带键）
+    const stale = m.baseline ? staleBaseline(m.baseline, readGitHead(registry.pathOf(workspaceId)), registry.pathOf(workspaceId)) : undefined
+    // 页面正文随取（≤6 页全量可承受——渲染层双栏直用，免二次 IPC）
+    return {
+      ...m,
+      ...(stale ? { stale } : {}),
+      pages: m.pages.map((p) => {
+        const pf = join(dir, 'pages', p.id + '.md')
+        return { ...p, ...(existsSync(pf) ? { md: readFileSync(pf, 'utf8') } : {}) }
+      }),
     }
   }
 
   function repoWikiStop(workspaceId: string): { ok: true } {
     if (repoWikiInFlight.has(workspaceId)) repoWikiCancel.set(workspaceId, true)
     return { ok: true }
+  }
+
+  // ── C2（RW-4 · Q-R4）：导出（main 侧目录对话框选定 dir 后转发；渲染层载荷不含 dir） ──
+  // 白名单写盘：仅 manifest.pages 声明的页（SAFE_ID_RE 复验——禁路径逃逸）+ manifest 副本；
+  // 共享 = 用户自行 push（零自动 push 面）；落链承载 = 活跃会话（生成同款前置校验）。
+  function repoWikiExport(workspaceId: string, sessionId: string, dir: string): RepoWikiExportResultDTO {
+    const handle = requireAliveHandle(workspaceId, sessionId)
+    if (!isAbsolute(dir)) throw new Error('CAR-E-DESKTOP: RepoWiki 导出目录非绝对路径（对话框应返回绝对路径）')
+    const m = repoWikiGetRaw(workspaceId)
+    if (!m) throw new Error('CAR-E-DESKTOP: RepoWiki 未生成（该工作区）——先生成再导出')
+    const src = repoWikiDir(workspaceId)
+    for (const p of m.pages) {
+      if (!SAFE_ID_RE.test(p.id)) throw new Error(`CAR-E-DESKTOP: RepoWiki 导出名单校验失败（pageId ${p.id.slice(0, 32)}）——拒绝写盘`)
+    }
+    mkdirSync(join(dir, 'pages'), { recursive: true })
+    let fileCount = 0
+    for (const p of m.pages) {
+      const pf = join(src, 'pages', p.id + '.md')
+      if (!existsSync(pf)) continue // 残缺 manifest 容错（缺页跳过——fileCount 如实计数）
+      copyFileSync(pf, join(dir, 'pages', p.id + '.md'))
+      fileCount++
+    }
+    copyFileSync(join(src, 'manifest.json'), join(dir, 'manifest.json'))
+    fileCount++
+    handle.appendNarrative('repo-wiki/export', { dir, fileCount, generatedAt: m.generatedAt })
+    return { ok: true, dir, fileCount }
   }
 
   function repoWikiGenerate(workspaceId: string, sessionId: string): { runId: string } {
@@ -732,6 +772,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
         durationMs: Date.now() - t0,
         pages: pages.map((p) => ({ id: p.id, title: p.title, chars: p.chars })),
         ...(usageSeen ? { usage: { ...usageTotal } } : {}),
+        // C1（RW-5）：生成基线随 manifest 记（语料 stats + gitHead——滞后对比源）
+        baseline: buildBaseline(root, corpus.map((c) => c.path)),
       }
       const tmp = join(dir, 'manifest.json.tmp')
       writeFileSync(tmp, JSON.stringify(manifest, null, 2), 'utf8')
@@ -1219,19 +1261,22 @@ export function createHostService(opts: HostServiceOptions): HostService {
       case IpcChannel.SessionOpen: {
         const workspaceId = requireString(p.workspaceId, 'workspaceId')
         const sessionId = requireString(p.sessionId, 'sessionId')
+        // C8（AD-3）：游标装载——afterSeq 提供时 events 仅返回 seq > afterSeq 增量段（eventCount 恒 = 链全长）
+        const afterSeq = typeof p.afterSeq === 'number' && Number.isFinite(p.afterSeq) && p.afterSeq >= 0 ? p.afterSeq : undefined
         const root = registry.pathOf(workspaceId)
         const alive = handles.get(key(workspaceId, sessionId))
         if (alive) {
+          const known = [...alive.knownEvents()]
           return {
             sessionId,
             workspaceId,
             exists: true,
-            eventCount: alive.log.events.length,
+            eventCount: known.length,
             title: alive.title,
             model: alive.sessionModel,
             modelError: alive.modelError,
             contextWindow: alive.sessionWindow ?? alive.contextWindow,
-            events: [...alive.knownEvents()],
+            events: afterSeq != null ? known.filter((e) => e.seq > afterSeq) : known,
             recovery: null,
           } satisfies SessionOpenResult
         }
@@ -1265,16 +1310,17 @@ export function createHostService(opts: HostServiceOptions): HostService {
               ...(childRec.recovered > 0 || childRec.broken > 0 ? { childSessions: { recovered: childRec.recovered, broken: childRec.broken } } : {}),
             })
           }
+          const known = [...handle.knownEvents()]
           return {
             sessionId,
             workspaceId,
             exists: true,
-            eventCount: handle.log.events.length,
+            eventCount: known.length,
             title: handle.title,
             model: handle.sessionModel,
             modelError: handle.modelError,
             contextWindow: handle.sessionWindow ?? handle.contextWindow,
-            events: [...handle.knownEvents()],
+            events: afterSeq != null ? known.filter((e) => e.seq > afterSeq) : known,
             recovery: {
               interruptedTurns: rec?.turnsClosed ?? 0,
               syntheticToolResults: rec?.pairedCalls ?? 0,
@@ -1283,7 +1329,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
             },
           } satisfies SessionOpenResult
         }
-        // 只读回放（D-S2-6 保留面）：文件必须存在，无句柄无追加
+        // 只读回放（D-S2-6 保留面）：文件必须存在，无句柄无追加。
+        // C8：model/set 扫描恒走全量（元数据派生正确性优先）；events 载荷按 afterSeq 过滤（重放路径为罕见面）
         const events = parseSessionEvents(root, sessionId)
         let model: string | null = null
         let sessionWindow: number | null = null
@@ -1302,7 +1349,7 @@ export function createHostService(opts: HostServiceOptions): HostService {
           eventCount: events.length,
           title: idx.sessions[sessionId]?.title ?? '未命名会话',
           model,
-          events,
+          events: afterSeq != null ? events.filter((e) => e.seq > afterSeq) : events,
           recovery: null,
         } satisfies SessionOpenResult
       }
@@ -1508,6 +1555,13 @@ export function createHostService(opts: HostServiceOptions): HostService {
         )
       case IpcChannel.RepoWikiStop:
         return repoWikiStop(requireString(p.workspaceId, 'workspaceId'))
+      // ── C2（RW-4）：导出（dir 由 main 侧对话框注入——渲染层载荷不含 dir，见 ipc-contract 注记） ──
+      case IpcChannel.RepoWikiExport:
+        return repoWikiExport(
+          requireString(p.workspaceId, 'workspaceId'),
+          requireString(p.sessionId, 'sessionId'),
+          requireString(p.dir, 'dir'),
+        )
       // ── T-24（D2-S1 / PRD §2）：能力库条目面（CRUD 落链承载 = 活跃会话——memory CRUD 同款链同源） ──
       case IpcChannel.CapabilityList:
         return listCapabilities(registry.pathOf(requireString(p.workspaceId, 'workspaceId')))

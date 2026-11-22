@@ -15,7 +15,7 @@
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
 import { loadSessionLog } from '@lqc123qwe/car-runtime'
-import { sessionsDirFor } from './sessions.ts'
+import { readSessionIndex, sessionsDirFor } from './sessions.ts'
 
 export interface UsageFact {
   sessionId: string
@@ -112,6 +112,21 @@ export interface ModelRow {
   requests: number
   cost: number | null
 }
+
+/** C5（DB-5 · Q-DB2）：按会话链计量行（usage 事实按 sessionId 聚合——链级归属天然存在，事件本体无归属字段） */
+export interface ChainUsageRow {
+  sessionId: string
+  /** 谱系（main = 主链 / forked = forkedFrom 子链——session:list 同源索引） */
+  lineage: 'main' | 'forked'
+  /** 该链出现过的模型（multi-model 链如实并列——禁归一） */
+  models: string[]
+  input: number
+  output: number
+  cacheRead: number
+  requests: number
+  /** 链内任一 fact 缺价目 = null（禁部分现算混算——byModel 同口径） */
+  cost: number | null
+}
 export interface TurnRow {
   sessionId: string
   ts: number
@@ -159,6 +174,8 @@ export function summarizeFacts(
   provider: PriceProvider,
   now: number,
   usageMissingTurns = 0,
+  /** C5：谱系面（sessionId → main/forked——提供时输出 byChain；缺省不带键 = 兼容） */
+  lineageBySession?: ReadonlyMap<string, 'main' | 'forked'>,
 ): MeteringSummary {
   const ratesCache = new Map<string, PriceRates | null>()
   const ratesFor = (model: string | null): PriceRates | null => {
@@ -169,6 +186,7 @@ export function summarizeFacts(
   // 按模型聚合 + 每模型金额（缺价目的模型 = null——禁部分现算混算）
   const byModelMap = new Map<string, { input: number; output: number; cacheRead: number; cacheCreation: number; requests: number; unpriced: boolean }>()
   const turnAgg = new Map<string, { sessionId: string; ts: number; model: string | null; input: number; output: number; cacheRead: number; cacheCreation: number; requests: number }>()
+  const chainAgg = new Map<string, { models: Set<string>; input: number; output: number; cacheRead: number; requests: number; unpriced: boolean }>()
   for (const f of facts) {
     const key = f.model ?? '（未采集模型）'
     const m = byModelMap.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, requests: 0, unpriced: false }
@@ -188,6 +206,18 @@ export function summarizeFacts(
     t.cacheCreation += f.cacheCreation
     t.requests += 1
     turnAgg.set(tKey, t)
+    // C5：链级聚合（同 for 遍历——链谱系由调用方经 lineageBySession 注入）
+    if (lineageBySession) {
+      const key = f.model ?? '（未采集模型）'
+      const c = chainAgg.get(f.sessionId) ?? { models: new Set<string>(), input: 0, output: 0, cacheRead: 0, requests: 0, unpriced: false }
+      c.models.add(key)
+      c.input += f.input
+      c.output += f.output
+      c.cacheRead += f.cacheRead
+      c.requests += 1
+      if (!ratesFor(f.model)) c.unpriced = true
+      chainAgg.set(f.sessionId, c)
+    }
   }
   const priced = (cost: number, unpriced: boolean): number | null => (unpriced ? null : cost)
   const byModel: ModelRow[] = [...byModelMap.entries()]
@@ -223,6 +253,35 @@ export function summarizeFacts(
       }
     })
     .sort((a, b) => b.ts - a.ts)
+  // C5：按链细分（仅谱系面注入时输出——缺省键不带 = DTO 兼容；金额 = 链内全 facts 有价目才现算）
+  const byChain: ChainUsageRow[] | undefined = lineageBySession
+    ? [...chainAgg.entries()]
+        .map(([sessionId, c]) => {
+          const lineage = lineageBySession.get(sessionId) ?? 'main'
+          let cost = 0
+          let unpriced = false
+          for (const f of facts) {
+            if (f.sessionId !== sessionId) continue
+            const r = ratesFor(f.model)
+            if (!r) {
+              unpriced = true
+              break
+            }
+            cost += costOf(f, r)
+          }
+          return {
+            sessionId,
+            lineage,
+            models: [...c.models],
+            input: c.input,
+            output: c.output,
+            cacheRead: c.cacheRead,
+            requests: c.requests,
+            cost: unpriced ? null : cost,
+          }
+        })
+        .sort((a, b) => b.input + b.output - (a.input + a.output))
+    : undefined
   // 今日四卡 + 命中率 + 覆盖率
   const today = dayOf(now)
   const todayFacts = facts.filter((f) => dayOf(f.ts) === today)
@@ -268,6 +327,7 @@ export function summarizeFacts(
     dailyBars,
     byModel,
     turns,
+    ...(byChain ? { byChain } : {}),
   }
 }
 
@@ -308,5 +368,11 @@ export function workspaceMeteringSummary(workspaceRoot: string, provider: PriceP
       warnings.push(`会话 ${sessionId} 解析失败跳过：${err instanceof Error ? err.message : err}`)
     }
   }
-  return { ...summarizeFacts(facts, toolsByTurn, turnEndCount, provider, now, usageMissingTurns), warnings }
+  // C5（DB-5）：谱系面（session-index forkedFrom——与 session:list 同源；索引未见会话 = main）
+  const idx = readSessionIndex(workspaceRoot)
+  const lineageBySession = new Map<string, 'main' | 'forked'>()
+  for (const [sid, meta] of Object.entries(idx.sessions)) {
+    lineageBySession.set(sid, meta.forkedFrom ? 'forked' : 'main')
+  }
+  return { ...summarizeFacts(facts, toolsByTurn, turnEndCount, provider, now, usageMissingTurns, lineageBySession), warnings }
 }

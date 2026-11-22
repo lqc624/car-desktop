@@ -338,6 +338,22 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.RepoWikiGet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGet, payload))
   ipcMain.handle(IpcChannel.RepoWikiGenerate, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGenerate, payload))
   ipcMain.handle(IpcChannel.RepoWikiStop, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiStop, payload))
+  // —— C2（RW-4）：导出（main 侧目录对话框注入 dir → 宿主白名单写盘；渲染层载荷不含 dir——防任意目录写） ——
+  ipcMain.handle(IpcChannel.RepoWikiExport, async (_event, payload: unknown) => {
+    const p = (payload ?? {}) as { workspaceId?: unknown; sessionId?: unknown }
+    const workspaceId = typeof p.workspaceId === 'string' ? p.workspaceId : ''
+    if (!workspaceId) throw new Error('CAR-E-DESKTOP: repoWiki:export 缺 workspaceId')
+    const sessionId = typeof p.sessionId === 'string' ? p.sessionId : ''
+    if (!sessionId) throw new Error('CAR-E-DESKTOP: repoWiki:export 缺 sessionId（落链承载 = 活跃会话）')
+    const picked = await dialog.showOpenDialog({
+      title: '选择 RepoWiki 导出目标目录',
+      buttonLabel: '导出到此目录',
+      message: '导出 pages/*.md 与 manifest 副本（共享 = 自行 push，无自动上传）',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, cancelled: true as const }
+    return callHost(IpcChannel.RepoWikiExport, { workspaceId, sessionId, dir: picked.filePaths[0] })
+  })
   // —— T-DY：部署视图数据（main 侧 https 真拉取——appVersion 真值恒回，releases 失败单显） ——
   ipcMain.handle(IpcChannel.DeployInfo, async () => {
     try {

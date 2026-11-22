@@ -149,6 +149,43 @@ export function DashView({ selected }: { selected: WorkspaceInfo | null }) {
             </tbody>
           </table>
 
+          {/* C5（DB-5）：按会话链细分（bot 维——主链/forkedFrom 子链谱系；宿主提供谱系面才携带） */}
+          {summary.byChain && summary.byChain.length > 0 && (
+            <>
+              <h3>按会话链细分（主链 / 分叉子链谱系）</h3>
+              <table className="mtable">
+                <thead>
+                  <tr>
+                    <th>会话链</th>
+                    <th>谱系</th>
+                    <th>模型</th>
+                    <th>输入</th>
+                    <th>输出</th>
+                    <th>缓存读</th>
+                    <th>请求</th>
+                    <th>金额</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.byChain.map((c) => (
+                    <tr key={c.sessionId}>
+                      <td className="mono">{c.sessionId}</td>
+                      <td>
+                        <span className={`tag ${c.lineage === 'main' ? 'ok' : 'dim'}`}>{c.lineage === 'main' ? '主链' : '分叉'}</span>
+                      </td>
+                      <td className="dim2">{c.models.join(' / ')}</td>
+                      <td>{fmtTok(c.input)}</td>
+                      <td>{fmtTok(c.output)}</td>
+                      <td>{fmtTok(c.cacheRead)}</td>
+                      <td>{c.requests}</td>
+                      <td>{fmtCost(c.cost)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
           <h3>turn 明细（最近 {Math.min(20, summary.turns.length)} / 共 {summary.turns.length}）</h3>
           <table className="mtable">
             <thead>

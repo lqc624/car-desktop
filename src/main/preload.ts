@@ -24,7 +24,9 @@ const bridge: CarBridge = {
   listWorkspaces: () => ipcRenderer.invoke(IpcChannel.WorkspaceList),
   createSession: (workspaceId) => ipcRenderer.invoke(IpcChannel.SessionCreate, { workspaceId }),
   listSessions: (workspaceId) => ipcRenderer.invoke(IpcChannel.SessionList, { workspaceId }),
-  openSession: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionOpen, { workspaceId, sessionId }),
+  // C8（AD-3）：afterSeq 提供时 = 游标增量装载（渲染层投影缓存——首装全量）
+  openSession: (workspaceId, sessionId, afterSeq) =>
+    ipcRenderer.invoke(IpcChannel.SessionOpen, { workspaceId, sessionId, ...(afterSeq != null ? { afterSeq } : {}) }),
   sendTurn: (workspaceId, sessionId, text, memoryInject) =>
     ipcRenderer.invoke(IpcChannel.TurnSend, { workspaceId, sessionId, text, ...(memoryInject !== undefined ? { memoryInject } : {}) }),
   abortTurn: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.TurnAbort, { workspaceId, sessionId }),
@@ -129,6 +131,8 @@ const bridge: CarBridge = {
   repoWikiGet: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiGet, { workspaceId }),
   repoWikiGenerate: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.RepoWikiGenerate, { workspaceId, sessionId }),
   repoWikiStop: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiStop, { workspaceId }),
+  // C2（RW-4）：导出（main 侧目录对话框注入 dir——渲染层只传 workspaceId/sessionId）
+  repoWikiExport: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.RepoWikiExport, { workspaceId, sessionId }),
   onRepoWiki: (cb) => subscribe(IpcPushTopic.RepoWiki, cb),
   // —— T-DY：部署视图数据（main 侧真拉取） ——
   deployInfo: () => ipcRenderer.invoke(IpcChannel.DeployInfo),

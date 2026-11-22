@@ -419,6 +419,8 @@ export function App() {
   const [contextWindow, setContextWindow] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const openRef = useRef<{ wsId: string; sessionId: string } | null>(null)
+  // C8（AD-3）：会话投影缓存（key = ws::sid → 全量事件；重开经 afterSeq 游标增量——链 append-only 纪律下安全）
+  const openCacheRef = useRef<Map<string, SessionEventDTO[]>>(new Map())
   // T-33（v0.3 终验 D2）：恢复横幅已显会话集（进程内幂等——重开不复显）
   const recoveryShownRef = useRef<Set<string>>(new Set())
 
@@ -486,6 +488,10 @@ export function App() {
       const cur = openRef.current
       if (!cur || p.workspaceId !== cur.wsId || p.sessionId !== cur.sessionId) return
       setEvents((prev) => [...prev, p.event])
+      // C8：推送事件同步进投影缓存（重开时游标增量与现场推送两侧一致）
+      const ck = p.workspaceId + '::' + p.sessionId
+      const c = openCacheRef.current.get(ck)
+      if (c) openCacheRef.current.set(ck, [...c, p.event])
       if (p.event.kind === 'assistant') {
         // 1.19.0：全文事件到达 = 流式缓冲收口（增量之和 ≡ 落链全文，屏幕无第二事实源）
         setStream((s) => (s && s.turnId === p.event.turnId ? null : s))
@@ -646,18 +652,25 @@ export function App() {
     try {
       // v0.3-R1：会话可从任意展开的工作区分组点开——跨工作区先切换选中（数据/模型面随组载入）
       if (selected?.id !== ws.id) await selectWorkspace(ws)
-      const r = await window.car.openSession(ws.id, sessionId)
+      // C8（AD-3）：游标装载——缓存命中 = afterSeq 增量段（eventCount 恒 = 链全长；链 append-only 下合并 ≡ 全量重放）
+      const cacheKey = ws.id + '::' + sessionId
+      const cached = openCacheRef.current.get(cacheKey)
+      const afterSeq = cached && cached.length > 0 ? cached[cached.length - 1]!.seq : undefined
+      const r = await window.car.openSession(ws.id, sessionId, afterSeq)
+      const delta = afterSeq != null && r.events.length > 0 && r.events[0]!.seq > afterSeq && r.eventCount >= (cached?.length ?? 0)
+      const mergedEvents = afterSeq != null && cached && r.eventCount >= cached.length ? (delta ? [...cached, ...r.events] : cached) : r.events
+      openCacheRef.current.set(cacheKey, mergedEvents)
       openRef.current = { wsId: ws.id, sessionId }
       setView('chat')
       setOpenId(sessionId)
-      setEvents(r.events)
+      setEvents(mergedEvents)
       setStream(null) // 1.19.0：换会话清流式缓冲（回放/重开会话不带上一会话临时态）
       // Z-1 延伸（0.15.0 / D-Z15-3）：子会话头分叉点行——fork-in 标记就在 open 返回 events 里，零额外请求
-      setOpenForkPoint(forkPointFromEvents(r.events))
+      setOpenForkPoint(forkPointFromEvents(mergedEvents))
       setSessionModel(r.model)
       setContextWindow(r.contextWindow ?? null)
       // 会话策略 = 链上最近一次 session/policy，无则回退安全中心默认值
-      const polEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'session/policy')
+      const polEvent = [...mergedEvents].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'session/policy')
       if (polEvent) {
         setPolicy((polEvent.payload as Record<string, unknown>)['policy'] as SessionPolicyDTO)
       } else {
@@ -667,7 +680,7 @@ export function App() {
           .catch(() => setPolicy('default'))
       }
       // S5（D-S5-3）：会话级思考档位 = 链上最近一次 model/set 的 reasoning 键
-      const reEvent = [...r.events].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'model/set' && typeof (e.payload as Record<string, unknown>)['reasoning'] === 'string')
+      const reEvent = [...mergedEvents].reverse().find((e) => e.kind === 'system' && (e.payload as Record<string, unknown>)['type'] === 'model/set' && typeof (e.payload as Record<string, unknown>)['reasoning'] === 'string')
       setSessionReasoning(reEvent ? ((reEvent.payload as Record<string, unknown>)['reasoning'] as 'off' | 'low' | 'medium' | 'high') : null)
       setUsage(await window.car.sessionUsage(ws.id, sessionId))
       setPendings([])
@@ -731,6 +744,7 @@ export function App() {
     setError(null)
     try {
       await window.car.deleteSession(ws.id, sessionId)
+      openCacheRef.current.delete(ws.id + '::' + sessionId) // C8：删除即弃投影缓存
       if (openId === sessionId) {
         setOpenId(null)
         setEvents([])
