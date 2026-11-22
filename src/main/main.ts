@@ -23,6 +23,7 @@ import { isExecutableOpenBlocked } from '../shared/file-preview.ts'
 import { fetchReleases } from './deployInfo.ts'
 import { createBrowserStore } from '../host-core/browserStore.ts'
 import { BROWSER_CDP_PORT } from '../host-core/browserTasks.ts'
+import { clearEvidence, readShotIndex } from '../host-core/evidence.ts'
 
 const HOST_TIMEOUT_MS = 20_000
 
@@ -125,12 +126,14 @@ function reapOrphanBrowserTarget(): void {
   }
 }
 
-function browserStateDTO(): { enabled: boolean; cdpPortActive: boolean; restartRequired: boolean; cdpPort: number } {
+function browserStateDTO(): { enabled: boolean; cdpPortActive: boolean; restartRequired: boolean; cdpPort: number; evidenceCount: number } {
   return {
     enabled: browserStore.get().browserEnabled,
     cdpPortActive: browserEnabledAtBoot,
     restartRequired: browserStore.get().browserEnabled && !browserEnabledAtBoot,
     cdpPort: BROWSER_CDP_PORT,
+    // B-3：截图证据计数（userData/browser-shots/index.json——缺目录 = 0 正常态）
+    evidenceCount: readShotIndex(app.getPath('userData')).length,
   }
 }
 
@@ -468,6 +471,12 @@ function registerIpc(): void {
     return { ok: true }
   })
   ipcMain.handle(IpcChannel.BrowserRevokeGrants, () => callHost(IpcChannel.BrowserRevokeGrants))
+  // —— B-3：截图证据清除（main 侧 userData 能力——D-V10-W1 控制面审计留痕同款；显式动作禁静默驱逐） ——
+  ipcMain.handle(IpcChannel.BrowserClearEvidence, () => {
+    clearEvidence(app.getPath('userData'))
+    console.error('[main] browser-shots 证据目录已清除（SecurityView 显式动作——审计留痕）')
+    return browserStateDTO()
+  })
 }
 
 async function createWindow(show: boolean): Promise<BrowserWindow> {

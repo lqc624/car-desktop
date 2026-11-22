@@ -116,7 +116,7 @@ test('s-browser: 工具面形态——open/read readonly（Q-B3）+ act write（
   try {
     const { deps } = makeDeps({ parentLog: fakeLog(), userDataDir: dir, evaluateValue: '{}' })
     const tools = new BrowserTasks(deps).tools()
-    assert.deepEqual(tools.map((t) => t.name), ['browser_open', 'browser_read', 'browser_act'], 'B-2 三件（task_stop = P2/B-3 缓行登记）')
+    assert.deepEqual(tools.map((t) => t.name), ['browser_open', 'browser_read', 'browser_act', 'browser_shot'], 'B-2 三件 + B-3 shot（task_stop = P2 缓行登记）')
     assert.equal(tools[0]!.declaredSideEffect, 'readonly')
     assert.equal(tools[1]!.declaredSideEffect, 'readonly')
     assert.equal(tools[2]!.declaredSideEffect, 'write', 'browser_act = write 声明（T-22 缺省 write 语义位）')

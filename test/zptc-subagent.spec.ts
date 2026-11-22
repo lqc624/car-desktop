@@ -97,11 +97,12 @@ async function waitForTurnEnd(env: Env, turnId: string, timeoutMs = 8000): Promi
   }
 }
 
-test('ZPTC-1 类型注册表：readonly 缺省档（toolface 恰 fs_read）+ ptc 档（fs_read+run_code）+ 未知 fail-visible', () => {
-  assert.deepEqual([...SUBAGENT_TYPES.map((t) => t.id)], ['readonly', 'ptc'])
+test('ZPTC-1 类型注册表：readonly 缺省档（toolface 恰 fs_read）+ ptc 档（fs_read+run_code）+ visual 档（shot_read，0.16.0）+ 未知 fail-visible', () => {
+  assert.deepEqual([...SUBAGENT_TYPES.map((t) => t.id)], ['readonly', 'ptc', 'visual'])
   assert.equal(resolveSubagentType().id, 'readonly', '缺省 = readonly（现行为零变化）')
   assert.deepEqual([...resolveSubagentType('readonly').toolface], ['fs_read'])
   assert.deepEqual([...resolveSubagentType('ptc').toolface], ['fs_read', 'run_code'])
+  assert.deepEqual([...resolveSubagentType('visual').toolface], ['shot_read'], 'visual 判定档恰 shot_read（B-3/D-VB3-1）')
   assert.throws(() => resolveSubagentType('explorer'), /CAR-E-SUBAGENT-TYPE/, '未知类型 fail-visible')
 })
 

@@ -70,6 +70,17 @@ export function SecurityView() {
     }
   }
 
+  // B-3：截图证据清除（main 侧 userData 显式动作——证据是审计材料非缓存，禁静默驱逐）
+  const clearEvidence = async (): Promise<void> => {
+    setBrowserError(null)
+    try {
+      setBrowserState(await window.car.browserClearEvidence())
+      setStatus('截图证据已清除（userData/browser-shots 整目录）')
+    } catch (e) {
+      setBrowserError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const load = useCallback(async () => {
     setError(null)
     try {
@@ -319,6 +330,7 @@ export function SecurityView() {
         同域免审——域名粒度授权记录跨宿主重启存活、派发前现读盘撤销立即生效），只读策略下白名单外硬拒；
         browser_act 高危动作（提交/支付/发送/删除类）恒弹人工确认卡；登录页/验证码/扫码触发 HITL 接管
         （确定性特征探测，5 分钟超时转 waiting）；browser/* 全落审计链。CDP 仅绑 127.0.0.1（启动期开关——切换后重启宿主生效）。
+        browser_shot 截图证据落受管目录（不触碰工作区），判定走 visual 子代理档（§4.8 视觉验收）。
       </p>
       {browserError && (
         <div className="error" role="alert">
@@ -356,6 +368,14 @@ export function SecurityView() {
           title="清除浏览器网络授权记录（revoke——派发前现读盘，撤销立即生效；已派发输入不可撤销）"
         >
           清除授权记录
+        </button>
+        <button
+          className="btn"
+          disabled={(browserState?.evidenceCount ?? 0) === 0}
+          onClick={() => void clearEvidence()}
+          title="清除截图证据（userData/browser-shots 整目录——审计证据显式清除动作，非缓存驱逐）"
+        >
+          清除截图证据（{browserState?.evidenceCount ?? 0}）
         </button>
       </div>
     </section>

@@ -93,6 +93,8 @@ export const IpcChannel = {
   BrowserFocus: 'browser:focus',
   /** B-2 §4.7 revoke：清除浏览器网络授权记录（宿主 consent 存储单写者） */
   BrowserRevokeGrants: 'browser:revoke-grants',
+  /** B-3：清除截图证据（userData/browser-shots 整目录——SecurityView 显式动作，禁静默驱逐） */
+  BrowserClearEvidence: 'browser:clear-evidence',
   // —— T-25（D2-S2）：附件面（PRD C-3 双形态；选择器 = main 侧 dialog，同 workspace:pick 先例） ——
   /** 系统文件选择器（多选；用户取消 = null） */
   AttachmentPick: 'attachment:pick',
@@ -537,6 +539,8 @@ export interface BrowserSettingsDTO {
   /** 已启用但本进程启动时未启用（须重启宿主生效） */
   restartRequired: boolean
   cdpPort: number
+  /** B-3：截图证据条数（userData/browser-shots/index.json——SecurityView 证据区计数） */
+  evidenceCount: number
 }
 
 /** B-2（D-B2-4）：HITL 接管推送（接管卡生命周期——detect 建/其余收卡） */
@@ -567,6 +571,8 @@ export interface FilePreviewResultDTO {
   mtime: number
   /** 内容（fs_read 同管线：已 redact 脱敏 + 256KB 截断；binary 不带键） */
   content?: string
+  /** B-3：图片内嵌预览（kind='image'——≤8MB 栅格类 data URL） */
+  dataUrl?: string
   truncated?: boolean
   redactedCount?: number
   /** 动作是否已落链（alive 会话 = true；回放/无句柄 = false——界面注记「未落链」） */
@@ -945,6 +951,7 @@ export interface IpcRequestMap {
   [IpcChannel.BrowserClearData]: { cookies?: boolean; cache?: boolean }
   [IpcChannel.BrowserFocus]: undefined
   [IpcChannel.BrowserRevokeGrants]: undefined
+  [IpcChannel.BrowserClearEvidence]: undefined
   [IpcChannel.AttachmentPick]: undefined
   [IpcChannel.AttachmentAdd]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.AttachmentRemove]: { workspaceId: string; sessionId: string; path: string }
@@ -1063,6 +1070,8 @@ export interface CarBridge {
   browserFocus(): Promise<{ ok: boolean }>
   /** B-2 §4.7：清除浏览器网络授权记录（宿主 revoke——派发前重查即失效） */
   browserRevokeGrants(): Promise<{ ok: boolean }>
+  /** B-3：清除截图证据（userData/browser-shots 整目录——返回刷新后浏览器设置态含 evidenceCount） */
+  browserClearEvidence(): Promise<BrowserSettingsDTO>
   /** B-2：HITL 接管卡订阅（detect/resolved/timeout/aborted） */
   onBrowserHitl(cb: (p: BrowserHitlPush) => void): () => void
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——

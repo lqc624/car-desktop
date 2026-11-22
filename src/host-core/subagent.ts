@@ -40,6 +40,8 @@ import {
 } from '@lqc123qwe/car-runtime'
 import { parseEventLine } from './model.ts'
 import { fsReadTool } from './tools.ts'
+import { shotReadTool } from './evidence.ts'
+import { parseVisualVerdict, type VisualVerdict } from './visual-verdict.ts'
 import { assertSafeId } from './sessions.ts'
 import { resolveSubagentType } from './subagentTypes.ts'
 import { usageOver } from './session-handle.ts'
@@ -72,6 +74,8 @@ export interface SubagentManagerDeps {
   workspaceId: string
   workspaceRoot: string
   sessionsDir: string
+  /** B-3（D-VB3-1）：userData 目录（shot_read 受管证据读面——visual 判定档子面装配前提） */
+  userDataDir: string
   authzTimeoutMs: number
   parentLog: SessionLog
   parentPolicy: () => SessionPolicy
@@ -97,6 +101,10 @@ export interface SubagentJoinResult {
   steps: number
   summary: string
   summaryTruncated?: boolean
+  /** B-3（D-VB3-1 / §4.8）：visual 判定档——verdict 即视觉门结果（主面禁复判）；判定 fail ≠ 工具执行 fail */
+  verdict?: VisualVerdict
+  /** visual 型末条 assistant 未按契约解析（fail-visible 呈现——叙事 warn + 本键标注，禁静默吞） */
+  verdictUnparsed?: true
 }
 
 interface ChildEntry {
@@ -235,6 +243,10 @@ export class SubagentManager {
         specDefs.push(fsReadTool(this.deps.workspaceRoot, this.deps.fileSecurity ?? undefined))
       } else if (name === 'run_code') {
         // run_code 定义延后（child 建好后绑 REPL 实例——见下）
+      } else if (name === 'shot_read') {
+        // B-3（D-VB3-1）：visual 判定档——受管证据读面（userData/browser-shots；父面不注册，
+        // 禁自看图复判的 toolface 级 enforcement）
+        specDefs.push(shotReadTool(this.deps.userDataDir))
       } else {
         throw new Error(`CAR-E-SUBAGENT-WHITELIST: 白名单条目未接线（${name}）——子面工具定义缺失`)
       }
@@ -323,6 +335,16 @@ export class SubagentManager {
       .join('\n\n')
     const summaryTruncated = raw.length > SUBAGENT_SUMMARY_MAX_CHARS
     const summary = summaryTruncated ? raw.slice(0, SUBAGENT_SUMMARY_MAX_CHARS) + '…（超长截断，全文见子链）' : raw
+    // B-3（D-VB3-1 / §4.8 判据化协议）：visual 判定档——末条 assistant 按 verdict 契约解析。
+    // 解析失败 = verdictUnparsed（fail-visible：叙事 warn + toolResult 标注，禁静默吞）；
+    // 判定 fail ≠ 工具执行 fail（两态分立——toolResult 仍 ok:true，行面 warn 呈现）。
+    let verdict: VisualVerdict | null = null
+    let verdictUnparsed = false
+    if (child.type === 'visual') {
+      const lastAssistant = [...child.log.events].reverse().find((e) => e.kind === 'assistant' && typeof e.payload === 'string')
+      verdict = parseVisualVerdict(typeof lastAssistant?.payload === 'string' ? lastAssistant.payload : undefined)
+      verdictUnparsed = verdict === null
+    }
     // 子链 usage 汇总事件随 join 落子链（system kind + type 标识——usage kind 会致 usageOver 双计，
     // 计量红线禁重复事实；parentTurnId 归因面）
     if (!child.usageSummarized) {
@@ -348,8 +370,36 @@ export class SubagentManager {
       steps: r.steps,
       summaryChars: summary.length,
     })
+    // B-3：visual 判定档 verdict 随父链叙事落链（§4.8「verdict 落链」——payload.type 先例，
+    // EventKind 零新增；subagent/join 形态字节兼容不动，verdict 走独立 browser/verdict 事件）
+    if (child.type === 'visual') {
+      const passCount = verdict ? verdict.pages.filter((p) => p.verdict === 'pass').length : 0
+      const failCount = verdict ? verdict.pages.length - passCount : 0
+      this.deps.parentLog.append('runtime', 'system', this.deps.parentCurrentTurnId(), {
+        type: 'browser/verdict',
+        subagentId,
+        ...(verdict
+          ? {
+              passCount,
+              failCount,
+              pages: verdict.pages.map((p) => ({ shotId: p.shotId, verdict: p.verdict, issues: p.issues ?? [] })),
+              ...(verdict.summary ? { summary: verdict.summary } : {}),
+            }
+          : {}),
+        ...(verdictUnparsed ? { verdictUnparsed: true } : {}),
+      })
+    }
     child.joined = true
-    return { ok: true, subagentId, reason: r.reason, steps: r.steps, summary, ...(summaryTruncated ? { summaryTruncated: true } : {}) }
+    return {
+      ok: true,
+      subagentId,
+      reason: r.reason,
+      steps: r.steps,
+      summary,
+      ...(summaryTruncated ? { summaryTruncated: true } : {}),
+      ...(verdict ? { verdict } : {}),
+      ...(verdictUnparsed ? { verdictUnparsed: true } : {}),
+    }
   }
 
   kill(subagentId: string): { ok: true; subagentId: string; note: string } {
@@ -400,6 +450,16 @@ export class SubagentManager {
 
   private childAuthorize(child: ChildEntry): (call: { id: string; tool: string; args: Record<string, unknown> }) => Promise<boolean> {
     return async (call) => {
+      // ⓪⁼（0.16.0 / B-3 / D-VB3-1）：shot_read——受管证据读面直判（visual 判定档专属工具；
+      // userData/browser-shots 不经 fileSecurity 规则——出厂 deny 面针对模型 fs 通用面，
+      // 证据读面为受管交接形态〔fileviewer_get_view 同款〕；redact 在工具 run 内承担）
+      if (call.tool === 'shot_read') {
+        child.authz.decideByRule(
+          { authorizationId: `${child.sessionId}:ro-tool:${call.tool}:${call.id}`, actor: 'user', capability: 'fs-read', resource: 'browser-shots（userData/browser-shots 受管证据）' },
+          { decision: 'APPROVED', reason: 'ro-toolface auto-approve（shot_read——visual 判定档受管证据读面）' },
+        )
+        return true
+      }
       const capability: AuthzRequest['capability'] = 'fs-read'
       const resource =
         typeof call.args['path'] === 'string'
@@ -522,7 +582,7 @@ export class SubagentManager {
         properties: {
           task: { type: 'string', description: '子 Agent 要完成的任务（自包含——子链独立上下文，看不到本会话历史）' },
           id: { type: 'string', description: '可选引用 id（join/kill 时定位；缺省自动生成）' },
-          type: { type: 'string', description: '可选类型声明档（0.14.0：readonly=只读扇出缺省档 / ptc=程序化工具调用持久 REPL——未知类型 fail-visible）' },
+          type: { type: 'string', description: '可选类型声明档（0.14.0：readonly=只读扇出缺省档 / ptc=程序化工具调用持久 REPL；0.16.0：visual=视觉验收判定面〔shot_read 证据读面——判据写在 task、末条输出逐页 JSON verdict〕。未知类型 fail-visible）' },
         },
         required: ['task'],
       },

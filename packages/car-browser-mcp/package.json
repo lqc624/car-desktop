@@ -1,0 +1,25 @@
+{
+  "name": "@lqc123qwe/car-browser-mcp",
+  "version": "0.1.0",
+  "description": "CAR browser capability as a stdio MCP server (companion form: drives the CAR desktop controlled browser window over CDP loopback). Authorization responsibility lives with the consuming host.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "car-browser-mcp": "./bin.mjs"
+  },
+  "main": "./src/server.ts",
+  "files": ["src", "bin.mjs", "README.md"],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@lqc123qwe/car-runtime": "^1.27.0"
+  },
+  "scripts": {
+    "test": "node --experimental-transform-types --test --test-reporter=tap \"test/*.spec.ts\""
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

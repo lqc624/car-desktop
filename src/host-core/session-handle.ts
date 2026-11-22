@@ -818,6 +818,16 @@ export class SessionHandle {
       )
       return true
     }
+    // ⓪⁼（0.16.0 / B-3 / D-VB3-1）：browser_shot——页面读语义 + 受管证据落盘（§4.8 视觉验收）。
+    // PNG 字节零进链（叙事仅元数据），落盘限 userData/browser-shots 受管目录（不触碰工作区/系统路径）；
+    // 会话策略「只读」亦放行（读面语义——fileviewer_get_view 同款）。
+    if (call.tool === 'browser_shot') {
+      this.authz.decideByRule(
+        { authorizationId: `${this.sessionId}:ro-tool:${call.tool}:${call.id}`, actor: 'user', capability: 'mcp', resource: 'browser-shot（userData/browser-shots 受管证据）' },
+        { decision: 'APPROVED', reason: 'ro-toolface auto-approve（browser_shot——页面读语义+受管证据落盘，PNG 字节零进链）' },
+      )
+      return true
+    }
     const action = fileActionOf(call.tool)
     // capability 分派：fs 三件按动作（K-FS-3）；MCP 工具 = 'mcp'；browser_* = 'mcp'（Q-B3 同口径——
     // readonly 声明 + 网络轴）；未知工具按最高约束 fs-write（T-22）

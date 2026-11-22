@@ -102,6 +102,8 @@ const bridge: CarBridge = {
   // —— C3-B2：HITL 接管卡动作（前置受控窗口）+ consent 授权记录清除（宿主 revoke） ——
   browserFocus: () => ipcRenderer.invoke(IpcChannel.BrowserFocus),
   browserRevokeGrants: () => ipcRenderer.invoke(IpcChannel.BrowserRevokeGrants),
+  // —— B-3：截图证据清除（main 侧 userData 能力——返回刷新后设置态） ——
+  browserClearEvidence: () => ipcRenderer.invoke(IpcChannel.BrowserClearEvidence),
   // —— T-25：附件面（选择器 = main 侧 dialog；登记/撤销落链） ——
   attachmentPick: () => ipcRenderer.invoke(IpcChannel.AttachmentPick),
   attachmentAdd: (workspaceId, sessionId, paths) => ipcRenderer.invoke(IpcChannel.AttachmentAdd, { workspaceId, sessionId, paths }),

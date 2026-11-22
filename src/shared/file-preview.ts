@@ -2,11 +2,12 @@
  * 文件查看器（T-FV / 原型 fv-mask 复刻）共享纯函数：扩展名分类 + CSV 表格预览解析。
  * 双侧共用（宿主判定读取形态 / 渲染层渲染分支），零依赖。
  * 读取纪律 = fs_read 同管线（宿主侧复用 fsReadTool：二进制拒读 / 256KB 截断 / redact 脱敏——K-FS-4）；
- * binary 类（pdf/xlsx/图片等）不读内容——仅 stat 元信息 + 系统打开（xlsx 不引入解析依赖：npm `xlsx`
- * 包历史 CVE，audit 门风险；csv 原生表格预览）。
+ * binary 类（pdf/xlsx 等）不读内容——仅 stat 元信息 + 系统打开（xlsx 不引入解析依赖：npm `xlsx`
+ * 包历史 CVE，audit 门风险；csv 原生表格预览）；image 类（B-3）读字节 ≤8MB 回 dataUrl 内嵌渲染
+ * （用户预览面非模型面——受管证据目录 carve-out 见宿主 filePreview）。
  */
 
-export type FilePreviewKind = 'text' | 'csv' | 'html' | 'binary'
+export type FilePreviewKind = 'text' | 'csv' | 'html' | 'image' | 'binary'
 
 /** 文本类扩展名（走 fs_read 管线读内容）——查看器口径（比附件 fulltext 面更宽，含 ini/toml/env 等） */
 const TEXT_EXTS = new Set([
@@ -18,6 +19,26 @@ const TEXT_EXTS = new Set([
 
 const CSV_EXTS = new Set(['.csv', '.tsv'])
 const HTML_EXTS = new Set(['.html', '.htm'])
+/**
+ * B-3（D-VB3-3）：图片内嵌预览（栅格类——用户终端唯一仲裁的证据可视面；§4.8 截图证据
+ * FileViewer 渲染）。SVG 不入列（XML 文本可内嵌脚本——预览面不执行脚本的既有口径保守外延）。
+ */
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
+/** 图片预览字节上限（fail-visible——大图走系统打开） */
+export const IMAGE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+}
+
+export function imageMimeOf(name: string): string | null {
+  return IMAGE_MIME[extOf(name)] ?? null
+}
 
 /**
  * 系统打开拒绝面（可执行/脚本——chat 产出路径双击 = 误执行面；查看器仅供预览，
@@ -37,6 +58,7 @@ export function classifyPreviewFile(name: string): FilePreviewKind {
   const ext = extOf(name)
   if (CSV_EXTS.has(ext)) return 'csv'
   if (HTML_EXTS.has(ext)) return 'html'
+  if (IMAGE_EXTS.has(ext)) return 'image'
   if (TEXT_EXTS.has(ext)) return 'text'
   return 'binary'
 }

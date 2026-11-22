@@ -8,7 +8,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { forkInSession, loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
 import {
   IpcChannel,
@@ -25,7 +25,7 @@ import {
   type ToolSourceHotStateDTO,
   type WorkspaceInfo,
 } from '../shared/ipc-contract.ts'
-import { classifyPreviewFile } from '../shared/file-preview.ts'
+import { IMAGE_PREVIEW_MAX_BYTES, classifyPreviewFile, imageMimeOf } from '../shared/file-preview.ts'
 import { memoryPressureOf, EVOLVE_AUTO_PCT, EVOLVE_REVIEW_TIMEOUT_MS, type EvolutionCandidate } from '../shared/memory-evolution.ts'
 import { buildEvolvePrompt, parseEvolveResponse } from './memoryEvolve.ts'
 import {
@@ -254,7 +254,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
   /**
    * 受限预览读取：text/csv/html = fs_read 同管线（hardReject 拒 deny/工作区外、二进制拒读、
    * 256KB 截断、redact 脱敏——用户预览与模型读取同一纪律，不另开旁路）；binary 仅 stat 元信息
-   * （不读内容——pdf/xlsx/图片面）。规则面命中 tier/ruleId 随叙事（informational——拦截已由
+   * （不读内容——pdf/xlsx 面）；image（B-3）读字节 ≤8MB 回 dataUrl（受管证据目录 carve-out
+   * ——用户自阅面非模型面）。规则面命中 tier/ruleId 随叙事（informational——拦截已由
    * fs_read 口径承担）。
    */
   async function filePreview(workspaceId: string, sessionId: string, rawPath: string): Promise<FilePreviewResultDTO> {
@@ -262,6 +263,41 @@ export function createHostService(opts: HostServiceOptions): HostService {
     const kind = classifyPreviewFile(rawPath)
     const decision = fileSecurity.decide('read', rawPath, root)
     const ruleCtx = { tier: decision.tier, ...(decision.rule ? { ruleId: decision.rule.id } : {}) }
+    if (kind === 'image') {
+      // B-3（D-VB3-3）：图片内嵌预览（≤8MB 栅格类——§4.8 截图证据的用户仲裁可视面）。
+      // 受管证据目录 carve-out：userData/browser-shots 在出厂 userData deny 面内，但这是
+      // 用户自阅面非模型面（模型 fs 面不触碰证据目录——shot_read 受管交接承担）；
+      // 其余路径照常走 hardReject（deny/工作区外拒，与 fs_read 同口径）。
+      const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath)
+      const evidenceRoot = resolve(opts.userDataDir, 'browser-shots')
+      const inEvidence = abs === evidenceRoot || abs.startsWith(evidenceRoot + sep)
+      if (!inEvidence) {
+        const msg = fileSecurity.hardReject('read', rawPath, root)
+        if (msg) throw new Error(msg)
+      }
+      const st = statSync(abs) // 不存在 = fail-visible（ENOENT 全文）
+      if (st.isDirectory()) throw new Error(`CAR-E-DESKTOP: 预览目标是目录（${rawPath}）`)
+      if (st.size > IMAGE_PREVIEW_MAX_BYTES) {
+        throw new Error(`CAR-E-DESKTOP: 图片超预览上限（${st.size}B > ${IMAGE_PREVIEW_MAX_BYTES}B——经系统程序打开）`)
+      }
+      const mime = imageMimeOf(rawPath)
+      const logged = fileNarrative(workspaceId, sessionId, 'file/preview', {
+        path: rawPath,
+        kind,
+        bytes: st.size,
+        ...(inEvidence ? { evidenceCarveout: true } : {}),
+        ...ruleCtx,
+      })
+      return {
+        path: abs,
+        kind,
+        size: st.size,
+        mtime: st.mtimeMs,
+        dataUrl: `data:${mime};base64,${readFileSync(abs).toString('base64')}`,
+        logged,
+        ...ruleCtx,
+      }
+    }
     if (kind === 'binary') {
       const abs = isAbsolute(rawPath) ? rawPath : resolve(root, rawPath)
       const st = statSync(abs) // 不存在 = fail-visible（ENOENT 全文）
@@ -903,6 +939,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
         workspaceId,
         workspaceRoot: root,
         sessionsDir: sessionsDirFor(root),
+        // B-3（D-VB3-1）：visual 判定档 shot_read 受管证据读面（userData/browser-shots）
+        userDataDir: opts.userDataDir,
         authzTimeoutMs,
         parentLog: handle.log,
         parentPolicy: () => handle.policy,

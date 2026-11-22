@@ -42,6 +42,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { redact, type SessionLog } from '@lqc123qwe/car-runtime'
+import { appendShotEvidence } from './evidence.ts'
 import type { HostToolDef } from './types.ts'
 
 /** C3 护栏参数（B-1 常量；B-2 随系统设计定标） */
@@ -131,6 +132,22 @@ export interface BrowserReadResult {
   linksCount: number
 }
 
+/** B-3（§4.8 视觉验收）：browser_shot 结果——元数据面（PNG 字节零进链） */
+export interface BrowserShotResult {
+  shotId: string
+  url: string
+  fetchedAt: string
+  sortNote: string
+  missing: string[]
+  title: string | null
+  viewport: { width: number; height: number } | null
+  pngBytes: number
+  textChars: number
+  textTruncated: boolean
+  /** D-B2-8 内容注入分层标注（页面抄录 ≠ 模型生成） */
+  sourceNote: string
+}
+
 export interface BrowserManagerDeps {
   parentLog: SessionLog
   /** userData 目录（target 发现文件 browser-target.json——main 进程写入） */
@@ -212,7 +229,7 @@ export class BrowserTasks {
   }
 
   tools(): HostToolDef[] {
-    return [this.openTool(), this.readTool(), this.actTool()]
+    return [this.openTool(), this.readTool(), this.actTool(), this.shotTool()]
   }
 
   // ── CDP 连接（懒建 + target 发现） ──────────────────────────────────────
@@ -392,6 +409,21 @@ export class BrowserTasks {
         required: ['action'],
       },
       run: async (args) => this.act((args ?? {}) as Record<string, unknown>),
+    }
+  }
+
+  /** B-3（D-VB3-1 / §4.8 视觉验收判据化协议）：browser_shot——页面读语义 + 受管证据落盘
+   *  （authorize ⓪⁼ 直判在 session-handle；落盘走 evidence.ts 受管目录——不经通用 fs 面）。 */
+  private shotTool(): HostToolDef {
+    return {
+      name: 'browser_shot',
+      declaredSideEffect: 'readonly',
+      description:
+        '截取受控浏览器当前页面为 PNG 证据（视口范围），连同截图时刻冻结的文本摘录一并落 CAR 受管证据目录' +
+        '（不触碰工作区与系统路径）。返回 shotId + provenance 四件套；PNG 字节不进审计链。' +
+        '视觉验收判定走 visual 子代理档（shot_read 证据读面）——主面禁自看图复判（§4.8：收到的 verdict 即视觉门结果）。',
+      parameters: { type: 'object', properties: {} },
+      run: async () => this.shot(),
     }
   }
 
@@ -670,6 +702,79 @@ export class BrowserTasks {
       content,
       truncated,
       linksCount: parsed.links ?? 0,
+    }
+  }
+
+  /**
+   * B-3（§4.8）：browser_shot 运行面——页面态评估（url/title/视口/文本摘录截图时刻冻结）→
+   * Page.captureScreenshot → 受管证据落盘（evidence.ts：PNG magic 校验 + sidecar + index）。
+   * 链上叙事仅元数据（页面内容不进链——browser/read 同纪律）；文本摘录过 redact + 256KB。
+   */
+  async shot(): Promise<BrowserShotResult> {
+    const conn = await this.ensureConnWithRecreate()
+    const fetchedAt = new Date().toISOString()
+    // 页面态先取（state 描述即截图时刻的页面——摘录冻结语义）
+    const frame = await conn.send('Runtime.evaluate', {
+      expression:
+        'JSON.stringify({url: location.href, title: document.title ?? null, text: document.body?.innerText ?? null, vw: window.innerWidth, vh: window.innerHeight})',
+      returnByValue: true,
+    })
+    const stateVal = (frame['result'] as { value?: string } | undefined)?.value
+    if (!stateVal) throw new Error('CAR-E-BROWSER-SHOT: 页面态读取为空（evaluate 无返回——页面态异常）')
+    const parsed = JSON.parse(stateVal) as { url?: string; title?: string | null; text?: string | null; vw?: number; vh?: number }
+    const missing: string[] = []
+    if (!parsed.url) missing.push('url')
+    if (parsed.text == null) missing.push('正文摘录')
+    if (parsed.title == null) missing.push('title')
+    const url = parsed.url ?? '(未知)'
+    const title = parsed.title ?? null
+    const viewport =
+      typeof parsed.vw === 'number' && typeof parsed.vh === 'number' ? { width: parsed.vw, height: parsed.vh } : null
+    const raw = parsed.text ?? ''
+    const textTruncated = raw.length > BROWSER_TEXT_CAP
+    const textExcerpt = redact(textTruncated ? raw.slice(0, BROWSER_TEXT_CAP) : raw).redacted
+    // 截图（CDP Page.captureScreenshot——base64 png）
+    const shotFrame = await conn.send('Page.captureScreenshot', { format: 'png' })
+    const data = typeof shotFrame['data'] === 'string' ? String(shotFrame['data']) : ''
+    if (!data) throw new Error('CAR-E-BROWSER-SHOT: 截图返回为空（Page.captureScreenshot 无 data——页面态异常）')
+    let png: Buffer
+    try {
+      png = Buffer.from(data, 'base64')
+    } catch {
+      throw new Error('CAR-E-BROWSER-SHOT: 截图 base64 解码失败（fail-visible）')
+    }
+    const rec = appendShotEvidence(this.deps.userDataDir, png, {
+      url,
+      fetchedAt,
+      sortNote: '视口渲染像素（PNG）+ DOM 顺序文本摘录（截图时刻冻结）',
+      missing,
+      title,
+      capturedAt: fetchedAt,
+      viewport,
+      textExcerpt,
+      textTruncated,
+      pngBytes: png.length,
+    })
+    narrate(this.deps.parentLog, 'browser/shot', {
+      shotId: rec.shotId,
+      url,
+      pngBytes: rec.pngBytes,
+      textChars: textExcerpt.length,
+      textTruncated,
+      ...(viewport ? { viewport } : {}),
+    })
+    return {
+      shotId: rec.shotId,
+      url,
+      fetchedAt,
+      sortNote: '视口渲染像素（PNG）+ DOM 顺序文本摘录（截图时刻冻结）',
+      missing,
+      title,
+      viewport,
+      pngBytes: rec.pngBytes,
+      textChars: textExcerpt.length,
+      textTruncated,
+      sourceNote: '页面证据（受管目录落盘——PNG 字节零进链，判定走 visual 档）',
     }
   }
 }

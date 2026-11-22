@@ -34,6 +34,25 @@ export function browserRow(type: string, p: Record<string, unknown>): BrowserRow
         tone: p['phase'] === 'timeout' ? 'warn' : 'dim',
         text: `接管协议 ${String(p['phase'] ?? '?')}${p['reason'] ? ` · ${String(p['reason'])}` : ''}（browser/hitl 已落链——确定性特征探测非 LLM）`,
       }
+    case 'browser/shot':
+      return {
+        tone: 'dim',
+        text: `页面截图 ${String(p['shotId'] ?? '?')} · ${String(p['pngBytes'] ?? '?')}B${p['textTruncated'] === true ? ' · 摘录 256KB 截断' : ''}（browser/shot 已落链——PNG 字节不进链，判定走 visual 档）`,
+      }
+    case 'browser/verdict': {
+      if (p['verdictUnparsed'] === true) {
+        return {
+          tone: 'warn',
+          text: `视觉验收 verdict 未按契约解析（${String(p['subagentId'] ?? '?')}）——fail-visible，主面禁复判（§4.8）`,
+        }
+      }
+      const pass = Number(p['passCount'] ?? 0)
+      const fail = Number(p['failCount'] ?? 0)
+      return {
+        tone: fail > 0 ? 'warn' : 'dim',
+        text: `视觉验收 verdict · pass ${pass} / fail ${fail}${fail > 0 ? '（判定 fail ≠ 工具执行 fail——两态分立）' : ''}（browser/verdict 已落链——即视觉门结果）`,
+      }
+    }
     default:
       return null
   }

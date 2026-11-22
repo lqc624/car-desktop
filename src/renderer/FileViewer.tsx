@@ -35,6 +35,16 @@ export interface ViewerTarget {
 const baseName = (p: string): string => p.split(/[\\/]/).pop() || p
 
 function PreviewBody({ data, path }: { data: FilePreviewResultDTO; path: string }): ReactElement {
+  if (data.kind === 'image' && data.dataUrl) {
+    return (
+      <div>
+        <img src={data.dataUrl} alt={baseName(path)} style={{ maxWidth: '100%', maxHeight: '70vh', display: 'block', margin: '0 auto' }} />
+        <p className="fv-note" style={{ marginTop: 8, textAlign: 'center' }}>
+          图片内嵌预览 · {formatBytes(data.size)} · {baseName(path)}
+        </p>
+      </div>
+    )
+  }
   if (data.kind === 'binary') {
     return (
       <div className="fv-meta-card">

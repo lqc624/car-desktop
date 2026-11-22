@@ -27,6 +27,12 @@ export const SUBAGENT_TYPES: readonly SubagentTypeSpec[] = [
     toolface: ['fs_read', 'run_code'],
     description: '程序化工具调用（run_code = 持久 REPL——走宿主授权门；程序内子调用逐次过门）',
   },
+  {
+    id: 'visual',
+    toolface: ['shot_read'],
+    description:
+      '视觉验收判定面（B-3/§4.8——只读证据读面 shot_read；判据先行写在 task、末条输出逐页 JSON verdict，主面禁复判）',
+  },
 ] as const
 
 export type SubagentTypeId = (typeof SUBAGENT_TYPES)[number]['id']
