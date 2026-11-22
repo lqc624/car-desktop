@@ -123,11 +123,16 @@ export const IpcChannel = {
   MemoryEvolveDecide: 'memory:evolve-decide',
   /** 进化模式同步（端侧 localStorage 权威 → 宿主 workspace 级内存态；auto = 回合收口检查压力） */
   MemoryEvolveMode: 'memory:evolve-mode',
-  // —— T-MP：个性化设置面（端侧偏好——不落链；应用于新会话快照） ——
-  /** 读当前个性化（toneStyle + customPrompt） */
+  // —— T-MP：个性化设置面（端侧偏好——不落链；实时跟随：改设置后已开会话下一 turn 生效） ——
+  /** 读当前个性化（称呼 + toneStyle + customPrompt + 人格设定） */
   PersonalizationGet: 'personalization:get',
-  /** 部分更新（toneStyle ∈ 档位表 / customPrompt ≤2000——校验 fail-visible） */
+  /** 部分更新（toneStyle ∈ 档位表 / customPrompt ≤2000 / addressName ≤50 / personaText ≤2000——校验 fail-visible） */
   PersonalizationSet: 'personalization:set',
+  // —— WB-2：用户级画像面（userData 级 = 跨工作区；显式开关出厂关 + 预算 fail-visible——D-46 三件套） ——
+  /** 读当前用户级画像（enabled + entries） */
+  UserProfileGet: 'user-profile:get',
+  /** 部分更新（enabled / entries 全量替换并规范化；预算校验 fail-visible） */
+  UserProfileSet: 'user-profile:set',
   // —— C7（AD-2）：后台任务完成接回设置（自动唤醒缺省关 deny-by-default——Q-AD3 用户批） ——
   /** 读接回设置（autoWakeup 缺省 false = 徽标提醒档） */
   BashWakeupGet: 'bashWakeup:get',
@@ -991,7 +996,10 @@ export interface IpcRequestMap {
   [IpcChannel.MemoryEvolveDecide]: { workspaceId: string; sessionId: string; runId: string; cid: string; approve: boolean; feedback?: string }
   [IpcChannel.MemoryEvolveMode]: { workspaceId: string; mode: 'manual' | 'auto' }
   [IpcChannel.PersonalizationGet]: undefined
-  [IpcChannel.PersonalizationSet]: { toneStyle?: string; customPrompt?: string }
+  [IpcChannel.PersonalizationSet]: { toneStyle?: string; customPrompt?: string; addressName?: string; personaText?: string }
+  // WB-2：用户级画像（全局 userData 态——无 workspace 维度；entries 全量替换规范化补 id）
+  [IpcChannel.UserProfileGet]: undefined
+  [IpcChannel.UserProfileSet]: { enabled?: boolean; entries?: Array<{ id?: string; kind: 'profile' | 'convention'; text: string; updatedAt?: number }> }
   // C7（AD-2）：接回设置（全局 userData 态——无 workspace 维度）
   [IpcChannel.BashWakeupGet]: undefined
   [IpcChannel.BashWakeupSet]: { autoWakeup: boolean }
@@ -1098,9 +1106,12 @@ export interface CarBridge {
   memoryEvolveDecide(workspaceId: string, sessionId: string, runId: string, cid: string, approve: boolean, feedback?: string): Promise<MemoryEvolveDecideResultDTO>
   /** T-ME：进化模式同步（端侧偏好 → 宿主 workspace 内存态） */
   memoryEvolveMode(workspaceId: string, mode: 'manual' | 'auto'): Promise<{ ok: true; mode: 'manual' | 'auto' }>
-  /** T-MP：个性化设置（端侧偏好——get 读当前，set 部分更新 fail-visible；应用于新会话） */
-  personalizationGet(): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string }>
-  personalizationSet(patch: { toneStyle?: string; customPrompt?: string }): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string }>
+  /** T-MP：个性化设置（端侧偏好——get 读当前，set 部分更新 fail-visible；实时跟随） */
+  personalizationGet(): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string; addressName: string; personaText: string }>
+  personalizationSet(patch: { toneStyle?: string; customPrompt?: string; addressName?: string; personaText?: string }): Promise<{ version: 1; updatedAt: number; toneStyle: string; customPrompt: string; addressName: string; personaText: string }>
+  /** WB-2：长期记忆（userData 级跨工作区——get 读当前，set 部分更新 fail-visible；实时跟随） */
+  userProfileGet(): Promise<{ version: 1; updatedAt: number; enabled: boolean; entries: Array<{ id: string; kind: 'profile' | 'convention'; text: string; updatedAt: number }> }>
+  userProfileSet(patch: { enabled?: boolean; entries?: Array<{ id?: string; kind: 'profile' | 'convention'; text: string; updatedAt?: number }> }): Promise<{ version: 1; updatedAt: number; enabled: boolean; entries: Array<{ id: string; kind: 'profile' | 'convention'; text: string; updatedAt: number }> }>
   /** T-RW：RepoWiki（get 读 manifest；generate 即时返回 runId；stop 置取消旗标） */
   repoWikiGet(workspaceId: string): Promise<RepoWikiManifestDTO | null>
   repoWikiGenerate(workspaceId: string, sessionId: string): Promise<{ runId: string }>

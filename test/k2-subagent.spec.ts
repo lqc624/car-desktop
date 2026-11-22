@@ -686,3 +686,65 @@ test('K3: 端点覆盖压过 llm.subagent.model——子锚点 = 端点 model（
     svc.dispose()
   }
 })
+
+// ── WB-2P：纪律面继承——spawn 注入子链（指令 + 长期记忆；称呼/人格/风格不进；实时跟随同源） ──
+
+test('K2/WB-2P: spawn 纪律面继承——子链恰一条 discipline 注入 + 改设置后新 spawn 即新规则', async () => {
+  const { root, ws } = makeWorkspace('wb2p')
+  const svc = createHostService({
+    userDataDir: tmpDir('ud-wb2p'),
+    authzTimeoutMs: 120_000,
+    modelFnOverride: scriptedParentModel([
+      { tool: 'subagent_spawn', id: 'call-spawn-wb2p', args: { task: '子任务A：复述纪律', id: 'SA-WB2P' } },
+      { tool: 'subagent_join', id: 'call-join-wb2p', args: { id: 'SA-WB2P' } },
+      { text: '第一轮收口' },
+      { tool: 'subagent_spawn', id: 'call-spawn-wb2p2', args: { task: '子任务B：复述纪律', id: 'SA-WB2P2' } },
+      { tool: 'subagent_join', id: 'call-join-wb2p2', args: { id: 'SA-WB2P2' } },
+      { text: '第二轮收口' },
+    ]),
+    childModelFnOverride: scriptedChildModel({
+      'SA-WB2P': [{ text: '子结论A：纪律已阅' }],
+      'SA-WB2P2': [{ text: '子结论B：纪律已阅' }],
+    }),
+  })
+  const pushes: PushMessage[] = []
+  autoAuthz(svc, pushes)
+  try {
+    const w = await ws(svc)
+    // 纪律面数据：指令 + 长期记忆（enabled）；称呼/人格/风格 = 不进子链的反证面
+    await svc.dispatch('personalization:set', {
+      toneStyle: 'professional',
+      customPrompt: '代码注释用英文',
+      addressName: '水生',
+      personaText: '冷静、有主见',
+    })
+    await svc.dispatch('user-profile:set', { enabled: true, entries: [{ kind: 'convention', text: 'GitHub 克隆走国内镜像' }] })
+    const sess = (await svc.dispatch('session:create', { workspaceId: w.id })) as { sessionId: string }
+    // 第一轮：spawn SA-WB2P（旧指令）
+    await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: '派生子 Agent A 复述纪律' })
+    await waitTurnEnd(svc, w.id, sess.sessionId, (e) => (e.meta as Record<string, unknown>)?.['reason'] === 'completed', 20_000)
+    // 改指令（落在两枚 spawn 之间——实时跟随同源：新 spawn 即新规则）
+    await svc.dispatch('personalization:set', { customPrompt: '注释一律中文' })
+    // 第二轮：spawn SA-WB2P2（新指令）
+    await svc.dispatch('turn:send', { workspaceId: w.id, sessionId: sess.sessionId, text: '派生子 Agent B 复述纪律' })
+    await waitTurnEnd(svc, w.id, sess.sessionId, () => true, 20_000)
+
+    const assertDiscipline = (childId: string, expectCustom: string, notCustom: string) => {
+      const child = chainEvents(svc, w.id, root, childId)
+      const disc = child.filter((e) => e['kind'] === 'system' && (e['meta'] as Record<string, unknown> | null)?.['injection'] === 'discipline')
+      assert.equal(disc.length, 1, childId + ' 子链恰一条 discipline 注入')
+      const text = String(disc[0]!['payload'])
+      assert.ok(text.includes('子任务纪律（继承自用户个性化设置'), childId + ' 纪律头')
+      assert.ok(text.includes('## 指令（用户自定义，须遵循）') && text.includes(expectCustom), childId + ' 指令段继承')
+      assert.ok(text.includes('用户长期记忆（跨工作区') && text.includes('GitHub 克隆走国内镜像'), childId + ' 长期记忆段继承（enabled）')
+      assert.ok(!text.includes(notCustom), childId + ' 不含旧指令（' + notCustom + '）')
+      assert.ok(!text.includes('人格设定'), childId + ' 人格设定不继承')
+      assert.ok(!text.includes('请称呼用户为'), childId + ' 称呼不继承')
+      assert.ok(!text.includes('回复风格：'), childId + ' 回复风格不继承')
+    }
+    assertDiscipline('SA-WB2P', '代码注释用英文', '注释一律中文')
+    assertDiscipline('SA-WB2P2', '注释一律中文', '代码注释用英文')
+  } finally {
+    svc.dispose()
+  }
+})

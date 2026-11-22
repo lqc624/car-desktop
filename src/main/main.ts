@@ -334,6 +334,9 @@ function registerIpc(): void {
   // —— T-MP：个性化设置（宿主 store——端侧偏好不落链） ——
   ipcMain.handle(IpcChannel.PersonalizationGet, () => callHost(IpcChannel.PersonalizationGet))
   ipcMain.handle(IpcChannel.PersonalizationSet, (_event, payload: unknown) => callHost(IpcChannel.PersonalizationSet, payload))
+  // —— WB-2：用户级画像（宿主 store——userData 级跨工作区；显式开关出厂关） ——
+  ipcMain.handle(IpcChannel.UserProfileGet, () => callHost(IpcChannel.UserProfileGet))
+  ipcMain.handle(IpcChannel.UserProfileSet, (_event, payload: unknown) => callHost(IpcChannel.UserProfileSet, payload))
   // —— C7（AD-2）：后台任务完成接回设置（宿主 userData store——main 仅 passthrough） ——
   ipcMain.handle(IpcChannel.BashWakeupGet, () => callHost(IpcChannel.BashWakeupGet))
   ipcMain.handle(IpcChannel.BashWakeupSet, (_event, payload: unknown) => callHost(IpcChannel.BashWakeupSet, payload))
@@ -548,7 +551,7 @@ app.whenReady().then(async () => {
     // （renderer preload 桥 → ipcMain → utilityProcess → host-core → seam 顶层入口）
     try {
       const bridgeOk = await win.webContents.executeJavaScript(
-        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function' && typeof window.car.auditReport === 'function' && typeof window.car.meteringSummary === 'function' && typeof window.car.fileSecurityGet === 'function' && typeof window.car.filePreview === 'function' && typeof window.car.fileShellOpen === 'function' && typeof window.car.killSubagent === 'function' && typeof window.car.bashOutput === 'function' && typeof window.car.memoryEvolve === 'function' && typeof window.car.personalizationGet === 'function' && typeof window.car.repoWikiGet === 'function' && typeof window.car.deployInfo === 'function'",
+        "!!window.car && typeof window.car.probe === 'function' && typeof window.car.sendTurn === 'function' && typeof window.car.onSessionEvent === 'function' && typeof window.car.auditReport === 'function' && typeof window.car.meteringSummary === 'function' && typeof window.car.fileSecurityGet === 'function' && typeof window.car.filePreview === 'function' && typeof window.car.fileShellOpen === 'function' && typeof window.car.killSubagent === 'function' && typeof window.car.bashOutput === 'function' && typeof window.car.memoryEvolve === 'function' && typeof window.car.personalizationGet === 'function' && typeof window.car.userProfileGet === 'function' && typeof window.car.repoWikiGet === 'function' && typeof window.car.deployInfo === 'function'",
       )
       const probe = (await win.webContents.executeJavaScript('window.car.probe()')) as {
         seamVersion?: string

@@ -742,6 +742,14 @@ body {
   border-radius: 6px;
   padding: 8px;
 }
+.mem-input {
+  font: inherit;
+  color: inherit;
+  background: var(--panel, #14171c);
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 6px;
+  padding: 8px;
+}
 .mem-tags {
   font: inherit;
   color: inherit;

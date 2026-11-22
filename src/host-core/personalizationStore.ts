@@ -4,31 +4,51 @@
  * 口径：
  *  - 存储 = `<userData>/personalization.json`；原子写 tmp+rename；损坏回退出厂值并写回（不 fail-open）；
  *  - **不进审计链**（设置本体是端侧偏好；「已应用」这一事实随 persona 注入事件落会话链）；
- *  - 应用于新会话（创建时快照）——set 不影响已开会话；
- *  - 校验 fail-visible：toneStyle ∈ TONE_STYLES 枚举 / customPrompt ≤2000 字符。
+ *  - 实时跟随（WB-2P）——sendTurn 每轮读本 store 渲染对账，改设置后已开会话下一 turn 生效；
+ *  - 校验 fail-visible：toneStyle ∈ TONE_STYLES 枚举 / customPrompt ≤2000 / addressName ≤50 /
+ *    personaText ≤2000 字符；addressName/personaText 为后增字段（2026-11-22 WorkBuddy 面板对照批）
+ *    ——旧文件缺字段 = 出厂 ''（向后兼容），在场但类型错 = fail-visible。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { isToneStyleId, PERSONA_PROMPT_MAX_CHARS, type PersonalizationState, type ToneStyleId } from '../shared/personalization.ts'
+import {
+  ADDRESS_NAME_MAX_CHARS,
+  PERSONA_PROMPT_MAX_CHARS,
+  PERSONA_TEXT_MAX_CHARS,
+  isToneStyleId,
+  type PersonalizationState,
+  type ToneStyleId,
+} from '../shared/personalization.ts'
 
 export interface PersonalizationSettings {
   version: 1
   updatedAt: number
   toneStyle: ToneStyleId
   customPrompt: string
+  addressName: string
+  personaText: string
 }
 
 export function factoryPersonalization(): PersonalizationSettings {
-  return { version: 1, updatedAt: Date.now(), toneStyle: 'default', customPrompt: '' }
+  return { version: 1, updatedAt: Date.now(), toneStyle: 'default', customPrompt: '', addressName: '', personaText: '' }
 }
 
 export interface PersonalizationStore {
   get(): PersonalizationSettings
   /** 部分更新（patch 合并；校验 fail-visible；返回规范态） */
   set(patch: unknown): PersonalizationSettings
-  /** 规范化的个性化状态（store 超集 → 注入面二元组） */
+  /** 规范化的个性化状态（store 超集 → 注入面四元组） */
   state(): PersonalizationState
   reset(): PersonalizationSettings
+}
+
+/** 字符串字段规范化：在场必须 string（fail-visible）；缺省 = ''（旧文件向后兼容） */
+function strField(p: Record<string, unknown>, key: string, max: number, label: string): string {
+  const v = p[key]
+  if (v === undefined) return ''
+  if (typeof v !== 'string') throw new Error(`CAR-E-DESKTOP: ${label} 必须为 string`)
+  if (v.length > max) throw new Error(`CAR-E-DESKTOP: ${label} 超长（${v.length} > ${max} 字符）`)
+  return v
 }
 
 export function createPersonalizationStore(userDataDir: string): PersonalizationStore {
@@ -54,6 +74,8 @@ export function createPersonalizationStore(userDataDir: string): Personalization
       updatedAt: typeof p['updatedAt'] === 'number' ? p['updatedAt'] : Date.now(),
       toneStyle: p['toneStyle'] as ToneStyleId,
       customPrompt: custom,
+      addressName: strField(p, 'addressName', ADDRESS_NAME_MAX_CHARS, 'addressName'),
+      personaText: strField(p, 'personaText', PERSONA_TEXT_MAX_CHARS, 'personaText'),
     }
   }
   const load = (): PersonalizationSettings => {
@@ -74,12 +96,19 @@ export function createPersonalizationStore(userDataDir: string): Personalization
         ...current,
         ...(p['toneStyle'] !== undefined ? { toneStyle: p['toneStyle'] as ToneStyleId } : {}),
         ...(p['customPrompt'] !== undefined ? { customPrompt: p['customPrompt'] as string } : {}),
+        ...(p['addressName'] !== undefined ? { addressName: p['addressName'] as string } : {}),
+        ...(p['personaText'] !== undefined ? { personaText: p['personaText'] as string } : {}),
         updatedAt: Date.now(),
       }
       current = persist(validate(merged))
       return current
     },
-    state: () => ({ toneStyle: current.toneStyle, customPrompt: current.customPrompt }),
+    state: () => ({
+      toneStyle: current.toneStyle,
+      customPrompt: current.customPrompt,
+      addressName: current.addressName,
+      personaText: current.personaText,
+    }),
     reset() {
       current = persist(factoryPersonalization())
       return current

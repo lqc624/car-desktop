@@ -127,6 +127,9 @@ const bridge: CarBridge = {
   // —— T-MP：个性化设置（端侧偏好——应用于新会话快照） ——
   personalizationGet: () => ipcRenderer.invoke(IpcChannel.PersonalizationGet),
   personalizationSet: (patch) => ipcRenderer.invoke(IpcChannel.PersonalizationSet, patch),
+  // —— WB-2：用户级画像（userData 级跨工作区——显式开关出厂关；应用于新会话快照） ——
+  userProfileGet: () => ipcRenderer.invoke(IpcChannel.UserProfileGet),
+  userProfileSet: (patch) => ipcRenderer.invoke(IpcChannel.UserProfileSet, patch),
   // —— T-RW：RepoWiki（生成进度经 onRepoWiki 订阅——workspaceId 过滤） ——
   repoWikiGet: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiGet, { workspaceId }),
   repoWikiGenerate: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.RepoWikiGenerate, { workspaceId, sessionId }),

@@ -81,6 +81,9 @@ export interface SubagentManagerDeps {
   parentPolicy: () => SessionPolicy
   parentCurrentTurnId: () => string
   parentModel: () => string | null
+  /** WB-2P：纪律面继承（spawn 注入子链首轮——指令 + 长期记忆 enabled 条目；称呼/人格/风格
+   *  不继承——子代理不直接面对用户。service 注入即时渲染闭包（实时跟随同源）；缺省 = 零注入） */
+  discipline?: () => string
   /** K3（D-K2-2 / 内核 1.16.0）：car.config `llm.subagent` 三键——model 覆盖（池/端点压过由 service 裁决后传 undefined）/ 护栏上限（缺省 = Q-A3 常量） */
   subagent?: SubagentConfig
   fileSecurity: FileSecurityEngine | null
@@ -235,6 +238,12 @@ export class SubagentManager {
       whitelist: [...spec.toolface],
     })
     log.append('user', 'user', 'T1', task)
+    // WB-2P（用户裁决 2026-11-22）：纪律面继承——指令 + 长期记忆（enabled 条目）以 system 事件
+    // 落子链（注入必落链纪律；紧邻任务上下文）。双源皆空 = 零注入零落链。
+    const discipline = this.deps.discipline?.() ?? ''
+    if (discipline) {
+      log.append('user', 'system', 'T1', discipline, { injection: 'discipline', chars: discipline.length })
+    }
     // 0.14.0（Z-3 / D-QD1-1）：类型声明档装配——spec.toolface → 子面 defs（fs_read 直挂；run_code =
     // bindReplToTool(REPL 实例)）。装配序：child 先建（authz/log 真值）→ ptc 型挂 REPL → runTurn。
     const specDefs: HostToolDef[] = []

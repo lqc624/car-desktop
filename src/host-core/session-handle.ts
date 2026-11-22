@@ -48,6 +48,7 @@ import type { BrowserHitlPayload, BrowserNetGateResult, BrowserTasks } from './b
 import { classifyActRisk, describeActTarget } from './browserTasks.ts'
 import { domainOfUrl, type BrowserGrantsStore } from './browserGrants.ts'
 import { buildPersonaText, type PersonalizationState } from '../shared/personalization.ts'
+import { buildUserProfileText, type UserProfileState } from '../shared/userProfile.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
 
@@ -131,6 +132,8 @@ export interface SessionHandleDeps {
   onTurnClosed?: () => void
   /** T-MP：个性化设置面（service 注入 store.state 闭包——创建时快照；缺省 = 无指令） */
   personalization?: () => PersonalizationState
+  /** WB-2：用户级画像面（service 注入 store.state 闭包——创建时快照；显式开关出厂关 = 零注入） */
+  userProfile?: () => UserProfileState
 }
 
 interface HandleInit {
@@ -189,9 +192,7 @@ export class SessionHandle {
   /** T-FV-2：后台 bash 任务面（attachBashTasks 接线——工具入注册表 + 级联 + 孤儿收割） */
   private bashTasks: BashTaskManager | null = null
   private browserTasks: BrowserTasks | null = null
-  /** T-MP：个性化指令快照（createFresh 取 store / resume 从链恢复——改设置不影响已开会话） */
-  private persona = ''
-  private personaToneStyle = ''
+  // T-MP 快照字段退役（WB-2P 实时跟随——每轮对账 store 渲染文本 vs 链上最后注入，见 sendTurn）
 
   private constructor(init: HandleInit, opts: { log?: SessionLog; turnSeq?: number } = {}) {
     this.sessionId = init.sessionId
@@ -234,11 +235,7 @@ export class SessionHandle {
   static createFresh(init: HandleInit): SessionHandle {
     const h = new SessionHandle(init)
     h.log.append('runtime', 'system', 'session', { type: 'session-start', workspaceId: init.workspaceId })
-    // T-MP：个性化快照（新会话语义——改设置不影响本会话；注入挂 sendTurn 压缩块之后，
-    // 保证「本回合若触发压缩」时注入事件落在压缩边界之后不被折叠）
-    const p = init.deps.personalization?.() ?? { toneStyle: 'default', customPrompt: '' }
-    h.persona = buildPersonaText(p)
-    h.personaToneStyle = p.toneStyle
+    // T-MP：个性化注入挂 sendTurn（WB-2P 实时跟随——每轮对账，无创建时快照）
     return h
   }
 
@@ -258,14 +255,8 @@ export class SessionHandle {
       if (m) maxTurn = Math.max(maxTurn, Number(m[1]))
     }
     const h = new SessionHandle(init, { log, turnSeq: maxTurn })
-    // T-MP：resume 从链恢复个性化快照（不读 store——防 resume 泄漏新设置；旧会话无注入 = 无指令）
-    for (const e of log.events) {
-      if (e.kind !== 'system') continue
-      if ((e.meta as Record<string, unknown> | null)?.['injection'] === 'persona') {
-        h.persona = String(e.payload ?? '')
-        h.personaToneStyle = String((e.meta as Record<string, unknown>)['toneStyle'] ?? '')
-      }
-    }
+    // T-MP：个性化 resume 不再恢复快照（WB-2P 实时跟随——下一 turn 对账 store 渲染文本
+    // vs 链上最后注入，不一致即追加；一致则旧前缀继续生效）
     const report = recoverInterrupted(h.log)
     // T-22：补记报告出面（service 层 open 路径据此落 session/recover 叙事 + 渲染层明示——禁静默补记）
     h.recoveryReport =
@@ -555,13 +546,27 @@ export class SessionHandle {
         console.error('[host] 自动压缩跳过（无可折叠区间）：', err instanceof Error ? err.message : err)
       }
     }
-    // T-MP：个性化指令注入（置于压缩块之后——本回合若触发压缩，注入事件落在边界之后不被折叠；
-    // 不受 opts.memoryInject 门控——persona 是常驻指令不是记忆预算面）
-    if (this.persona && this.chainNeedsPersonaInjection()) {
-      this.log.append('user', 'system', 'system', this.persona, {
+    // T-MP → WB-2P：个性化注入（**实时跟随**语义，用户裁决 2026-11-22）——每轮对账：当前设置
+    // 渲染文本 ≠ 链上最后注入文本 → 追加新注入（落链）；无注入（首轮）或压缩折叠后亦注入。
+    // 快照语义退役——改设置后已开会话下一 turn 即生效，resume 同样跟随最新设置。
+    // 置于压缩块之后（压缩重注/设置变更注入事件都落在压缩边界之后不被折叠）；不受 opts.memoryInject
+    // 门控——persona/长期记忆是常驻指令面不是记忆预算面。
+    const ps = this.deps.personalization?.() ?? { toneStyle: 'default', customPrompt: '', addressName: '', personaText: '' }
+    const personaText = buildPersonaText(ps)
+    if (personaText && this.chainNeedsConstantInjection('persona', personaText)) {
+      this.log.append('user', 'system', 'system', personaText, {
         injection: 'persona',
-        toneStyle: this.personaToneStyle,
-        chars: this.persona.length,
+        toneStyle: ps.toneStyle,
+        chars: personaText.length,
+      })
+    }
+    const up = this.deps.userProfile?.() ?? { enabled: false, entries: [] }
+    const upText = buildUserProfileText(up)
+    if (upText && this.chainNeedsConstantInjection('user-profile', upText)) {
+      this.log.append('user', 'system', 'system', upText, {
+        injection: 'user-profile',
+        count: up.entries.length,
+        chars: upText.length,
       })
     }
     const turnId = 'T' + String(++this.turnSeq)
@@ -581,19 +586,28 @@ export class SessionHandle {
   }
 
   /**
-   * T-MP：persona 注入需求判定——链上无 persona 注入（首轮），或最后一条 persona 注入早于
-   * 最后一条 compact 事件（压缩折叠后重注一次；内核折叠下界 = 首个 system.seq+1，persona
-   * 非首条 system 会被折叠——重注保持风格跨压缩存活）。
+   * T-MP → WB-2P：常驻指令面注入需求判定（**实时跟随**语义，用户裁决 2026-11-22）——
+   * ①链上无该注入（首轮）；②最后一条注入早于最后一条 compact 事件（压缩折叠后重注——内核
+   * 折叠下界 = 首个 system.seq+1，非首条 system 会被折叠，重注保持常驻存活）；③**当前渲染
+   * 文本 ≠ 链上最后注入文本**（设置变更 → 追加新注入——append-only 链上旧注入仍在前缀，
+   * 模型以最近一份为准，与压缩重注既有语义同级）。任一命中 = 注入。
    */
-  private chainNeedsPersonaInjection(): boolean {
-    let lastPersona = -1
+  private chainNeedsConstantInjection(key: 'persona' | 'user-profile', currentText: string): boolean {
+    let lastInjectSeq = -1
+    let lastInjectText: string | null = null
     let lastCompact = -1
     for (const e of this.log.events) {
       if (e.kind !== 'system') continue
-      if ((e.meta as Record<string, unknown> | null)?.['injection'] === 'persona') lastPersona = e.seq
+      const inj = (e.meta as Record<string, unknown> | null)?.['injection']
+      if (inj === key) {
+        lastInjectSeq = e.seq
+        lastInjectText = String(e.payload ?? '')
+      }
       if ((e.payload as Record<string, unknown> | null)?.['type'] === 'compact') lastCompact = e.seq
     }
-    return lastPersona < 0 || (lastCompact >= 0 && lastPersona < lastCompact)
+    if (lastInjectSeq < 0) return true
+    if (lastCompact >= 0 && lastInjectSeq < lastCompact) return true
+    return lastInjectText !== currentText
   }
 
   // ── T-24（PRD C-2/C-5）：能力引用面（引用=prompt 注入，EventKind 零新增） ──

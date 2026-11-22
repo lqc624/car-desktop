@@ -239,10 +239,10 @@ function buildChatItems(events: SessionEventDTO[], busy = false): { items: ChatI
         items.push({ kind: 'line', tone: 'dim', text: `记忆注入 ${String(meta['count'] ?? '?')} 条（${String(meta['chars'] ?? '?')} 字符——loadMemoryForInjection 确定性拼装）` })
         continue
       }
-      // T-MP：个性化指令注入行（快照随会话——压缩重注即新事件）
+      // T-MP：个性化指令注入行（实时跟随——设置变更/压缩重注即新事件，行取最新一条）
       if (meta['injection'] === 'persona') {
         const ts = String(meta['toneStyle'] ?? '')
-        items.push({ kind: 'line', tone: 'dim', text: `回复风格已应用${ts && ts !== 'default' ? `：${ts}` : ''}（persona 注入落链 · ${String(meta['chars'] ?? '?')} 字符——新会话快照，压缩后重注）` })
+        items.push({ kind: 'line', tone: 'dim', text: `回复风格已应用${ts && ts !== 'default' ? `：${ts}` : ''}（persona 注入落链 · ${String(meta['chars'] ?? '?')} 字符——实时跟随，设置变更/压缩后追加）` })
         continue
       }
       if (type === 'session-start') items.push({ kind: 'line', tone: 'dim', text: '会话已创建（session-start 已落链）' })
@@ -922,8 +922,10 @@ export function App() {
   // S6（D-S6-6）：待执行队列（user 事件无对应 turnEnd = 引导排队中）→ 提示条显隐 + ctx-pop 记忆注入行数据
   const pendingCount = items.filter((it) => it.kind === 'msg' && it.role === 'user' && it.pending).length
   const lastInjectionEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'memory')
-  // T-MP：个性化指令注入行（ctx-pop「风格指令」——快照随会话，压缩重注即新事件）
+  // T-MP：个性化指令注入行（ctx-pop「风格指令」——实时跟随，设置变更/压缩重注即新事件）
   const lastPersonaEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'persona')
+  // WB-2：长期记忆注入行（ctx-pop「长期记忆」——跨工作区常驻，同款实时跟随语义）
+  const lastUserProfileEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'user-profile')
   // T-24：能力引用态（chips + cap-menu ✓ 数据源）+ 最近注入行（ctx-pop D-C3 行位真值）
   const activeRefs = activeCapabilityRefs(events)
   const lastCapInjection = [...events]
@@ -1373,8 +1375,14 @@ export function App() {
                 )}
                 {lastPersonaEvent && (
                   <div className="cp-row">
-                    <span>风格指令（persona 注入——新会话快照，压缩后重注）</span>
+                    <span>风格指令（persona 注入——实时跟随，压缩后重注）</span>
                     <b>{String((lastPersonaEvent.meta as Record<string, unknown>)['chars'] ?? '?')} 字符</b>
+                  </div>
+                )}
+                {lastUserProfileEvent && (
+                  <div className="cp-row">
+                    <span>长期记忆（user-profile 注入——跨工作区，实时跟随）</span>
+                    <b>{String((lastUserProfileEvent.meta as Record<string, unknown>)['chars'] ?? '?')} 字符</b>
                   </div>
                 )}
                 {subagentSpawns.length > 0 && (

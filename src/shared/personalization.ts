@@ -1,12 +1,16 @@
 /**
- * T-MP 个性化共享面：回复风格档位 + 指令拼装（双侧共用——宿主 store 校验/注入拼装、渲染层风格网格）。
+ * T-MP 个性化共享面：称呼 + 回复风格档位 + 指令拼装（双侧共用——宿主 store 校验/注入拼装、渲染层风格网格）。
  *
  * 口径：
- *  - **设置存端侧**（userData/personalization.json，不进审计链）；**应用于新会话**（创建时快照，
- *    改设置不影响已开会话——原型语义）；压缩折叠后按快照重注（快照不变，语义不变）；
- *  - 指令文本 = 风格 directive + 用户自定义指令确定性拼装（buildPersonaText）——以 system kind
- *    事件落链（memory 注入同款纪律：注入必落链），内核投影恒以 role:'system' 进每轮请求；
- *  - default 且自定义指令为空 = 无指令（零注入，字节面零痕迹）。
+ *  - **设置存端侧**（userData/personalization.json，不进审计链）；**实时跟随**（WB-2P，用户裁决
+ *    2026-11-22：改设置后已开会话下一 turn 生效——sendTurn 每轮对账链上最后注入）；压缩折叠后重注；
+ *  - 指令文本 = 人格设定 + 称呼 + 风格 directive + 用户自定义指令确定性拼装（buildPersonaText）
+ *    ——以 system kind 事件落链（memory 注入同款纪律：注入必落链），内核投影恒以 role:'system'
+ *    进每轮请求；
+ *  - 全部为空 = 无指令（零注入，字节面零痕迹）；
+ *  - 字段对照 WorkBuddy 个性化面板五项（2026-11-22 本机 ~/.workbuddy 四文件取证）：
+ *    称呼 → USER.md Name（助手对用户的称呼）；人格设定 → SOUL.md（助手基调自由文本，≤2000）；
+ *    回复风格 → toneStyle 八档；指令 → customPrompt；长期记忆 → userProfileStore（WB-2 分立 store）。
  */
 
 export type ToneStyleId = 'default' | 'professional' | 'friendly' | 'direct' | 'creative' | 'efficient' | 'sharp' | 'socratic'
@@ -31,21 +35,36 @@ export const TONE_STYLES: ReadonlyArray<ToneStyle> = [
 ]
 
 export const PERSONA_PROMPT_MAX_CHARS = 2000
+/** 称呼（助手对用户的称呼——对 WorkBuddy USER.md Name 形态） */
+export const ADDRESS_NAME_MAX_CHARS = 50
+/** 人格设定（助手基调自由文本——对 WorkBuddy SOUL.md 形态） */
+export const PERSONA_TEXT_MAX_CHARS = 2000
 
 export interface PersonalizationState {
   toneStyle: ToneStyleId
   customPrompt: string
+  /** 称呼（'' = 不注入） */
+  addressName: string
+  /** 人格设定（'' = 不注入） */
+  personaText: string
 }
 
 export function isToneStyleId(v: unknown): v is ToneStyleId {
   return typeof v === 'string' && TONE_STYLES.some((t) => t.id === v)
 }
 
-/** 确定性拼装：风格 directive + 自定义指令段（default 且空 = ''——零注入） */
+/**
+ * 确定性拼装：人格设定 → 称呼 → 风格 directive → 自定义指令段。
+ * 全部为空 = ''（零注入——字节面零痕迹，与既有 default+空 语义兼容）。
+ */
 export function buildPersonaText(state: PersonalizationState): string {
   const style = TONE_STYLES.find((t) => t.id === state.toneStyle) ?? TONE_STYLES[0]!
+  const persona = state.personaText.trim()
+  const name = state.addressName.trim()
   const custom = state.customPrompt.trim()
   const parts: string[] = []
+  if (persona) parts.push(`人格设定（助手基调，长期有效）：\n${persona}`)
+  if (name) parts.push(`对用户的称呼：请称呼用户为「${name}」。`)
   if (style.directive) parts.push(style.directive)
   if (custom) parts.push(`用户附加指令（优先级高于风格设定）：\n${custom}`)
   return parts.join('\n\n')

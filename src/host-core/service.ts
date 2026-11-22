@@ -80,6 +80,8 @@ import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurit
 import { createFileSecurityStore } from './fileSecurityStore.ts'
 import { createSecuritySettingsStore, type SessionPolicy } from './securitySettingsStore.ts'
 import { createPersonalizationStore } from './personalizationStore.ts'
+import { createUserProfileStore } from './userProfileStore.ts'
+import { buildDisciplineText } from '../shared/userProfile.ts'
 import { createBackupStore } from './backupStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 
@@ -131,6 +133,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
   const securitySettings = createSecuritySettingsStore(opts.userDataDir)
   // T-MP：个性化设置（端侧偏好——不进审计链；会话创建时快照注入）
   const personalizationStore = createPersonalizationStore(opts.userDataDir)
+  // WB-2：用户级画像（userData 级 = 跨工作区；显式开关出厂关 + 预算 fail-visible——会话创建时快照注入）
+  const userProfileStore = createUserProfileStore(opts.userDataDir)
   const backup = createBackupStore(opts.userDataDir, () => securitySettings.get().autoBackup)
   // 价目 Provider（S3-S5 / R-D5 两模式）：本地模式 = null Provider（金额「价目未同步」禁 0）；
   // 平台价目同步可用后由装配方注入实现（接口面预留）
@@ -844,6 +848,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
       onTurnClosed: () => onTurnClosedFor(workspaceId, sessionId),
       // T-MP：个性化设置面（创建时快照——store.state 闭包即时读）
       personalization: () => personalizationStore.state(),
+      // WB-2：用户级画像面（创建时快照——store.state 闭包即时读；显式开关出厂关）
+      userProfile: () => userProfileStore.state(),
     }
   }
 
@@ -995,6 +1001,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
         parentPolicy: () => handle.policy,
         parentCurrentTurnId: () => handle.currentTurnId(),
         parentModel: () => handle.sessionModel,
+        // WB-2P：纪律面继承（spawn 时即时渲染——实时跟随语义同源：改设置后新 spawn 即新规则）
+        discipline: () => buildDisciplineText(personalizationStore.state().customPrompt, userProfileStore.state()),
         subagent: subCfg ? { ...subCfg, model: overrideable ? subCfg.model : undefined } : undefined,
         fileSecurity,
         emitEvent: (sessionId, event) => emit(IpcPushTopic.SessionEvent, { workspaceId, sessionId, event }),
@@ -1589,6 +1597,11 @@ export function createHostService(opts: HostServiceOptions): HostService {
         return personalizationStore.get()
       case IpcChannel.PersonalizationSet:
         return personalizationStore.set(p)
+      // ── WB-2：用户级画像面（端侧偏好——不落链；应用于新会话快照） ──
+      case IpcChannel.UserProfileGet:
+        return userProfileStore.get()
+      case IpcChannel.UserProfileSet:
+        return userProfileStore.set(p)
       // —— C7（AD-2）：后台完成接回设置（自动唤醒缺省关 deny-by-default——Q-AD3 用户批） ——
       case IpcChannel.BashWakeupGet:
         return bashWakeupStore.get()
