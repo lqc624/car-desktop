@@ -39,6 +39,7 @@ import { builtinTools, fileActionOf } from './tools.ts'
 import { mergeToolSources } from './toolSources.ts'
 import type { CapabilityEntry } from './capabilities.ts'
 import type { FileSecurityEngine } from './fileSecurity.ts'
+import type { CommandSecurityEngine } from './commandSecurity.ts'
 import type { BackupStore } from './backupStore.ts'
 import type { SecuritySettings, SessionPolicy } from './securitySettingsStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
@@ -49,6 +50,7 @@ import { classifyActRisk, describeActTarget } from './browserTasks.ts'
 import { domainOfUrl, type BrowserGrantsStore } from './browserGrants.ts'
 import { buildPersonaText, type PersonalizationState } from '../shared/personalization.ts'
 import { buildUserProfileText, type UserProfileState } from '../shared/userProfile.ts'
+import { assembleWikiPageRefText, type RepoWikiBackflowState, type WikiPageContent } from '../shared/repoWikiBackflow.ts'
 
 export type AuthzResponse = 'once' | 'session' | 'deny' | 'cancelled'
 
@@ -110,6 +112,8 @@ export interface SessionHandleDeps {
   userDataDir?: string
   /** 文件安全引擎（S3-S2；service 装配单例——规则面 > grant 面 > 人审门 编排入口） */
   fileSecurity?: FileSecurityEngine
+  /** 命令安全引擎（WB-5 v0.19 C2；service 装配单例——authorize ⓪⁴ bash_run 命令内容面） */
+  commandSecurity?: CommandSecurityEngine
   /** 安全设置读取（S3-S3：新建会话默认策略 + 备份开关/上限即时读） */
   securitySettings?: () => SecuritySettings
   /** 自动备份存储（S3-S3：先保后变；开关与配额经 securitySettings 即时生效） */
@@ -134,6 +138,11 @@ export interface SessionHandleDeps {
   personalization?: () => PersonalizationState
   /** WB-2：用户级画像面（service 注入 store.state 闭包——创建时快照；显式开关出厂关 = 零注入） */
   userProfile?: () => UserProfileState
+  /** RW-2（v0.19 C1）：RepoWiki 知识回流面（service 注入闭包——开关缺省关 = null 零注入；
+   *  开启 = 00 总览页定长注入态，页缺失 = null） */
+  repoWikiBackflow?: () => RepoWikiBackflowState | null
+  /** RW-2：RepoWiki 页面读取面（@页面引用 add 校验 + 每轮 inject 装配数据源；页缺失 = null） */
+  loadWikiPage?: (pageId: string) => WikiPageContent | null
 }
 
 interface HandleInit {
@@ -174,8 +183,12 @@ export class SessionHandle {
   private readonly store: SessionFileStore
   private readonly authz: AuthzService
   private readonly fileSecurity: FileSecurityEngine | null
+  private readonly commandSecurity: CommandSecurityEngine | null
   private readonly mcpToolUrl: Map<string, string> | null
   private readonly grants = new Set<string>()
+  /** WB-5：命令安全会话级规则豁免集（ask 命令人审 'session' 决议 → 规则 id 记忆——不写工具级
+   *  grant，防一豁免放行全部命令；handle 生命周期内存态，会话关闭即失效） */
+  private readonly commandGrants = new Set<string>()
   /** 模型可见工具面（活引用）：attachRuntimeModel 以此为 toolDefs——attachSubagents 后置 push
    *  对每请求可见（R-DRILL-1：此前生产快照分叉致真模型看不见编排三工具）。
    *  C3（WB-1）：readonly 策略 = 本数组**原位裁剪**写声明工具（setPolicy 时 splice/rebuild——
@@ -223,6 +236,7 @@ export class SessionHandle {
     this.applyToolFaceTrim()
     this.mcpToolUrl = init.deps.mcpToolUrl ?? null
     this.fileSecurity = init.deps.fileSecurity ?? null
+    this.commandSecurity = init.deps.commandSecurity ?? null
     this.authz = new AuthzService({ log: this.log, timeoutMs: init.deps.authzTimeoutMs })
     // 序 = 先落盘（fsync，fail-fast 保留）后推送（emit 永不 throw——推送失败不破坏落链）
     this.log.attachSink((line) => {
@@ -505,11 +519,14 @@ export class SessionHandle {
     // **置于 busy=true 之前**：throw 时 turn 未开、busy 未置（S6M-4 死锁形态防线不动）。
     // T-24（C-5）：能力引用注入先行——返回实际字符数，记忆面按合并预算的剩余额度装载。
     const capabilityChars = this.injectCapabilityRefs()
-    // T-25（C-3/C-5）：附件全文注入次之（fulltext 态未注入者）——路径登记形态不注入（fs_read 按需读）。
-    const attachmentChars = this.injectAttachments((this.deps.memoryBudgetChars ?? 8000) - capabilityChars)
+    // RW-2（v0.19 C1）：wiki 页面引用注入次之（ref-state 机制 wiki-page 家族——显式引用形态，
+    // 与能力引用共享合并预算 fail-visible；超限禁静默截断）。
+    const wikiChars = this.injectWikiPageRefs((this.deps.memoryBudgetChars ?? 8000) - capabilityChars)
+    // T-25（C-3/C-5）：附件全文注入再次（fulltext 态未注入者）——路径登记形态不注入（fs_read 按需读）。
+    const attachmentChars = this.injectAttachments((this.deps.memoryBudgetChars ?? 8000) - capabilityChars - wikiChars)
     if (opts.memoryInject && this.deps.memoryStore) {
       const budget = this.deps.memoryBudgetChars ?? 8000
-      const pool = budget - capabilityChars - attachmentChars
+      const pool = budget - capabilityChars - wikiChars - attachmentChars
       if (!this.chainHasMemoryInjection()) {
         const idx = buildMemoryIndex(this.deps.memoryStore, { budgetChars: pool })
         if (idx.count > 0) {
@@ -569,6 +586,21 @@ export class SessionHandle {
         chars: upText.length,
       })
     }
+    // RW-2（v0.19 C1）：RepoWiki 知识回流总览注入（**固定摘要**形态——D-46 修订版红线：显式开关
+    // 缺省关 + 固定注入 + 落链，非召回式）。置于 persona 同位（压缩块之后、记忆预算门外——常驻
+    // 面语义）；三判据实时跟随（开关开 = 首轮/压缩后/页文本变 → 注入；关 = 零新增行——旧行
+    // append-only 留痕，压缩折叠后自然出上下文）；sha256 provenance 落 meta（LF-1 回执自含同族）。
+    const rw = this.deps.repoWikiBackflow?.() ?? null
+    if (rw && rw.text && this.chainNeedsConstantInjection('repo-wiki', rw.text)) {
+      this.log.append('user', 'system', 'system', rw.text, {
+        injection: 'repo-wiki',
+        wsId: rw.wsId,
+        pageId: rw.pageId,
+        pageSha256: rw.pageSha256,
+        chars: rw.bytes,
+        truncated: rw.truncated,
+      })
+    }
     const turnId = 'T' + String(++this.turnSeq)
     this.currentTurnIdValue = turnId
     this.log.append('user', 'user', turnId, text)
@@ -592,7 +624,7 @@ export class SessionHandle {
    * 文本 ≠ 链上最后注入文本**（设置变更 → 追加新注入——append-only 链上旧注入仍在前缀，
    * 模型以最近一份为准，与压缩重注既有语义同级）。任一命中 = 注入。
    */
-  private chainNeedsConstantInjection(key: 'persona' | 'user-profile', currentText: string): boolean {
+  private chainNeedsConstantInjection(key: 'persona' | 'user-profile' | 'repo-wiki', currentText: string): boolean {
     let lastInjectSeq = -1
     let lastInjectText: string | null = null
     let lastCompact = -1
@@ -688,6 +720,89 @@ export class SessionHandle {
     })
     if (warnings.length) console.error('[host] 能力引用注入告警：', warnings.join('; '))
     return chars
+  }
+
+  // ── RW-2（v0.19 C1）：RepoWiki 页面引用面（ref-state 机制 wiki-page 家族——add/remove 补偿
+  //    事件 + 每轮 inject 扫描；capability 家族同构同预算。**显式引用**形态：用户选中即落链，
+  //    零自动召回——D-46 修订版「固定摘要 + 显式引用」口径） ──
+
+  /** 当轮活跃 wiki 页面引用集（meta.injection==='wiki-page' 的 add/remove 链序收敛——refId = wiki:<pageId>） */
+  private activeWikiPageRefs(): string[] {
+    const state = new Map<string, boolean>()
+    for (const e of this.log.events) {
+      if (e.kind !== 'system') continue
+      const meta = e.meta as Record<string, unknown> | null
+      if (!meta || meta['injection'] !== 'wiki-page') continue
+      if (meta['op'] !== 'add' && meta['op'] !== 'remove') continue
+      state.set(String(meta['refId']), meta['op'] === 'add')
+    }
+    return [...state.entries()].filter(([, on]) => on).map(([id]) => id)
+  }
+
+  /** 页面引用（选中即落链 add；重复引用幂等；页缺失 fail-visible） */
+  wikiPageRefAdd(pageId: string): void {
+    const refId = `wiki:${pageId}`
+    if (this.activeWikiPageRefs().includes(refId)) return
+    const page = this.deps.loadWikiPage?.(pageId)
+    if (!page) throw new Error(`CAR-E-DESKTOP: RepoWiki 页面不存在（${pageId}）——先在本工作区生成 RepoWiki`)
+    this.log.append('user', 'system', 'system', page.title, { injection: 'wiki-page', refId, op: 'add' })
+  }
+
+  /** 撤销页面引用（remove 补偿事件落链——下一 turn 注入集不再含该页） */
+  wikiPageRefRemove(pageId: string): void {
+    const refId = `wiki:${pageId}`
+    if (!this.activeWikiPageRefs().includes(refId)) {
+      throw new Error(`CAR-E-DESKTOP: 页面引用不存在或已撤销（${pageId}）`)
+    }
+    this.log.append('user', 'system', 'system', refId, { injection: 'wiki-page', refId, op: 'remove' })
+  }
+
+  /**
+   * turn 装配注入（sendTurn 挂载点）：活跃页面引用集与上一注入行（refs+文本）有变 → 渲染页面
+   * 文本 append system ctx 行（meta.op='inject'，单页上限头截断 truncated 明示）。
+   * 返回注入字符数（与能力引用/附件/记忆合并预算——超限 fail-visible，禁静默截断）。
+   */
+  private injectWikiPageRefs(budgetChars: number): number {
+    if (!this.deps.loadWikiPage) return 0
+    const activeIds = this.activeWikiPageRefs()
+    if (!activeIds.length) return 0
+    const last = [...this.log.events]
+      .reverse()
+      .find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'wiki-page' && (e.meta as Record<string, unknown>)['op'] === 'inject')
+    const parts: string[] = []
+    const warnings: string[] = []
+    let anyTruncated = false
+    for (const refId of activeIds) {
+      const pageId = refId.slice('wiki:'.length)
+      const page = this.deps.loadWikiPage(pageId)
+      if (!page) {
+        warnings.push(`引用页面不可得（${pageId}）——本轮跳过（页面已删除或 RepoWiki 未生成）`)
+        continue
+      }
+      const a = assembleWikiPageRefText(page)
+      if (a.truncated) anyTruncated = true
+      parts.push(a.text)
+    }
+    const rendered = parts.join('\n\n---\n\n')
+    const refsChanged = !last || JSON.stringify((last.meta as Record<string, unknown>)['refs']) !== JSON.stringify(activeIds)
+    const textChanged = !last || String(last.payload ?? '') !== rendered
+    if (!refsChanged && !textChanged) return 0
+    if (rendered.length > budgetChars) {
+      throw new Error(
+        `CAR-E-MEM-BUDGET: RepoWiki 页面引用注入超合并预算（${rendered.length} > ${budgetChars} 字符——记忆+引用+附件共享上下文预算，fail-visible 禁静默截断）`,
+      )
+    }
+    this.log.append('user', 'system', 'system', rendered, {
+      injection: 'wiki-page',
+      op: 'inject',
+      refs: activeIds,
+      count: parts.length,
+      chars: rendered.length,
+      ...(anyTruncated ? { truncated: true } : {}),
+      ...(warnings.length ? { warnings } : {}),
+    })
+    if (warnings.length) console.error('[host] wiki 页面引用注入告警：', warnings.join('; '))
+    return rendered.length
   }
 
   // ── T-25（PRD C-3）：附件面（file/attach 恒落链——文本全文注入 / 路径登记双形态） ──
@@ -868,6 +983,8 @@ export class SessionHandle {
    * ①′会话策略「会话内放行」后置于规则面（拒绝红线仍先决）——逐次 decideBySessionPolicy 落链；
    * ②会话 grant 面（按工具——平台 sessionGrants 同口径）：命中走 decideBySessionPolicy 幂等落链；
    * ③人审门（现行 S2 流程原样）：decideByUser 120s 超时默认拒绝，三档 once/session/deny。
+   * ⓪⁴命令安全规则面（WB-5：bash_run 命令内容首中即停——deny 硬拒 / allow 直判 / ask 恒走人审门
+   *   且会话策略与 grants 不短路；'session' 决议记规则 id 豁免）；
    * capability 按工具分派（K-FS-3：fs-read/fs-write/fs-delete；未知工具按最高约束 fs-write——T-22）。
    */
   private readonly authorize = async (call: { id: string; tool: string; args: Record<string, unknown> }): Promise<boolean> => {
@@ -978,6 +1095,50 @@ export class SessionHandle {
         `${this.sessionId}:${this.currentTurnIdValue}:browser-act-risk:${call.id}`,
       )
     }
+    // ⓪⁴（v0.19 / WB-5）：bash_run 命令安全规则面——命令内容首中即停（deny 硬拒 / allow 直判 /
+    // ask 恒走人审门，「会话内放行」策略与 grants 不短路——高危命令逐条对质）；ask 的 'session'
+    // 决议记规则 id 会话级豁免（不写工具级 grant——防一豁免放行全部命令）；未命中 = 零开销直落
+    // 后续编排（现行 M3 行为不变）
+    if (call.tool === 'bash_run' && this.commandSecurity) {
+      const command = typeof call.args['command'] === 'string' ? String(call.args['command']) : ''
+      if (command.trim()) {
+        const cd = this.commandSecurity.decide(command)
+        if (cd) {
+          const ruleId = cd.rule.id
+          if (cd.tier === 'deny') {
+            this.authz.decideByRule(
+              { authorizationId: `${this.sessionId}:command-rule:${ruleId}:${call.id}`, actor: 'user', capability, resource: command },
+              { decision: 'DENIED', reason: `command-rule:${ruleId} deny（${cd.rule.note ?? cd.rule.pattern}）` },
+            )
+            return false
+          }
+          if (cd.tier === 'allow') {
+            this.authz.decideByRule(
+              { authorizationId: `${this.sessionId}:command-rule:${ruleId}:${call.id}`, actor: 'user', capability, resource: command },
+              { decision: 'APPROVED', reason: `command-rule:${ruleId} allow（${cd.rule.note ?? cd.rule.pattern}）` },
+            )
+            return true
+          }
+          // ask：会话级规则豁免命中 → decideBySessionPolicy 幂等落链放行；否则恒走人审门
+          if (this.commandGrants.has(ruleId)) {
+            this.authz.decideBySessionPolicy({
+              authorizationId: `${this.sessionId}:command-grant:${ruleId}:${call.id}`,
+              actor: 'user',
+              capability,
+              resource: command,
+            })
+            return true
+          }
+          return await this.humanGate(
+            call,
+            capability,
+            command,
+            `${this.sessionId}:${this.currentTurnIdValue}:command-rule:${ruleId}:${call.id}`,
+            () => this.commandGrants.add(ruleId),
+          )
+        }
+      }
+    }
     // ①规则面
     if (action && this.fileSecurity) {
       const d = this.fileSecurity.decide(action, call.args['path'], this.workspaceRoot)
@@ -1071,6 +1232,8 @@ export class SessionHandle {
     capability: AuthzRequest['capability'],
     resource: string,
     authorizationId: string,
+    /** WB-5：'session' 决议的授予面覆盖（命令安全 = 规则 id 豁免——不写工具级 grant；缺省 = 既有行为） */
+    grantOnSession?: () => void,
   ): Promise<boolean> {
     // 0.12.0（D-V12-3）：holder 形态——闭包 let 变量在 decideByUser await 边界的 CFA 窄化会把外层读点
     // 判成 never（属性读不受影响）；对象形态实答 = 附注随决策落链（内核 1.25.1，批准/拒绝两档皆可带）
@@ -1091,7 +1254,9 @@ export class SessionHandle {
         })
         answered.v = await this.deps.waitAuthzDecision(this.sessionId, authorizationId)
         if (answered.v.response === 'session') {
-          if (call.tool === 'browser_open') {
+          if (grantOnSession) {
+            grantOnSession()
+          } else if (call.tool === 'browser_open') {
             const url = typeof call.args['url'] === 'string' ? String(call.args['url']) : ''
             const domain = url ? domainOfUrl(url) : null
             if (domain) {

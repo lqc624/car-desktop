@@ -69,6 +69,15 @@ export const IpcChannel = {
   CapabilityDelete: 'capability:delete',
   /** 引用条目（选中即落链 add——meta.injection:'capability'，EventKind 零新增） */
   CapabilityRefAdd: 'capability:ref-add',
+  // —— RW-2（v0.19 C1）：RepoWiki 知识回流开关（per-workspace）+ @页面引用 ——
+  /** 读回流开关（per-workspace；缺省关 = 零注入零落链） */
+  RepoWikiSettingsGet: 'repoWikiSettings:get',
+  /** 设回流开关（显式开关——D-46 修订版口径；改设置已开会话下一 turn 生效） */
+  RepoWikiSettingsSet: 'repoWikiSettings:set',
+  /** 页面引用落链 add（选中即落——显式引用形态，零自动召回） */
+  WikiPageRefAdd: 'wikiPageRef:add',
+  /** 页面引用撤销（remove 补偿事件落链） */
+  WikiPageRefRemove: 'wikiPageRef:remove',
   /** 撤销引用（remove 补偿事件落链） */
   CapabilityRefRemove: 'capability:ref-remove',
   /** SKILL.md 导入：系统文件选择器（多选 .md；用户取消 = null；main 侧 dialog，同 AttachmentPick 先例） */
@@ -157,6 +166,13 @@ export const IpcChannel = {
   FileSecuritySet: 'fileSecurity:set',
   /** 重置为出厂预设 */
   FileSecurityReset: 'fileSecurity:reset',
+  // —— WB-5（v0.19 C2）：命令安全规则面（bash_run 命令内容三档清单） ——
+  /** 读当前命令规则表（出厂 deny 6 + ask 14 / 用户规则） */
+  CommandSecurityGet: 'commandSecurity:get',
+  /** 全量规则表替换（宿主校验 fail-visible；regex 编译失败当场拒绝） */
+  CommandSecuritySet: 'commandSecurity:set',
+  /** 重置为出厂预设 */
+  CommandSecurityReset: 'commandSecurity:reset',
   // —— S3-S3：安全中心设置 + 会话策略 + 备份目录 ——
   /** 安全中心设置读（默认策略 + 备份开关/上限） */
   SecuritySettingsGet: 'securitySettings:get',
@@ -656,6 +672,14 @@ export interface RepoWikiPageDTO {
   md?: string
 }
 
+/** RW-2（v0.19 C1）：知识回流开关态（per-workspace；缺省关 = 零注入零落链） */
+export interface RepoWikiSettingsDTO {
+  workspaceId: string
+  version: number
+  updatedAt: number
+  backflowEnabled: boolean
+}
+
 /** T-DY：GitHub Releases 发布行（真拉取规范化——draft 不出表） */
 export interface DeployReleaseDTO {
   tag: string
@@ -779,6 +803,31 @@ export interface NetworkRuleDTO {
 
 export interface FileSecuritySetRequest {
   rules: FileRuleDTO[]
+}
+
+// ── WB-5（v0.19 C2）：命令安全规则面（bash_run 命令内容三档清单；fileSecurity 面同构） ──────
+
+export type CommandTierDTO = 'allow' | 'ask' | 'deny'
+export type CommandPatternKindDTO = 'prefix' | 'regex'
+
+export interface CommandRuleDTO {
+  id: string
+  /** prefix = 字面（小写/单空格文本对质）；regex = 无旗标 RegExp 源（haystack 已小写归一） */
+  pattern: string
+  kind: CommandPatternKindDTO
+  tier: CommandTierDTO
+  note?: string
+  preset?: boolean
+}
+
+export interface CommandSecurityState {
+  version: number
+  updatedAt: number
+  rules: CommandRuleDTO[]
+}
+
+export interface CommandSecuritySetRequest {
+  rules: CommandRuleDTO[]
 }
 
 // ── 安全中心设置面（S3-S3；设计：桌面端安全中心设计.md §4/§5） ──────────
@@ -1015,6 +1064,10 @@ export interface IpcRequestMap {
   [IpcChannel.CapabilityDelete]: { workspaceId: string; sessionId: string; id: string }
   [IpcChannel.CapabilityRefAdd]: { workspaceId: string; sessionId: string; refId: string }
   [IpcChannel.CapabilityRefRemove]: { workspaceId: string; sessionId: string; refId: string }
+  [IpcChannel.RepoWikiSettingsGet]: { workspaceId: string }
+  [IpcChannel.RepoWikiSettingsSet]: { workspaceId: string; backflowEnabled: boolean }
+  [IpcChannel.WikiPageRefAdd]: { workspaceId: string; sessionId: string; pageId: string }
+  [IpcChannel.WikiPageRefRemove]: { workspaceId: string; sessionId: string; pageId: string }
   [IpcChannel.CapabilityImportPick]: undefined
   [IpcChannel.CapabilityImport]: { workspaceId: string; sessionId: string; paths: string[] }
   [IpcChannel.CapabilityImportPreview]: { workspaceId: string; sessionId: string; paths: string[] }
@@ -1038,6 +1091,9 @@ export interface IpcRequestMap {
   [IpcChannel.FileSecurityGet]: undefined
   [IpcChannel.FileSecuritySet]: FileSecuritySetRequest
   [IpcChannel.FileSecurityReset]: undefined
+  [IpcChannel.CommandSecurityGet]: undefined
+  [IpcChannel.CommandSecuritySet]: CommandSecuritySetRequest
+  [IpcChannel.CommandSecurityReset]: undefined
   [IpcChannel.SecuritySettingsGet]: undefined
   [IpcChannel.SecuritySettingsSet]: { patch: SecuritySettingsPatch }
   [IpcChannel.SessionSetPolicy]: SessionSetPolicyRequest
@@ -1135,6 +1191,14 @@ export interface CarBridge {
   /** 引用/撤销（选中即落链；撤销 = 补偿事件） */
   capabilityRefAdd(workspaceId: string, sessionId: string, refId: string): Promise<void>
   capabilityRefRemove(workspaceId: string, sessionId: string, refId: string): Promise<void>
+  // —— RW-2（v0.19 C1）：RepoWiki 知识回流开关 + @页面引用 ——
+  /** 读回流开关（per-workspace；缺省关） */
+  repoWikiSettingsGet(workspaceId: string): Promise<RepoWikiSettingsDTO>
+  /** 设回流开关（显式开关；改设置已开会话下一 turn 生效） */
+  repoWikiSettingsSet(workspaceId: string, backflowEnabled: boolean): Promise<RepoWikiSettingsDTO>
+  /** 页面引用/撤销（显式引用形态——选中即落链，零自动召回） */
+  wikiPageRefAdd(workspaceId: string, sessionId: string, pageId: string): Promise<void>
+  wikiPageRefRemove(workspaceId: string, sessionId: string, pageId: string): Promise<void>
   // —— SKILL.md 导入互认（能力库视图导入入口） ——
   /** 系统文件选择器（多选 .md；用户取消 = null） */
   capabilityImportPick(): Promise<string[] | null>
@@ -1179,6 +1243,10 @@ export interface CarBridge {
   fileSecurityGet(): Promise<FileSecurityState>
   fileSecuritySet(payload: { version: number; rules: FileRuleDTO[]; networkRules: NetworkRuleDTO[] }): Promise<FileSecurityState>
   fileSecurityReset(): Promise<FileSecurityState>
+  // —— WB-5（v0.19 C2）：命令安全规则面（安全中心页） ——
+  commandSecurityGet(): Promise<CommandSecurityState>
+  commandSecuritySet(payload: { version: number; rules: CommandRuleDTO[] }): Promise<CommandSecurityState>
+  commandSecurityReset(): Promise<CommandSecurityState>
   // —— S3：安全中心设置（默认策略 + 备份开关/上限） ——
   securitySettingsGet(): Promise<SecuritySettings>
   securitySettingsSet(patch: SecuritySettingsPatch): Promise<SecuritySettings>

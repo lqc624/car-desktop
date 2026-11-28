@@ -6,7 +6,8 @@
  *    内核 SandboxExecutor（seam）= Linux landlock **前台同步面**（ExecResult 一次性返回，无后台
  *    句柄/流式/kill）——不适用后台形态；Windows 本就降级。安全兜底 = M3 授权门（工具
  *    declaredSideEffect='write'：只读策略硬拒 / 默认策略人审门 / 会话内放行 grant 缓存）+
- *    命令安全规则面待立项（原型自标 S4 待接——立项后与命令前缀三档规则配对）；
+ *    命令安全规则面 = WB-5（v0.19 C2 已接：commandSecurity 引擎 deny/ask 三档清单 + authorize ⓪⁴
+ *    确认门；本文件承担执行侧 deny re-check 纵深兜底——原「S4 待接」注记销号）；
  *  - **落链叙事 = 父链 system kind + payload.type**（EventKind 零新增，subagent/* 同款先例）：
  *    `bash/start {taskId, command, cwd}` 先落（孤儿口径同 spawn——崩溃于启动即孤链可收割）；
  *    `bash/exit {taskId, exitCode, durationMs, outputBytes, stopped?}` 进程 close 落；
@@ -23,6 +24,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { redact, type SessionLog } from '@lqc123qwe/car-runtime'
+import type { CommandSecurityEngine } from './commandSecurity.ts'
 import type { HostToolDef } from './types.ts'
 
 /** Q-BT 护栏参数（首版常量；car.config 化 = 后备候选） */
@@ -49,6 +51,9 @@ export interface BashManagerDeps {
   /** C7（AD-2 · Q-AD2）：自然退出回调（stopped = false 才回调——用户终止/收割不触发接回；
    *  宿主聚合缓冲 → steer 引导落链（自动唤醒档）或仅徽标（提醒档）） */
   onTaskComplete?: (t: { taskId: string; exitCode: number | null; outputBytes: number }) => void
+  /** WB-5（v0.19 C2）：命令安全引擎（执行侧 deny re-check 纵深兜底——authorize ⓪⁴ 门拦为主层；
+   *  缺省 = 无引擎不拦（测试形态）） */
+  commandSecurity?: CommandSecurityEngine
 }
 
 interface TaskEntry {
@@ -126,6 +131,10 @@ export class BashTaskManager {
     if (rel.startsWith('..') || isAbsolute(rel)) {
       throw new Error(`CAR-E-DESKTOP: bash_run cwd 越界（${cwdArg}）——仅允许工作区内目录`)
     }
+    // WB-5 执行侧 re-check（tools.ts hardReject 先例——纵深双层：authorize ⓪⁴ 门拦为主层，
+    // 本处兜底直调形态；拒于 bash/start 落链前 = BT-3 零 start 行判据同款）
+    const hard = this.deps.commandSecurity?.hardReject(command)
+    if (hard) throw new Error(hard)
     const taskId = 'BK-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)
     // bash/start 先落链（subagent/spawn 孤儿口径：崩溃于其后 = 孤儿可收割）
     this.deps.parentLog.append('runtime', 'system', 'session', { type: 'bash/start', taskId, command, cwd })

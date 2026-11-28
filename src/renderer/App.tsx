@@ -8,6 +8,7 @@ import type {
   AttachmentRowDTO,
   BrowserHitlPush,
   CapabilityEntryDTO,
+  RepoWikiPageDTO,
   SessionDeltaPush,
   SessionEventDTO,
   SessionEventPush,
@@ -105,6 +106,19 @@ function activeCapabilityRefs(events: SessionEventDTO[]): string[] {
     if (e.kind !== 'system') continue
     const m = e.meta as Record<string, unknown> | null
     if (!m || m['injection'] !== 'capability') continue
+    if (m['op'] !== 'add' && m['op'] !== 'remove') continue
+    state.set(String(m['refId']), m['op'] === 'add')
+  }
+  return [...state.entries()].filter(([, on]) => on).map(([id]) => id)
+}
+
+/** RW-2：当轮活跃 wiki 页面引用集（ref-state wiki-page 家族镜像——refId = wiki:<pageId>） */
+function activeWikiPageRefs(events: SessionEventDTO[]): string[] {
+  const state = new Map<string, boolean>()
+  for (const e of events) {
+    if (e.kind !== 'system') continue
+    const m = e.meta as Record<string, unknown> | null
+    if (!m || m['injection'] !== 'wiki-page') continue
     if (m['op'] !== 'add' && m['op'] !== 'remove') continue
     state.set(String(m['refId']), m['op'] === 'add')
   }
@@ -413,6 +427,8 @@ export function App() {
   const [caps, setCaps] = useState<CapabilityEntryDTO[]>([])
   const [showCapMenu, setShowCapMenu] = useState(false)
   const [capSearch, setCapSearch] = useState('')
+  // RW-2：@菜单 wiki 页面段数据源（当前工作区 manifest——repoWikiGet 现成通道；菜单开时懒加载）
+  const [wikiPages, setWikiPages] = useState<RepoWikiPageDTO[]>([])
   // @提及引用：菜单由输入尾 @query 触发时置位——关闭/选中即剥离触发串（@ 非消息内容）
   const [mentionArmed, setMentionArmed] = useState(false)
   const [policy, setPolicy] = useState<SessionPolicyDTO>('default')
@@ -452,6 +468,22 @@ export function App() {
     },
     [],
   )
+  // RW-2：@菜单 wiki 页面段懒加载（菜单开/工作区切换时拉 manifest——wiki 未生成 = 空清单不阻塞菜单）
+  useEffect(() => {
+    if (!showCapMenu || !selected) return
+    let cancelled = false
+    void window.car
+      .repoWikiGet(selected.id)
+      .then((m) => {
+        if (!cancelled) setWikiPages(m?.pages ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) setWikiPages([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [showCapMenu, selected])
   // 视图 CRUD 后刷新数据面（稳定引用——防 CapabilityView 副作用因闭包身份变化而循环重载）
   const capsChanged = useCallback(() => {
     if (selected) void refreshCaps(selected.id)
@@ -928,11 +960,15 @@ export function App() {
   const lastUserProfileEvent = [...events].reverse().find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'user-profile')
   // T-24：能力引用态（chips + cap-menu ✓ 数据源）+ 最近注入行（ctx-pop D-C3 行位真值）
   const activeRefs = activeCapabilityRefs(events)
+  // RW-2：wiki 页面引用态（@菜单 ✓ + RepoWikiView 引用钮数据源）
+  const activeWikiRefs = activeWikiPageRefs(events)
   const lastCapInjection = [...events]
     .reverse()
     .find((e) => e.kind === 'system' && (e.meta as Record<string, unknown> | null)?.['injection'] === 'capability' && (e.meta as Record<string, unknown>)['op'] === 'inject')
   const capsById = new Map(caps.map((c) => [c.id, c]))
   const filteredCaps = caps.filter((c) => (capSearch.trim() ? (c.name + c.id + (c.tags ?? []).join(' ')).toLowerCase().includes(capSearch.trim().toLowerCase()) : true))
+  // RW-2：wiki 页面段过滤（与能力条目同搜索词——@query 共用）
+  const filteredWikiPages = wikiPages.filter((p) => (capSearch.trim() ? (p.title + p.id).toLowerCase().includes(capSearch.trim().toLowerCase()) : true))
   // T-25：附件态（chips + ctx 行数据源）+ 登记/撤销/选择器
   const attachments = activeAttachments(events)
   const attachFulltextInjected = events
@@ -1043,6 +1079,23 @@ export function App() {
   }
   const pickCap = (id: string): void => {
     void toggleRef(id)
+    setShowCapMenu(false)
+    if (mentionArmed) stripMention()
+    else setCapSearch('')
+  }
+
+  // ── RW-2：@页面引用（wiki-page 家族——选中即落链 add / 撤销落 remove 补偿，与能力引用同落链语义） ──
+  const toggleWikiRef = async (pageId: string): Promise<void> => {
+    if (!selected || !openId) return
+    try {
+      if (activeWikiRefs.includes(`wiki:${pageId}`)) await window.car.wikiPageRefRemove(selected.id, openId, pageId)
+      else await window.car.wikiPageRefAdd(selected.id, openId, pageId)
+    } catch (e) {
+      fail(e)
+    }
+  }
+  const pickWiki = (pageId: string): void => {
+    void toggleWikiRef(pageId)
     setShowCapMenu(false)
     if (mentionArmed) stripMention()
     else setCapSearch('')
@@ -1278,7 +1331,15 @@ export function App() {
       onFail={fail}
     />
         ) : view === 'repowiki' ? (
-          <RepoWikiView workspaces={workspaces} selected={selected} openId={openId} onStatus={setStatus} onFail={fail} />
+          <RepoWikiView
+            workspaces={workspaces}
+            selected={selected}
+            openId={openId}
+            onStatus={setStatus}
+            onFail={fail}
+            wikiActiveRefs={activeWikiRefs}
+            onWikiRefToggle={(pageId) => void toggleWikiRef(pageId)}
+          />
         ) : view === 'deploy' ? (
           <DeployView update={update} probe={probe} onStatus={setStatus} onFail={fail} />
         ) : view === 'caps' ? (
@@ -1787,6 +1848,21 @@ export function App() {
                               {c.status !== 'active' && <small className={`cap-status cap-status-${c.status}`}>（{c.status === 'maintain' ? '维护中' : '已退役'}）</small>}
                             </span>
                             <small className="dim">{c.kind}</small>
+                          </button>
+                        ))}
+                        {/* RW-2：wiki 页面段（显式引用——选中即落链；零自动召回） */}
+                        {filteredWikiPages.length > 0 && (
+                          <div className="mm-sec" style={{ borderTop: '1px solid var(--line, #2a2f3a)', marginTop: 6, paddingTop: 8, marginBottom: 4 }}>
+                            <small className="dim">RepoWiki 页面（{selected?.name ?? ''} · 显式引用）</small>
+                          </div>
+                        )}
+                        {filteredWikiPages.map((p) => (
+                          <button key={'wiki:' + p.id} className="mm-pick" onClick={() => pickWiki(p.id)}>
+                            <span className="mm-check">{activeWikiRefs.includes('wiki:' + p.id) ? '✓' : ''}</span>
+                            <span className="mm-name">
+                              <code className="mono">{p.id}</code> {p.title}
+                            </span>
+                            <small className="dim">wiki</small>
                           </button>
                         ))}
                         <div className="mm-sec" style={{ borderTop: '1px solid var(--line, #2a2f3a)', marginTop: 6, paddingTop: 8 }}>

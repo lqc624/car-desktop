@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { BrowserSettingsDTO, FileRuleDTO, NetworkRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
+import type { BrowserSettingsDTO, CommandRuleDTO, FileRuleDTO, NetworkRuleDTO, SecuritySettings } from '../../shared/ipc-contract'
 
 /**
  * S3-S3 安全中心设置页（对照原型 v0.3；S3-S2/S3-S3 通道消费）：
@@ -23,6 +23,12 @@ export function SecurityView() {
   const [netRules, setNetRules] = useState<NetworkRuleDTO[]>([])
   const [netPattern, setNetPattern] = useState('')
   const [netTier, setNetTier] = useState<'allow' | 'ask' | 'deny'>('ask')
+  // WB-5（v0.19 C2）：命令安全规则（bash_run 命令内容面——deny 硬拒 / ask 确认卡 / allow 直判）
+  const [cmdRules, setCmdRules] = useState<CommandRuleDTO[]>([])
+  const [cmdDirty, setCmdDirty] = useState(false)
+  const [cmdPattern, setCmdPattern] = useState('')
+  const [cmdKind, setCmdKind] = useState<'prefix' | 'regex'>('prefix')
+  const [cmdTier, setCmdTier] = useState<'allow' | 'ask' | 'deny'>('ask')
   // C3-B1：受控浏览器（缺省关 D-V10-2——开关 + 清除面）
   const [browserState, setBrowserState] = useState<BrowserSettingsDTO | null>(null)
   const [browserError, setBrowserError] = useState<string | null>(null)
@@ -88,6 +94,9 @@ export function SecurityView() {
       setRules(st.rules)
       setNetRules(st.networkRules)
       setDirty(false)
+      const cs = await window.car.commandSecurityGet()
+      setCmdRules(cs.rules)
+      setCmdDirty(false)
       setSettings(await window.car.securitySettingsGet())
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -167,6 +176,58 @@ export function SecurityView() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  // —— WB-5（v0.19 C2）：命令安全规则（工作副本 + 显式保存，commandSecurity:set 全量替换） ——
+  const saveCmdRules = async () => {
+    setError(null)
+    setStatus(null)
+    try {
+      const st = await window.car.commandSecuritySet({ version: 1, rules: cmdRules })
+      setCmdRules(st.rules)
+      setCmdDirty(false)
+      setStatus(`命令规则已保存（${st.rules.length} 条·首条命中优先）`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const resetCmdRules = async () => {
+    setError(null)
+    setStatus(null)
+    try {
+      const st = await window.car.commandSecurityReset()
+      setCmdRules(st.rules)
+      setCmdDirty(false)
+      setStatus(`已重置为出厂预设（${st.rules.length} 条）`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const addCmdRule = () => {
+    const p = cmdPattern.trim()
+    if (!p) return
+    setCmdRules((prev) => [{ id: 'cmd-' + Date.now().toString(36), pattern: p, kind: cmdKind, tier: cmdTier }, ...prev])
+    setCmdPattern('')
+    setCmdDirty(true)
+    setStatus('已添加到顶部（未命中命令保持现行授权编排；记得保存）')
+  }
+
+  const moveCmd = (i: number, dir: -1 | 1) => {
+    setCmdRules((prev) => {
+      const j = i + dir
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
+    setCmdDirty(true)
+  }
+
+  const removeCmd = (i: number) => {
+    setCmdRules((prev) => prev.filter((_, idx) => idx !== i))
+    setCmdDirty(true)
   }
 
   return (
@@ -274,6 +335,74 @@ export function SecurityView() {
           </div>
         ))}
       </div>
+      <h3>命令安全规则（bash_run · WB-5）</h3>
+      <div className="row wrap">
+        <input
+          className="grow mono"
+          placeholder="prefix = 字面（如 rm -rf）；regex = 表达式（如 remove-item\s+[^&|;]*-recurse）"
+          value={cmdPattern}
+          onChange={(e) => setCmdPattern(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && cmdPattern.trim()) addCmdRule()
+          }}
+        />
+        <select value={cmdKind} onChange={(e) => setCmdKind(e.target.value as 'prefix' | 'regex')}>
+          <option value="prefix">前缀</option>
+          <option value="regex">正则</option>
+        </select>
+        <select value={cmdTier} onChange={(e) => setCmdTier(e.target.value as 'allow' | 'ask' | 'deny')}>
+          <option value="allow">允许</option>
+          <option value="ask">询问</option>
+          <option value="deny">拒绝</option>
+        </select>
+        <button className="btn" disabled={!cmdPattern.trim()} onClick={addCmdRule}>
+          ＋ 添加（默认{cmdTier === 'allow' ? '允许' : cmdTier === 'ask' ? '询问' : '拒绝'}）
+        </button>
+      </div>
+      <p className="dim">
+        首条命中；未命中命令保持现行授权编排（M3 门零变化）。命令按 &amp;&amp; / || / ; / | 切段逐段对质（复合命令不构成绕过）；win32
+        匹配不分大小写。询问 = 弹人工确认卡（「本次会话内始终允许」按规则记忆，不放大到全部命令）；拒绝 = 硬拒落审计链。判决 100% 落审计链。
+      </p>
+      <div className="rules">
+        {cmdRules.length === 0 && <p className="dim">无命令规则。</p>}
+        {cmdRules.map((r, i) => (
+          <div key={r.id} className="rule-row">
+            <span className="idx">{i === 0 ? '最先匹配' : '#' + (i + 1)}</span>
+            {r.preset && <span className="tag ok">预设</span>}
+            <code className="path">
+              {r.pattern}
+              {r.note ? ` · ${r.note}` : ''}
+            </code>
+            <span className="tier">
+              <select value={r.kind} onChange={(e) => { setCmdRules((prev) => prev.map((x, xi) => (xi === i ? { ...x, kind: e.target.value as 'prefix' | 'regex' } : x))); setCmdDirty(true) }}>
+                <option value="prefix">前缀</option>
+                <option value="regex">正则</option>
+              </select>
+            </span>
+            <span className="tier">
+              <select value={r.tier} onChange={(e) => { setCmdRules((prev) => prev.map((x, xi) => (xi === i ? { ...x, tier: e.target.value as 'allow' | 'ask' | 'deny' } : x))); setCmdDirty(true) }}>
+                <option value="allow">允许</option>
+                <option value="ask">询问</option>
+                <option value="deny">拒绝</option>
+              </select>
+            </span>
+            <span className="ops">
+              <button className="mini" disabled={i === 0} onClick={() => moveCmd(i, -1)}>▲</button>
+              <button className="mini" disabled={i === cmdRules.length - 1} onClick={() => moveCmd(i, 1)}>▼</button>
+              <button className="mini danger" onClick={() => removeCmd(i)}>✕</button>
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="row">
+        <button className="btn primary" disabled={!cmdDirty} onClick={() => void saveCmdRules()}>
+          {cmdDirty ? '● 保存命令规则' : '保存命令规则'}
+        </button>
+        <button className="btn" onClick={() => void resetCmdRules()}>
+          ↺ 重置命令规则
+        </button>
+      </div>
+
       <h3>自动备份</h3>
       {settings && (
         <div className="row wrap">

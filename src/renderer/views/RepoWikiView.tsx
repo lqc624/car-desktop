@@ -25,6 +25,8 @@ export function RepoWikiView({
   openId,
   onStatus,
   onFail,
+  wikiActiveRefs,
+  onWikiRefToggle,
 }: {
   workspaces: WorkspaceInfo[]
   selected: WorkspaceInfo | null
@@ -32,11 +34,17 @@ export function RepoWikiView({
   openId: string | null
   onStatus: (s: string) => void
   onFail: (e: unknown) => void
+  /** RW-2：当前会话活跃页面引用集（refId = wiki:<pageId>——App 链序镜像） */
+  wikiActiveRefs: string[]
+  /** RW-2：页面引用切换（选中即落链 add / 撤销落 remove 补偿） */
+  onWikiRefToggle: (pageId: string) => void
 }) {
   const [manifests, setManifests] = useState<Record<string, RepoWikiManifestDTO>>({})
   const [progress, setProgress] = useState<Record<string, RepoWikiPush>>({})
   const [activePage, setActivePage] = useState<string | null>(null)
   const [busyWs, setBusyWs] = useState<string | null>(null)
+  // RW-2（v0.19 C1）：知识回流开关（per-workspace——缺省关 deny-by-default；null = 未加载）
+  const [backflowOn, setBackflowOn] = useState<boolean | null>(null)
 
   const loadManifest = async (wid: string): Promise<void> => {
     try {
@@ -47,6 +55,41 @@ export function RepoWikiView({
         else delete next[wid]
         return next
       })
+    } catch (e) {
+      onFail(e)
+    }
+  }
+
+  // RW-2：回流开关随选中工作区加载（per-workspace store——缺省关）
+  useEffect(() => {
+    if (!selected) {
+      setBackflowOn(null)
+      return
+    }
+    let cancelled = false
+    void window.car
+      .repoWikiSettingsGet(selected.id)
+      .then((st) => {
+        if (!cancelled) setBackflowOn(st.backflowEnabled)
+      })
+      .catch(() => {
+        if (!cancelled) setBackflowOn(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selected])
+
+  const toggleBackflow = async (on: boolean): Promise<void> => {
+    if (!selected) return
+    try {
+      const st = await window.car.repoWikiSettingsSet(selected.id, on)
+      setBackflowOn(st.backflowEnabled)
+      onStatus(
+        on
+          ? `知识回流已开启（${selected.name}）——00 总览页随会话固定注入（repo-wiki 注入行落链可查；改设置已开会话下一 turn 生效）`
+          : '知识回流已关闭——下一 turn 起零新增注入（已注入行 append-only 留痕，压缩折叠后自然出上下文）',
+      )
     } catch (e) {
       onFail(e)
     }
@@ -146,6 +189,18 @@ export function RepoWikiView({
               <span className="dim">未生成——生成全程本地，零上传</span>
             )}
           </div>
+          {/* RW-2（v0.19 C1）：知识回流引用开关（显式开关缺省关——D-46 修订版口径：固定摘要 + 显式引用 + 落链，非召回式） */}
+          <div className="row wrap" style={{ marginTop: 4 }}>
+            <label className="inline">
+              <input
+                type="checkbox"
+                checked={backflowOn === true}
+                disabled={backflowOn === null}
+                onChange={(e) => void toggleBackflow(e.target.checked)}
+              />
+              知识回流引用开关（RW-2 · 缺省关）——开启后 00 总览页固定注入本工作区会话（每轮落链可查；页缺失零注入）
+            </label>
+          </div>
           {/* C1（RW-5 · Q-R1）：滞后检测提醒（读取时确定性对比——零 LLM 零副作用；重生成后自动消隐） */}
           {selManifest?.stale && selManifest.stale.files.length > 0 && (
             <div className="rw-stale">
@@ -209,10 +264,26 @@ export function RepoWikiView({
         <div className="rw-body">
           <div className="rw-tree">
             {pages.map((p) => (
-              <button key={p.id} className={`rw-page${activePage === p.id ? ' sel' : ''}`} onClick={() => setActivePage(p.id)}>
-                <code className="mono">{p.id}</code> {p.title}
-                <small className="dim2"> {p.chars} 字符</small>
-              </button>
+              <div key={p.id} style={{ display: 'flex', alignItems: 'stretch', gap: 4 }}>
+                <button
+                  className={`rw-page${activePage === p.id ? ' sel' : ''}`}
+                  style={{ flex: 1 }}
+                  onClick={() => setActivePage(p.id)}
+                >
+                  <code className="mono">{p.id}</code> {p.title}
+                  <small className="dim2"> {p.chars} 字符</small>
+                </button>
+                {/* RW-2：页面显式引用钮（选中即落链；@引用 = 用户显式动作，零自动召回） */}
+                <button
+                  className="mini"
+                  style={{ alignSelf: 'center', whiteSpace: 'nowrap' }}
+                  disabled={!openId}
+                  title={wikiActiveRefs.includes(`wiki:${p.id}`) ? '撤销页面引用（remove 补偿事件落链）' : '引用本页到当前会话（显式引用——选中即落链，下一 turn 注入）'}
+                  onClick={() => onWikiRefToggle(p.id)}
+                >
+                  {wikiActiveRefs.includes(`wiki:${p.id}`) ? '✓ 已引用' : '@引用'}
+                </button>
+              </div>
             ))}
           </div>
           <div className="rw-content">
@@ -297,7 +368,8 @@ export function RepoWikiView({
       </table>
 
       <p className="dim rw-foot">
-        AI 取用：RepoWiki 面向人（与 CLAUDE.md/AGENTS.md 面向模型互补）· 更新策略 = 手动重新生成 ·
+        AI 取用：RepoWiki 面向人（与 CLAUDE.md/AGENTS.md 面向模型互补）；可选知识回流 = 显式开关缺省关（00
+        总览页固定摘要注入）+ @页面显式引用——两者皆落链可查、零自动召回（RW-2 · D-46 修订版口径）· 更新策略 = 手动重新生成 ·
         页面正文经 DOMPurify 消毒渲染 · 语料与产出全程不出本机。
       </p>
     </section>

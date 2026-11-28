@@ -41,10 +41,13 @@ const bridge: CarBridge = {
   renameSession: (workspaceId, sessionId, title) =>
     ipcRenderer.invoke(IpcChannel.SessionRename, { workspaceId, sessionId, title }),
   deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke(IpcChannel.SessionDelete, { workspaceId, sessionId }),
-  // —— S3：文件安全 / 安全中心设置 / 会话策略 / 备份 / 审计 / 计量 ——
+  // —— S3：文件安全 / WB-5 命令安全 / 安全中心设置 / 会话策略 / 备份 / 审计 / 计量 ——
   fileSecurityGet: () => ipcRenderer.invoke(IpcChannel.FileSecurityGet),
   fileSecuritySet: (payload) => ipcRenderer.invoke(IpcChannel.FileSecuritySet, payload),
   fileSecurityReset: () => ipcRenderer.invoke(IpcChannel.FileSecurityReset),
+  commandSecurityGet: () => ipcRenderer.invoke(IpcChannel.CommandSecurityGet),
+  commandSecuritySet: (payload) => ipcRenderer.invoke(IpcChannel.CommandSecuritySet, payload),
+  commandSecurityReset: () => ipcRenderer.invoke(IpcChannel.CommandSecurityReset),
   securitySettingsGet: () => ipcRenderer.invoke(IpcChannel.SecuritySettingsGet),
   securitySettingsSet: (patch) => ipcRenderer.invoke(IpcChannel.SecuritySettingsSet, { patch }),
   setSessionPolicy: (workspaceId, sessionId, policy) =>
@@ -89,6 +92,11 @@ const bridge: CarBridge = {
   capabilityEdit: (workspaceId, sessionId, id, patch) => ipcRenderer.invoke(IpcChannel.CapabilityEdit, { workspaceId, sessionId, id, patch }),
   capabilityDelete: (workspaceId, sessionId, id) => ipcRenderer.invoke(IpcChannel.CapabilityDelete, { workspaceId, sessionId, id }),
   capabilityRefAdd: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefAdd, { workspaceId, sessionId, refId }),
+  // RW-2（v0.19 C1）：RepoWiki 知识回流开关 + @页面引用
+  repoWikiSettingsGet: (workspaceId) => ipcRenderer.invoke(IpcChannel.RepoWikiSettingsGet, { workspaceId }),
+  repoWikiSettingsSet: (workspaceId, backflowEnabled) => ipcRenderer.invoke(IpcChannel.RepoWikiSettingsSet, { workspaceId, backflowEnabled }),
+  wikiPageRefAdd: (workspaceId, sessionId, pageId) => ipcRenderer.invoke(IpcChannel.WikiPageRefAdd, { workspaceId, sessionId, pageId }),
+  wikiPageRefRemove: (workspaceId, sessionId, pageId) => ipcRenderer.invoke(IpcChannel.WikiPageRefRemove, { workspaceId, sessionId, pageId }),
   capabilityRefRemove: (workspaceId, sessionId, refId) => ipcRenderer.invoke(IpcChannel.CapabilityRefRemove, { workspaceId, sessionId, refId }),
   // —— SKILL.md 导入互认（pick = main 侧 dialog；import = 宿主解析写盘落链） ——
   capabilityImportPick: () => ipcRenderer.invoke(IpcChannel.CapabilityImportPick),

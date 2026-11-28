@@ -6,7 +6,7 @@
  * sessionId）+ 会话索引面（标题/删除态权威源）。
  * dispatch 通道校验 = 契约白名单 + 载荷形状逐通道 fail-visible。
  */
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { forkInSession, loadSessionLog, MemoryStore, pendingSteerTurns, SessionLog } from '@lqc123qwe/car-runtime'
@@ -78,10 +78,14 @@ import { createChatModelFn, loadHostRuntime, type HostRuntime } from './model.ts
 import { builtinTools, fsReadTool } from './tools.ts'
 import { createFileSecurityEngine, type FileSecurityEngine } from './fileSecurity.ts'
 import { createFileSecurityStore } from './fileSecurityStore.ts'
+import { createCommandSecurityEngine, type CommandSecurityEngine } from './commandSecurity.ts'
+import { createCommandSecurityStore } from './commandSecurityStore.ts'
 import { createSecuritySettingsStore, type SessionPolicy } from './securitySettingsStore.ts'
 import { createPersonalizationStore } from './personalizationStore.ts'
 import { createUserProfileStore } from './userProfileStore.ts'
 import { buildDisciplineText } from '../shared/userProfile.ts'
+import { buildOverviewInjectionText, type RepoWikiBackflowState } from '../shared/repoWikiBackflow.ts'
+import { createRepoWikiSettingsStore, type RepoWikiSettingsStore } from './repoWikiSettingsStore.ts'
 import { createBackupStore } from './backupStore.ts'
 import type { HostModelFn, HostToolDef } from './types.ts'
 
@@ -129,6 +133,9 @@ export function createHostService(opts: HostServiceOptions): HostService {
   // 文件安全（S3-S2）：应用级单例——store（userData/file-security.json 持久化）+ 引擎（规则面判定）
   const fileSecurityStore = createFileSecurityStore(opts.userDataDir)
   const fileSecurity: FileSecurityEngine = createFileSecurityEngine(fileSecurityStore)
+  // 命令安全（WB-5 v0.19 C2）：应用级单例——store（userData/command-security.json 分置）+ 引擎（bash_run 命令内容面）
+  const commandSecurityStore = createCommandSecurityStore(opts.userDataDir)
+  const commandSecurity: CommandSecurityEngine = createCommandSecurityEngine(commandSecurityStore)
   // 安全中心设置 + 自动备份（S3-S3）：默认策略 / 备份开关与配额（backup 配置闭包即时读设置）
   const securitySettings = createSecuritySettingsStore(opts.userDataDir)
   // T-MP：个性化设置（端侧偏好——不进审计链；会话创建时快照注入）
@@ -584,6 +591,62 @@ export function createHostService(opts: HostServiceOptions): HostService {
     return join(opts.userDataDir, 'repo-wiki', workspaceId)
   }
 
+  // ── RW-2（v0.19 C1）：知识回流开关 store（per-workspace 懒创建）+ 注入态/页面读取 provider ──
+
+  const repoWikiSettingsStores = new Map<string, RepoWikiSettingsStore>()
+
+  function repoWikiSettingsStoreOf(workspaceId: string): RepoWikiSettingsStore {
+    let s = repoWikiSettingsStores.get(workspaceId)
+    if (!s) {
+      s = createRepoWikiSettingsStore(repoWikiDir(workspaceId))
+      repoWikiSettingsStores.set(workspaceId, s)
+    }
+    return s
+  }
+
+  /** 总览注入态（provider——session-handle sendTurn 每轮对账消费）：开关关 / 页缺失 = null 零注入 */
+  function repoWikiBackflowStateOf(workspaceId: string): RepoWikiBackflowState | null {
+    if (!repoWikiSettingsStoreOf(workspaceId).get().backflowEnabled) return null
+    const overview = join(repoWikiDir(workspaceId), 'pages', '00.md')
+    if (!existsSync(overview)) return null
+    let md = ''
+    try {
+      md = readFileSync(overview, 'utf8')
+    } catch {
+      return null // 读失败 = 零注入（fail-visible 于生成面；注入面禁半截态）
+    }
+    if (!md.trim()) return null
+    const built = buildOverviewInjectionText(md)
+    const text = built.text
+    return {
+      wsId: workspaceId,
+      pageId: '00',
+      text,
+      pageSha256: createHash('sha256').update(text, 'utf8').digest('hex'),
+      bytes: Buffer.byteLength(text, 'utf8'),
+      truncated: built.truncated,
+    }
+  }
+
+  /** 页面读取面（@页面引用 add 校验 + 每轮 inject 装配数据源）：页缺失/非法 id = null */
+  function loadWikiPageOf(workspaceId: string): (pageId: string) => { pageId: string; title: string; md: string } | null {
+    return (pageId) => {
+      if (!/^\d{2}$/.test(pageId)) return null
+      const manifest = repoWikiGetRaw(workspaceId)
+      const meta = manifest?.pages.find((pg) => pg.id === pageId)
+      if (!meta) return null
+      const file = join(repoWikiDir(workspaceId), 'pages', `${pageId}.md`)
+      if (!existsSync(file)) return null
+      let md = ''
+      try {
+        md = readFileSync(file, 'utf8')
+      } catch {
+        return null
+      }
+      return { pageId, title: meta.title || `RepoWiki 页面 ${pageId}`, md }
+    }
+  }
+
   /** C2：manifest 原始读取（无 stale 计算、无 md 随取——导出面复用） */
   function repoWikiGetRaw(workspaceId: string): RepoWikiManifestDTO | null {
     const file = join(repoWikiDir(workspaceId), 'manifest.json')
@@ -835,6 +898,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
           authzWaiters.set(requestId, resolve)
         }),
       fileSecurity,
+      // WB-5（v0.19 C2）：命令安全引擎（bash_run 命令内容面——authorize ⓪⁴）
+      commandSecurity,
       securitySettings: () => securitySettings.get(),
       backup,
       contextWindow,
@@ -850,6 +915,10 @@ export function createHostService(opts: HostServiceOptions): HostService {
       personalization: () => personalizationStore.state(),
       // WB-2：用户级画像面（创建时快照——store.state 闭包即时读；显式开关出厂关）
       userProfile: () => userProfileStore.state(),
+      // RW-2（v0.19 C1）：RepoWiki 知识回流面（开关缺省关 = null 零注入；开启 = 00 总览页定长注入态）
+      repoWikiBackflow: () => repoWikiBackflowStateOf(workspaceId),
+      // RW-2：RepoWiki 页面读取面（@页面引用 add 校验 + 每轮 inject 装配数据源）
+      loadWikiPage: loadWikiPageOf(workspaceId),
     }
   }
 
@@ -1033,6 +1102,8 @@ export function createHostService(opts: HostServiceOptions): HostService {
         workspaceRoot: root,
         // C7（AD-2）：自然退出接回回调（stopped 不触发——见 bashTasks.ts 收口注记）
         onTaskComplete: (t) => queueBashWakeup(handle, t),
+        // WB-5（v0.19 C2）：执行侧 deny re-check 纵深兜底（authorize ⓪⁴ 门拦为主层）
+        commandSecurity,
       }),
     )
   }
@@ -1657,6 +1728,23 @@ export function createHostService(opts: HostServiceOptions): HostService {
         handle.capabilityRefRemove(requireString(p.refId, 'refId'))
         return { ok: true }
       }
+      // ── RW-2（v0.19 C1）：RepoWiki 知识回流开关 + @页面引用 ——
+      case IpcChannel.RepoWikiSettingsGet: {
+        const wid = requireString(p.workspaceId, 'workspaceId')
+        return { workspaceId: wid, ...repoWikiSettingsStoreOf(wid).get() }
+      }
+      case IpcChannel.RepoWikiSettingsSet:
+        return repoWikiSettingsStoreOf(requireString(p.workspaceId, 'workspaceId')).set({ backflowEnabled: p['backflowEnabled'] === true })
+      case IpcChannel.WikiPageRefAdd: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        handle.wikiPageRefAdd(requireString(p.pageId, 'pageId'))
+        return { ok: true }
+      }
+      case IpcChannel.WikiPageRefRemove: {
+        const handle = requireAliveHandle(requireString(p.workspaceId, 'workspaceId'), requireString(p.sessionId, 'sessionId'))
+        handle.wikiPageRefRemove(requireString(p.pageId, 'pageId'))
+        return { ok: true }
+      }
       // ── SKILL.md 导入互认（pick = main 侧 dialog 误入守卫；import = 逐文件解析→写盘→叙事） ──
       case IpcChannel.CapabilityImportPick:
         throw new Error('CAR-E-DESKTOP: capability:import-pick 由 main 侧处理（契约通道误入宿主 dispatch）')
@@ -1762,6 +1850,14 @@ export function createHostService(opts: HostServiceOptions): HostService {
         return fileSecurityStore.set(p)
       case IpcChannel.FileSecurityReset:
         return fileSecurityStore.reset()
+      // —— WB-5（v0.19 C2）：命令安全规则面 ——
+      case IpcChannel.CommandSecurityGet:
+        return commandSecurityStore.get()
+      case IpcChannel.CommandSecuritySet:
+        // 全量透传（rules 数组/对象两形态由 store 兼容；校验 fail-visible）
+        return commandSecurityStore.set(p)
+      case IpcChannel.CommandSecurityReset:
+        return commandSecurityStore.reset()
       // —— S3-S3：安全中心设置 + 会话策略 ——
       case IpcChannel.SecuritySettingsGet:
         return securitySettings.get()
