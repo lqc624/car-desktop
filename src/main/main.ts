@@ -292,6 +292,10 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.FileSecurityGet, () => callHost(IpcChannel.FileSecurityGet))
   ipcMain.handle(IpcChannel.FileSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.FileSecuritySet, payload))
   ipcMain.handle(IpcChannel.FileSecurityReset, () => callHost(IpcChannel.FileSecurityReset))
+  // —— WB-5（v0.19 C2）：命令安全规则面 ——
+  ipcMain.handle(IpcChannel.CommandSecurityGet, () => callHost(IpcChannel.CommandSecurityGet))
+  ipcMain.handle(IpcChannel.CommandSecuritySet, (_event, payload: unknown) => callHost(IpcChannel.CommandSecuritySet, payload))
+  ipcMain.handle(IpcChannel.CommandSecurityReset, () => callHost(IpcChannel.CommandSecurityReset))
   ipcMain.handle(IpcChannel.SecuritySettingsGet, () => callHost(IpcChannel.SecuritySettingsGet))
   ipcMain.handle(IpcChannel.SecuritySettingsSet, (_event, payload: unknown) => callHost(IpcChannel.SecuritySettingsSet, payload))
   ipcMain.handle(IpcChannel.SessionSetPolicy, (_event, payload: unknown) => callHost(IpcChannel.SessionSetPolicy, payload))
@@ -344,6 +348,12 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.RepoWikiGet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGet, payload))
   ipcMain.handle(IpcChannel.RepoWikiGenerate, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiGenerate, payload))
   ipcMain.handle(IpcChannel.RepoWikiStop, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiStop, payload))
+  // —— RW-2（v0.19 C1）：知识回流开关 + @页面引用（F-P1：v0.19.0 漏注册补——preload 桥/宿主
+  //    dispatch 双在而 main handle 层缺位，渲染层三新 UI 面全死；防回归门 = zb19-gates 配对扫描） ——
+  ipcMain.handle(IpcChannel.RepoWikiSettingsGet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiSettingsGet, payload))
+  ipcMain.handle(IpcChannel.RepoWikiSettingsSet, (_event, payload: unknown) => callHost(IpcChannel.RepoWikiSettingsSet, payload))
+  ipcMain.handle(IpcChannel.WikiPageRefAdd, (_event, payload: unknown) => callHost(IpcChannel.WikiPageRefAdd, payload))
+  ipcMain.handle(IpcChannel.WikiPageRefRemove, (_event, payload: unknown) => callHost(IpcChannel.WikiPageRefRemove, payload))
   // —— C2（RW-4）：导出（main 侧目录对话框注入 dir → 宿主白名单写盘；渲染层载荷不含 dir——防任意目录写） ——
   ipcMain.handle(IpcChannel.RepoWikiExport, async (_event, payload: unknown) => {
     const p = (payload ?? {}) as { workspaceId?: unknown; sessionId?: unknown }
